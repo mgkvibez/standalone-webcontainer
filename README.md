@@ -1,35 +1,55 @@
 # standalone-webcontainer
 
-A production-grade, standalone webcontainer: a browser-native Node.js runtime with its own
-virtual file system, service worker network proxy, and terminal bridge. Built from scratch,
-MIT-licensed, fully owned. Not a wrapper around any third-party proprietary runtime.
+**A standalone, browser-native Node.js runtime:** an in-memory POSIX-compliant
+virtual file system, a service-worker network proxy, and JavaScript-shimmed
+Node.js APIs executing on the browser's native V8 — built from scratch,
+MIT-licensed, and fully owned. It is not a wrapper around StackBlitz's
+WebContainers API, Nodebox, or any other third-party proprietary runtime.
 
-## Status
+## Status: NOTHING is implemented yet
 
-Pre-scaffold. The architecture is decided (see the charter below and
-[ADR-0001](docs/decisions/ADR-0001-runtime-architecture.md)). Implementation of the VFS,
-runtime, and service worker starts only after expert review of this scaffold.
+This repository is a pre-implementation scaffold. No product code exists.
+The charter's architecture is ratified (see
+[ADR-0001](docs/decisions/ADR-0001.md)); every remaining design decision is
+explicitly reserved for the human expert and listed there as OPEN.
 
-## Layout
+| Lane | Status |
+|---|---|
+| VFS (in-memory POSIX) | Scaffold — Not started |
+| Node.js shims (fs, path, crypto, ...) | Scaffold — Not started |
+| Runtime (unified interface, hybrid lanes) | Scaffold — Not started |
+| Network (service-worker proxy) | Scaffold — Not started |
+| Terminal (xterm.js + PTY bridge) | Scaffold — Not started |
+| Persistence (session continuity) | Not started — mechanism UNDECIDED |
+| npm install flow | Not started |
+| Hybrid routing (browser vs server sandbox) | Not started |
 
-- `src/vfs/` — in-memory POSIX VFS with IndexedDB persistence (Week 1)
-- `src/shims/` — JS-shimmed Node.js APIs on native V8 (Week 2)
-- `src/runtime/` — unified `Runtime` interface: browser lane + server-sandbox fallback
-- `src/network/` — service worker network proxy (Week 3)
-- `src/terminal/` — xterm.js PTY bridge (Week 2)
-- `tests/` — vitest unit + playwright browser tests; fresh temp dirs, hard timeouts
-- `fixtures/` — compatibility harness fixtures
-- `docs/decisions/` — ADRs
-
-## Development
+## Local commands
 
 ```
-npm install        # dev deps only: typescript, vitest, @playwright/test
-npm run typecheck
-npm test
+npm install        # dev tooling only (typescript, vitest, @playwright/test, @types/node)
+npm run typecheck  # tsc --noEmit under strict tsconfig
+npm test           # vitest run (toolchain smoke test only, for now)
 ```
 
-The charter below is the law for this project. Every commit references it.
+## Reviewers start here
+
+1. [docs/decisions/ADR-0001.md](docs/decisions/ADR-0001.md) — the ratified
+   architecture baseline and the OPEN questions that need expert decisions
+   before any implementation begins.
+2. [docs/decisions/ADR-0000-template.md](docs/decisions/ADR-0000-template.md)
+   — the record format for those decisions.
+3. The project charter, embedded verbatim below — it is the law for this
+   repository.
+
+## Licensing
+
+- **Allowlist:** every dependency must be MIT, Apache-2.0, BSD, or ISC.
+- **Explicitly excluded:** `@webcontainer/api` and the StackBlitz WebContainers
+  runtime, Nodebox, and anything under the Commons Clause, Sustainable Use
+  License, Business Source License, or any non-compete clause.
+- This repository itself is MIT (see [LICENSE](LICENSE)).
+- The lockfile is committed and part of the license audit surface.
 
 ---
 
