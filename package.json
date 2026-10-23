@@ -1,0 +1,22 @@
+{
+  "name": "standalone-webcontainer",
+  "version": "0.0.1",
+  "description": "A standalone, browser-native Node.js runtime: in-memory POSIX VFS, service-worker network proxy, and JS-shimmed Node APIs running on the browser's V8. Built from scratch, MIT-licensed.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:browser": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
