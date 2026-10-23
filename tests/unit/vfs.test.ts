@@ -93,6 +93,17 @@ describe("writeFile / readFile round-trip", () => {
     expect((await fs.stat("/f.txt")).size).toBe("second".length);
   });
 
+  it("throws EISDIR when overwriting a derived directory, preserving children (PR #2 critical fix)", async () => {
+    const fs = new FileSystem();
+    await fs.writeFile("/d/f.txt", "child");
+    await expect(fs.writeFile("/d", "intruder")).rejects.toThrow(VFSIsADirectoryError);
+    // No corruption: children intact, directory still stats as a dir.
+    await expect(fs.readFile("/d/f.txt", "utf8")).resolves.toBe("child");
+    expect((await fs.stat("/d")).kind).toBe("dir");
+    // The root is covered by the same guard.
+    await expect(fs.writeFile("/", "x")).rejects.toThrow(VFSIsADirectoryError);
+  });
+
   it("rejects non-file non-Uint8Array data", async () => {
     const fs = new FileSystem();
     await expect(

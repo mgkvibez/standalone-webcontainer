@@ -110,17 +110,22 @@ export class FileSystem {
   async writeFile(path: string, data: string | Uint8Array): Promise<void> {
     await Promise.resolve(); // async-first contract (ADR-0002 #2)
     const p = normalizeVfsPath(path);
+    // CRITICAL integrity guard (expert review of PR #2): derived directories
+    // have NO Map entry, so the old `existing?.kind === "dir"` check missed
+    // them — writing a file onto one would orphan its children and corrupt
+    // stat/readdir. `#existsAsDir` covers the root, explicit entries, and
+    // derived entries in one check, so the two previous narrower branches
+    // (p === "/", explicit dir node) are removed rather than left as dead,
+    // untestable code paths. O(n) prefix scan is inherent to the flat-map
+    // model (ADR-0002 #1); optimizing it is the expert's call, not made here.
+    if (this.#existsAsDir(p)) {
+      throw new VFSIsADirectoryError(p);
+    }
     if (typeof data !== "string" && !(data instanceof Uint8Array)) {
       throw new TypeError(`writeFile: data must be a string or Uint8Array, got ${typeof data}`);
     }
-    if (p === "/") {
-      throw new VFSIsADirectoryError(p);
-    }
     this.#assertNoFileAncestors(p);
     const existing = this.#nodes.get(p);
-    if (existing?.kind === "dir") {
-      throw new VFSIsADirectoryError(p);
-    }
     // Strings are encoded once, up front, so the size cap is checked against
     // real UTF-8 byte length, not character count.
     const bytes = typeof data === "string" ? encoder.encode(data) : data;
