@@ -1,0 +1,24 @@
+# WHY CI: merge condition set by the expert — mechanically enforce the
+# toolchain (typecheck + tests) on every push and PR to main so the
+# charter's quality rules do not depend on human discipline alone.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  toolchain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install and typecheck
+        run: npm ci && npx tsc --noEmit
+      - name: Test
+        run: npm test
