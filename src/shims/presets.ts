@@ -1,4 +1,15 @@
 /**
+ * CRYPTO PRESET DEFERRAL (ADR-0003 Decision 1, amended Oct 26): this module
+ * initializes exactly the five approved presets — path, process, buffer,
+ * events, timers. unenv's crypto preset is explicitly DEFERRED to a future
+ * phase and is not initialized here, per the expert's ruling. Rationale: the
+ * crypto surface needs its own security review (charter decision #8:
+ * deny-by-default) before any API beyond what our Node-API plan actually
+ * requires is mapped onto WebCrypto — randomUUID-style conveniences and a
+ * full crypto stream surface have very different risk profiles, and that
+ * scoping decision belongs to the expert, not the implementer.
+ */
+/**
  * unenv v1-stable preset integration (ADR-0003, Decision 1).
  *
  * Imports the five expert-approved preset implementations — path,

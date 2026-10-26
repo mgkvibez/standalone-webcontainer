@@ -292,4 +292,51 @@ describe("fs shim sync contract (ESYNCNOTSUPPORTED, expert phased ruling)", () =
       { code: "ESYNCNOTSUPPORTED" },
     );
   });
+
+  it("async fs ops run through the Typed Envelope and match direct VFS results", async () => {
+    const fs = createFsShim(new FileSystem());
+    const kernel = new SyscallKernel();
+    kernel.register("fs.writeFile", (...a: unknown[]) =>
+      fs.writeFile(a[0] as string, a[1] as string),
+    );
+    kernel.register("fs.readFile", (...a: unknown[]) =>
+      fs.readFile(a[0] as string, "utf8"),
+    );
+    kernel.register("fs.stat", (...a: unknown[]) =>
+      fs.stat(a[0] as string).then((st) => ({
+        isFile: st.isFile(),
+        isDirectory: st.isDirectory(),
+        size: st.size,
+      })),
+    );
+    const client = new SyscallClient((request) => {
+      void kernel.handle(request).then((response) =>
+        client.handleResponse(response),
+      );
+    });
+    await client.call("fs.writeFile", "/env.txt", "via-envelope");
+    expect(await client.call("fs.readFile", "/env.txt")).toBe("via-envelope");
+    const st = (await client.call("fs.stat", "/env.txt")) as {
+      isFile: boolean;
+      size: number;
+    };
+    expect(st.isFile).toBe(true);
+    expect(st.size).toBe(12);
+  });
+
+  it("async fs errors cross the envelope rehydrated with POSIX codes", async () => {
+    const fs = createFsShim(new FileSystem());
+    const kernel = new SyscallKernel();
+    kernel.register("fs.readFile", (...a: unknown[]) =>
+      fs.readFile(a[0] as string, "utf8"),
+    );
+    const client = new SyscallClient((request) => {
+      void kernel.handle(request).then((response) =>
+        client.handleResponse(response),
+      );
+    });
+    await expect(client.call("fs.readFile", "/missing.txt")).rejects.toMatchObject(
+      { code: "ENOENT" },
+    );
+  });
 });
