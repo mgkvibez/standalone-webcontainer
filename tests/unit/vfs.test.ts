@@ -104,6 +104,17 @@ describe("writeFile / readFile round-trip", () => {
     await expect(fs.writeFile("/", "x")).rejects.toThrow(VFSIsADirectoryError);
   });
 
+  it("expert case: writeFile /a/b.txt then /a hijack throws EISDIR, /a stays a dir, child intact", async () => {
+    const fs = new FileSystem();
+    await fs.writeFile("/a/b.txt", "child"); // makes /a a derived directory
+    await expect(fs.writeFile("/a", "hijack")).rejects.toThrow(VFSIsADirectoryError);
+    // stat still reports a directory (kind: "dir"; a Node-style
+    // isDirectory() method surface is a shim-layer question, not decided here).
+    expect((await fs.stat("/a")).kind).toBe("dir");
+    // The child was not orphaned.
+    await expect(fs.readFile("/a/b.txt", "utf8")).resolves.toBe("child");
+  });
+
   it("rejects non-file non-Uint8Array data", async () => {
     const fs = new FileSystem();
     await expect(
@@ -404,3 +415,59 @@ describe("concurrency (worker-safe async-first surface)", () => {
     expect(await fs.readdir("/mix").then((n) => n.length)).toBe(10);
   });
 });
+
+describe("rmdir", () => {
+  it("removes an empty explicit directory", async () => {
+    const fs = new FileSystem();
+    await fs.mkdir("/a/b", { recursive: true });
+    await fs.rmdir("/a/b");
+    await expect(fs.stat("/a/b")).rejects.toThrow(VFSNotFoundError);
+    await expect(fs.readdir("/a")).resolves.toEqual([]);
+  });
+
+  it("throws ENOTEMPTY for an explicit directory with children", async () => {
+    const fs = new FileSystem();
+    await fs.mkdir("/a/b", { recursive: true });
+    await fs.writeFile("/a/b/c.txt", "x");
+    await expect(fs.rmdir("/a/b")).rejects.toThrow(VFSNotEmptyError);
+    // Refusal must not damage anything.
+    await expect(fs.readFile("/a/b/c.txt", "utf8")).resolves.toBe("x");
+  });
+
+  it("throws ENOTEMPTY for derived directories", async () => {
+    const fs = new FileSystem();
+    await fs.writeFile("/a/b/c.txt", "x");
+    await expect(fs.rmdir("/a/b")).rejects.toThrow(VFSNotEmptyError);
+    await expect(fs.rmdir("/a")).rejects.toThrow(VFSNotEmptyError);
+  });
+
+  it("throws ENOTDIR when the path is a file", async () => {
+    const fs = new FileSystem();
+    await fs.writeFile("/f.txt", "x");
+    await expect(fs.rmdir("/f.txt")).rejects.toThrow(VFSNotADirectoryError);
+  });
+
+  it("throws ENOTDIR when an ancestor is a file", async () => {
+    const fs = new FileSystem();
+    await fs.writeFile("/f.txt", "x");
+    await expect(fs.rmdir("/f.txt/sub")).rejects.toThrow(VFSNotADirectoryError);
+  });
+
+  it("throws ENOENT for a missing path", async () => {
+    const fs = new FileSystem();
+    await expect(fs.rmdir("/nope")).rejects.toThrow(VFSNotFoundError);
+  });
+
+  it("throws EINVAL for the root", async () => {
+    const fs = new FileSystem();
+    await expect(fs.rmdir("/")).rejects.toThrow(VFSInvalidPathError);
+  });
+
+  it("derived dir whose children were unlinked no longer exists (ENOENT)", async () => {
+    const fs = new FileSystem();
+    await fs.writeFile("/a/b.txt", "x");
+    await fs.unlink("/a/b.txt");
+    await expect(fs.rmdir("/a")).rejects.toThrow(VFSNotFoundError);
+  });
+});
+

@@ -290,6 +290,43 @@ export class FileSystem {
   }
 
   /**
+   * Remove the empty directory at `path` (POSIX `rmdir`).
+   *
+   * WHY in Phase 1 (expert decision, Oct 26): npm install/remove flows
+   * need directory deletion before the package layer exists. Recursive
+   * removal is deliberately deferred: POSIX `rmdir` refuses non-empty
+   * directories, and keeping that strictness now avoids guessing at
+   * subtree-copy/unmount semantics the expert has not ruled on.
+   */
+  async rmdir(path: string): Promise<void> {
+    await Promise.resolve();
+    const p = normalizeVfsPath(path);
+    if (p === "/") {
+      // The root is always in use; POSIX reports EBUSY, Node surfaces
+      // EINVAL. We report EINVAL with an explicit message.
+      throw new VFSInvalidPathError(p, "cannot remove the root directory");
+    }
+    this.#assertNoFileAncestors(p);
+    const node = this.#nodes.get(p);
+    if (node === undefined) {
+      // No entry: either a derived directory (children exist, so it is
+      // non-empty) or nothing at all.
+      if (this.#existsAsDir(p)) {
+        throw new VFSNotEmptyError(p);
+      }
+      throw new VFSNotFoundError(p);
+    }
+    if (node.kind === "file") {
+      // POSIX rmdir on a regular file is ENOTDIR.
+      throw new VFSNotADirectoryError(p);
+    }
+    if (this.#hasChildren(p)) {
+      throw new VFSNotEmptyError(p);
+    }
+    this.#nodes.delete(p);
+  }
+
+  /**
    * Rename/move `from` to `to`. POSIX semantics: overwrites an existing
    * file; refuses to move into the source's own subtree; refuses to
    * overwrite a non-empty directory. Moves whole subtrees via prefix scan
