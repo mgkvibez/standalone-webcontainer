@@ -19,7 +19,11 @@
   "devDependencies": {
     "@playwright/test": "^1.48.0",
     "@types/node": "^22.0.0",
+    "memfs": "^4.80.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
+  },
+  "dependencies": {
+    "unenv": "^1.10.0"
   }
 }
