@@ -32,7 +32,7 @@ VFS/kernel operations. This matches our ADR-0002 #1/#7 direction
    - Virtual providers (`proc`, `dev`, mounts) are never persisted —
      they are regenerable state.
    - `node_modules` is *never* persisted at any depth. Their rationale,
-     quoted as concept: a single `npm install` can add tens of
+     paraphrased as concept: a single `npm install` can add tens of
      thousands of files; serializing that tree (and re-reading it at
      boot) froze their main thread for seconds. Reinstall after reload,
      or opt into an explicit snapshot.
