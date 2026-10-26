@@ -14,7 +14,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "verify": "bash scripts/verify.sh"
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0",
