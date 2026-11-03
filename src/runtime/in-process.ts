@@ -23,6 +23,14 @@ import { PreviewGateway } from "../network/preview-gateway.js";
 import { createFsShim, type FsShim } from "../shims/fs.js";
 import { path } from "../shims/path.js";
 import { createProcessShim, createSink, ProcessExit, type ProcessShim } from "../shims/process.js";
+import {
+  installDependencies,
+  loadLockfile,
+  readPackageManifest,
+  type InstallReport,
+  type PackageManifest,
+  type RegistryClient,
+} from "../npm/install.js";
 import { FileSystem } from "../vfs/index.js";
 import { CommonJsLoader } from "./commonjs.js";
 
@@ -44,6 +52,19 @@ export interface ExecutionResult {
 
 export interface Runtime {
   run(entryPath: string, options?: RunOptions): Promise<ExecutionResult>;
+}
+
+export interface InstallIntoRuntimeOptions {
+  /** Where packuments and tarballs come from. Injected, so nothing here reaches the network on its own. */
+  readonly registry: RegistryClient;
+  /** Project root in the VFS. Defaults to `/app`, which is where `run` resolves entry paths from. */
+  readonly root?: string;
+  /** Use this manifest instead of reading `<root>/package.json`. */
+  readonly manifest?: PackageManifest;
+  readonly includeDev?: boolean;
+  /** Defaults to true, matching npm: an install updates the lockfile. */
+  readonly writeLockfile?: boolean;
+  readonly maxPackages?: number;
 }
 
 export interface InProcessRuntimeOptions {
@@ -77,6 +98,31 @@ export class InProcessRuntime implements Runtime {
   /** The port namespace in use, for callers that need to inspect bindings. */
   get ports(): PortRegistry {
     return this.#registry;
+  }
+
+  /**
+   * Install dependencies into this runtime's VFS, the way `npm install` would in `<root>`.
+   *
+   * This lives on the runtime rather than beside it for one reason: the loader resolves `require` against THIS
+   * VFS, so an install into a different one produces packages that exist and are unreachable. Owning the VFS is
+   * what makes the composition correct by construction.
+   *
+   * npm semantics are followed where they matter: an existing `package-lock.json` pins the tree and is read
+   * automatically, and the lockfile is rewritten afterwards. Reading it automatically is the difference between
+   * `npm install` and `npm install --no-package-lock`, and it is what makes a second install offline-capable.
+   */
+  async install(options: InstallIntoRuntimeOptions): Promise<InstallReport> {
+    const root = options.root ?? "/app";
+    const manifest = options.manifest ?? readPackageManifest(this.#vfs, root);
+    return installDependencies(manifest, {
+      registry: options.registry,
+      vfs: this.#vfs,
+      root,
+      lockfile: loadLockfile(this.#vfs, root),
+      ...(options.includeDev === undefined ? {} : { includeDev: options.includeDev }),
+      ...(options.writeLockfile === undefined ? {} : { writeLockfile: options.writeLockfile }),
+      ...(options.maxPackages === undefined ? {} : { maxPackages: options.maxPackages }),
+    });
   }
 
   async run(entryPath: string, options: RunOptions = {}): Promise<ExecutionResult> {

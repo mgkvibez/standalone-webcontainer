@@ -97,6 +97,17 @@ export interface InstalledPackage {
   readonly path: string;
 }
 
+/**
+ * The parts of `package.json` this installer reads. Named rather than inline so the runtime facade, the fixture
+ * runner and the tests all describe the same shape instead of three compatible-but-separate ones.
+ */
+export interface PackageManifest {
+  readonly name?: string;
+  readonly version?: string;
+  readonly dependencies?: Record<string, string>;
+  readonly devDependencies?: Record<string, string>;
+}
+
 export interface InstallReport {
   readonly packages: readonly InstalledPackage[];
   readonly warnings: readonly string[];
@@ -232,6 +243,68 @@ export function loadLockfile(vfs: LockfileReader, root: string): Lockfile | null
 }
 
 /**
+ * Read `<root>/package.json`.
+ *
+ * The two failures are kept distinct because they need different fixes: a missing manifest means "wrong directory",
+ * a malformed one means "fix the file". Collapsing them into one error is how a run reports "install failed" with no
+ * indication of which.
+ */
+export function readPackageManifest(vfs: LockfileReader, root: string): PackageManifest {
+  const path = joinPath(stripTrailingSlash(root), "package.json");
+  let contents: string | Uint8Array;
+  try {
+    contents = vfs.readFileSync(path);
+  } catch (error) {
+    if (error instanceof VFSNotFoundError) {
+      throw new InstallError("MISSING_PACKAGE_JSON", `no package.json at ${path}`);
+    }
+    throw error;
+  }
+
+  const text = typeof contents === "string" ? contents : new TextDecoder().decode(contents);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new InstallError("INVALID_PACKAGE_JSON", `${path} is not valid JSON: ${(error as Error).message}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new InstallError("INVALID_PACKAGE_JSON", `${path} must contain a JSON object`);
+  }
+
+  const record = parsed as Record<string, unknown>;
+  const manifest: {
+    name?: string;
+    version?: string;
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+  } = {};
+  if (typeof record["name"] === "string") manifest.name = record["name"];
+  if (typeof record["version"] === "string") manifest.version = record["version"];
+  const dependencies = dependencyMap(record["dependencies"], `${path}: dependencies`);
+  if (dependencies !== undefined) manifest.dependencies = dependencies;
+  const devDependencies = dependencyMap(record["devDependencies"], `${path}: devDependencies`);
+  if (devDependencies !== undefined) manifest.devDependencies = devDependencies;
+  return manifest;
+}
+
+/** A dependency map, rejecting non-string values rather than installing with `undefined` as a version. */
+function dependencyMap(value: unknown, where: string): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new InstallError("INVALID_PACKAGE_JSON", `${where} must be an object`);
+  }
+  const result: Record<string, string> = {};
+  for (const [name, spec] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof spec !== "string") {
+      throw new InstallError("INVALID_PACKAGE_JSON", `${where}.${name} must be a string, got ${typeof spec}`);
+    }
+    result[name] = spec;
+  }
+  return result;
+}
+
+/**
  * Is this package runnable in a browser?
  *
  * npm's `os` and `cpu` fields enumerate the platforms a package supports. A package that lists real operating
@@ -287,12 +360,7 @@ async function computeIntegrity(bytes: Uint8Array): Promise<string | null> {
 }
 
 export async function installDependencies(
-  manifest: {
-    readonly name?: string;
-    readonly version?: string;
-    readonly dependencies?: Record<string, string>;
-    readonly devDependencies?: Record<string, string>;
-  },
+  manifest: PackageManifest,
   options: InstallOptions,
 ): Promise<InstallReport> {
   const root = stripTrailingSlash(options.root);
