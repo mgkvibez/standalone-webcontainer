@@ -18,9 +18,9 @@ explicitly reserved for the human expert and listed there as OPEN.
 | Lane | Status |
 |---|---|
 | VFS (in-memory POSIX) | Implemented (PR #2) — `src/vfs/` |
-| Node.js shims (fs, path, crypto, ...) | Scaffold — Not started |
+| Node.js shims (fs, path, process, buffer) | Phase 1 shims implemented — `src/shims/` (crypto deferred, ADR-0003) |
 | Test harness (fixtures, timeouts, scoring) | In review — `src/harness/` |
-| Runtime (unified interface, hybrid lanes) | Scaffold — Not started |
+| Runtime (unified interface, hybrid lanes) | In-process CommonJS lane implemented — `src/runtime/` (worker lane not started) |
 | Network (service-worker proxy) | Scaffold — Not started |
 | Terminal (xterm.js + PTY bridge) | Scaffold — Not started |
 | Persistence (session continuity) | Not started — mechanism UNDECIDED |
