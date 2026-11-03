@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   installDependencies,
+  loadLockfile,
   type InstallReport,
   type RegistryClient,
 } from "../../src/npm/install.js";
@@ -395,6 +396,45 @@ describe("installing from a lockfile", () => {
       "/app/node_modules/two/node_modules/shared",
     ]);
     expect(text(second.vfs, "/app/node_modules/two/node_modules/shared/index.js")).toBe("module.exports = 'v2';");
+  });
+});
+
+describe("reading a lockfile from the project directory", () => {
+  it("returns null when the project has no lockfile", () => {
+    const { vfs, root } = bootVfs();
+    expect(loadLockfile(vfs, root)).toBeNull();
+  });
+
+  it("reads the file the installer wrote, and installs from it offline", async () => {
+    const registry = await createFakeRegistry({ packages: basicPackages });
+    const first = bootVfs();
+    await installDependencies({ dependencies: { greeter: "^1.0.0" } }, {
+      registry,
+      vfs: first.vfs,
+      root: first.root,
+    });
+
+    // This is the whole round trip: write, read back off the file system, reinstall with no resolution at all.
+    const onDisk = loadLockfile(first.vfs, first.root);
+    expect(onDisk?.packages["node_modules/greeter"]?.version).toBe("1.0.0");
+
+    const second = bootVfs();
+    second.vfs.writeFileSync("/app/package-lock.json", text(first.vfs, "/app/package-lock.json"));
+    const pinned = await installDependencies({ dependencies: { greeter: "^1.0.0" } }, {
+      registry: tarballsOnly(registry),
+      vfs: second.vfs,
+      root: second.root,
+      lockfile: loadLockfile(second.vfs, second.root),
+    });
+
+    expect(pinned.packages.map((entry) => entry.version)).toEqual(["1.0.0"]);
+  });
+
+  it("refuses to pretend a corrupt lockfile is absent", () => {
+    const { vfs, root } = bootVfs();
+    vfs.writeFileSync("/app/package-lock.json", "{ this is not json");
+    // Falling back to a registry resolve here would make a broken lockfile invisible until the versions drifted.
+    expect(() => loadLockfile(vfs, root)).toThrow(/UNPARSEABLE_LOCKFILE/);
   });
 });
 

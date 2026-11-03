@@ -113,6 +113,36 @@ describe("installDependencies", () => {
     expect(text(vfs, "/app/node_modules/b/node_modules/shared/index.js")).toBe("exports.v = 2;");
   });
 
+  it("writes a nested copy for every dependent that needs one, even at the same version", async () => {
+    // Both a and b need shared@2, and the root already holds shared@1, so neither can reach the other's copy:
+    // each needs its own. Keying "already installed" by name@version would write only the first and leave the
+    // second dependent requiring a directory that does not exist.
+    const registry = await fakeRegistry({
+      packages: {
+        a: [{ version: "1.0.0", dependencies: { shared: "^2.0.0" } }],
+        b: [{ version: "1.0.0", dependencies: { shared: "^2.0.0" } }],
+        shared: [
+          { version: "1.0.0", files: { "index.js": "exports.v = 1;" } },
+          { version: "2.0.0", files: { "index.js": "exports.v = 2;" } },
+        ],
+      },
+    });
+    const { vfs, root } = boot();
+
+    const report = await installDependencies(
+      { dependencies: { shared: "^1.0.0", a: "^1.0.0", b: "^1.0.0" } },
+      { registry, vfs, root },
+    );
+
+    const copies = report.packages.filter((entry) => entry.name === "shared").map((entry) => entry.path).sort();
+    expect(copies).toEqual([
+      "/app/node_modules/a/node_modules/shared",
+      "/app/node_modules/b/node_modules/shared",
+      "/app/node_modules/shared",
+    ]);
+    for (const path of copies) expect(exists(vfs, `${path}/index.js`)).toBe(true);
+  });
+
   it("resolves a dist-tag range such as latest", async () => {
     const registry = await fakeRegistry({
       packages: {

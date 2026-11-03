@@ -84,6 +84,32 @@ describe("installing, then requiring", () => {
     expect(result.stdout).toBe("inner-2.1.0-via-outer\n");
   });
 
+  it("gives each dependent its own nested copy when two of them need the same version", async () => {
+    // The golden case above has one dependent needed two versions. This one has two dependents needing the same
+    // version while the root holds an older one: neither nested copy can serve the other, so both must exist and
+    // both must resolve to their own.
+    const registry = await registryWith({
+      a: [{ version: "1.0.0", main: "index.js", dependencies: { shared: "^2.0.0" }, files: { "index.js": 'module.exports = "a+" + require("shared");' } }],
+      b: [{ version: "1.0.0", main: "index.js", dependencies: { shared: "^2.0.0" }, files: { "index.js": 'module.exports = "b+" + require("shared");' } }],
+      shared: [
+        { version: "1.0.0", main: "index.js", files: { "index.js": "module.exports = 'root-v1';" } },
+        { version: "2.0.0", main: "index.js", files: { "index.js": "module.exports = 'nested-v2';" } },
+      ],
+    });
+
+    const vfs = new FileSystem();
+    vfs.mkdirSync("/app", { recursive: true });
+    await installDependencies({ dependencies: { shared: "^1.0.0", a: "^1.0.0", b: "^1.0.0" } }, { registry, vfs, root: "/app" });
+    vfs.writeFileSync(
+      "/app/main.js",
+      ['console.log(require("shared"));', 'console.log(require("a"));', 'console.log(require("b"));'].join("\n"),
+    );
+
+    const result = await new InProcessRuntime(vfs).run("/app/main.js");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("root-v1\na+nested-v2\nb+nested-v2\n");
+  });
+
   it("runs each copy of a nested conflicting dependency, not the wrong one", async () => {
     const registry = await registryWith({
       wantsOne: [

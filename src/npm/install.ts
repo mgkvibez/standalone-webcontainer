@@ -21,7 +21,16 @@
  * *application*, not the package manager.
  */
 
-import { LOCKFILE_VERSION, lockfileKey, serializeLockfile, type Lockfile, type LockfilePackage } from "./lockfile.js";
+import { VFSNotFoundError } from "../vfs/errors.js";
+
+import {
+  LOCKFILE_VERSION,
+  lockfileKey,
+  parseLockfile,
+  serializeLockfile,
+  type Lockfile,
+  type LockfilePackage,
+} from "./lockfile.js";
 import { compareVersions, isRangeExpression, maxSatisfying } from "./semver-range.js";
 import { DEFAULT_TAR_LIMITS, extractTarball, stripTopLevelDirectory, type TarLimits } from "./tarball.js";
 
@@ -72,8 +81,11 @@ export interface InstallOptions {
   /**
    * A `package-lock.json` to install from. When a locked version still satisfies the manifest range it is used
    * directly: same version, same URL, same integrity, and no packument fetch at all.
+   *
+   * Nullable so `loadLockfile`'s result can be passed straight through: a project with no lockfile returns null,
+   * which means "resolve normally" rather than being an error.
    */
-  readonly lockfile?: Lockfile;
+  readonly lockfile?: Lockfile | null;
   /** Write `package-lock.json` into `root` after a successful install. Defaults to true. */
   readonly writeLockfile?: boolean;
 }
@@ -191,6 +203,34 @@ function chooseVersion(packument: Packument, range: string, name: string): Packu
   return chosen;
 }
 
+/** The only part of the VFS this module reads, kept structural so a caller can pass a reader of their own. */
+export interface LockfileReader {
+  readFileSync(path: string): string | Uint8Array;
+}
+
+/**
+ * Read the project's `package-lock.json`, or null when it has none.
+ *
+ * Absence is normal (a fresh project has no lockfile), so it is not an error. A file that exists but cannot be
+ * parsed *is* an error and is allowed to throw: silently reinstalling from the registry because the lockfile was
+ * corrupt is exactly how a deterministic build stops being deterministic.
+ *
+ * Deliberately not called automatically by `installDependencies`. Installing from a lockfile is a decision about
+ * the project's state, and D-20 keeps that decision with the caller rather than hidden in the installer.
+ */
+export function loadLockfile(vfs: LockfileReader, root: string): Lockfile | null {
+  const path = joinPath(stripTrailingSlash(root), "package-lock.json");
+  let contents: string | Uint8Array;
+  try {
+    contents = vfs.readFileSync(path);
+  } catch (error) {
+    if (error instanceof VFSNotFoundError) return null;
+    throw error;
+  }
+  const text = typeof contents === "string" ? contents : new TextDecoder().decode(contents);
+  return parseLockfile(text);
+}
+
 /**
  * Is this package runnable in a browser?
  *
@@ -238,7 +278,7 @@ export async function installDependencies(
   const maxPackages = options.maxPackages ?? 500;
   const verify = options.verifyIntegrity ?? true;
   const writeLockfile = options.writeLockfile ?? true;
-  const locked = options.lockfile;
+  const locked = options.lockfile ?? null;
 
   const warnings: string[] = [];
   const packuments = new Map<string, Packument>();
@@ -393,10 +433,15 @@ export async function installDependencies(
         throw new InstallError("TOO_MANY_PACKAGES", `exceeded ${maxPackages} packages; refusing to continue`);
       }
 
+      // Every placement gets written, and `visited` only decides whether to walk this package's own edges again.
+      // Conflating the two was a real bug: two dependents that each need their own nested copy of the same version
+      // produced one directory, and the second dependent required a path that was never created. Duplicated bytes
+      // are exactly what D-15 accepts in exchange for isolation, so duplicates must actually be written.
+      resolved.push({ placement, optional: request.optional, fromLock });
+
       const identifier = `${chosen.name}@${chosen.version}`;
       if (!visited.has(identifier)) {
         visited.add(identifier);
-        resolved.push({ placement, optional: request.optional, fromLock });
 
         const targetDir = joinPath(hostDir, chosen.name);
         // An entry with no `dependencies` means a package with none: that is npm's meaning, and it is what makes a
