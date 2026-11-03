@@ -1,11 +1,16 @@
 # WHY CI: merge condition set by the expert — mechanically enforce the
 # toolchain (typecheck + tests) on every push and PR to main so the
 # charter's quality rules do not depend on human discipline alone.
+#
+# `integration/**` is included because that is where the work being assembled actually lives until the
+# expert audits it. Without it the branch that will be reviewed had never been typechecked or tested by
+# CI at all, which is the opposite of what this workflow exists for. Feature branches stay out to keep
+# minutes down; they are covered once they land in integration or open a PR.
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "integration/**"]
   pull_request:
     branches: [main]
 
