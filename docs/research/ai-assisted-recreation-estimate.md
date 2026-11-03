@@ -8,8 +8,12 @@ ratified, and nothing here authorizes implementation.
 ## 1. Why "hours" is the wrong unit
 
 "How long would an AI pair need to rebuild WebContainers" has no answer until "done" has one.
-This repository already defines done: the pre-registered gate, twenty fixtures, at least 90% on
-the front-end-only set (1-4, 7-14, 18-20), with the boundary fixtures reported separately. An
+This repository already defines done: the pre-registered gate, at least 90% on the front-end-only
+set (1-4, 7-14, 18-20), with the boundary fixtures (5, 6, 15, 16, 17) reported separately. What is
+pre-registered is the numbering and the lane split, not the contents: at the time of writing no
+fixture in the repo defines what any slot contains, so the gate is measurable in principle and not
+yet measurable in fact. `fixtures/manifest.json` lists all twenty slots with `definitionPath: null`
+to make that gap machine-readable rather than a sentence in a document. An
 estimate that is not measured against that gate is a description of a demo.
 
 So the unit below is **sessions**: one focused block of agent work with tool access, ending in a
@@ -70,7 +74,7 @@ Two problems, one of them structural.
   written is therefore an ADR amendment, not a work item. If the expert wants it, it should be
   argued in an ADR, with the original reasoning answered rather than bypassed.
 - **"90% of packages people demo with" is not a measurable quantity.** It is a feeling about a
-  fixture set that has not been chosen. The gate already pre-registers twenty fixtures precisely
+  fixture set that has not been specified. The gate pre-registers the twenty slots precisely
   so that this number cannot float.
 
 For completeness rather than advocacy: if WASI were ever approved, `@bjorn3/browser_wasi_shim` is

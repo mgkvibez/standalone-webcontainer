@@ -6,17 +6,20 @@ Node.js APIs executing on the browser's native V8 — built from scratch,
 MIT-licensed, and fully owned. It is not a wrapper around StackBlitz's
 WebContainers API, Nodebox, or any other third-party proprietary runtime.
 
-## Status: NOTHING is implemented yet
+## Status: foundation only
 
-This repository is a pre-implementation scaffold. No product code exists.
+The VFS and the scoring harness exist and are tested; nothing runs Node.js yet. The runtime,
+shims, network proxy and terminal are still empty scaffolds. Fixture contents are not yet
+specified (see `fixtures/manifest.json`), so the gate cannot be computed until they are.
 The charter's architecture is ratified (see
 [ADR-0001](docs/decisions/ADR-0001.md)); every remaining design decision is
 explicitly reserved for the human expert and listed there as OPEN.
 
 | Lane | Status |
 |---|---|
-| VFS (in-memory POSIX) | Scaffold — Not started |
+| VFS (in-memory POSIX) | Implemented (PR #2) — `src/vfs/` |
 | Node.js shims (fs, path, crypto, ...) | Scaffold — Not started |
+| Test harness (fixtures, timeouts, scoring) | In review — `src/harness/` |
 | Runtime (unified interface, hybrid lanes) | Scaffold — Not started |
 | Network (service-worker proxy) | Scaffold — Not started |
 | Terminal (xterm.js + PTY bridge) | Scaffold — Not started |
@@ -29,7 +32,7 @@ explicitly reserved for the human expert and listed there as OPEN.
 ```
 npm install        # dev tooling only (typescript, vitest, @playwright/test, @types/node)
 npm run typecheck  # tsc --noEmit under strict tsconfig
-npm test           # vitest run (toolchain smoke test only, for now)
+npm test           # vitest run (VFS + harness unit tests)
 ```
 
 ## Reviewers start here
