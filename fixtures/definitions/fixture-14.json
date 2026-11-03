@@ -1,0 +1,43 @@
+{
+  "formatVersion": 1,
+  "id": 14,
+  "slug": "fixture-14",
+  "lane": "front-end-only",
+  "title": "Spawning a package binary from node_modules/.bin",
+  "intent": "Package scripts are shebang files, not ELF binaries and not JavaScript modules. Running them needs an interpreter shim, a subsystem that is easy to forget and immediately missed.",
+  "source": "stackblitz-conformance: NodeJS child processes and package binaries (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install cowsay@1.6.0",
+      "timeoutClass": "install",
+      "purpose": "Install a package that ships a bin"
+    },
+    {
+      "kind": "run",
+      "command": "npx --no-install cowsay hello",
+      "timeoutClass": "run",
+      "purpose": "Spawn the installed binary"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 0
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "hello"
+    }
+  ],
+  "expected": [
+    "PASS",
+    "RUNTIME_INCOMPATIBILITY"
+  ],
+  "knownLimits": [
+    "Without an interpreter for shebang scripts, spawn returns ENOENT. The incumbent's equivalent is called jsh; we have no equivalent yet."
+  ]
+}

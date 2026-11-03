@@ -1,0 +1,40 @@
+{
+  "formatVersion": 1,
+  "id": 18,
+  "slug": "fixture-18",
+  "lane": "front-end-only",
+  "title": "Production build of an app containing generated components",
+  "intent": "Combines fixture 3's generated files with a real bundle, because a CLI write that produces files nothing can build is not success.",
+  "source": "stackblitz-conformance: shadcn-ui (build path) (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install",
+      "timeoutClass": "install",
+      "purpose": "Install dependencies"
+    },
+    {
+      "kind": "build",
+      "command": "npm run build",
+      "timeoutClass": "build",
+      "purpose": "Build including the generated components"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 0
+    },
+    {
+      "kind": "file-exists",
+      "step": 1,
+      "target": "dist/index.html"
+    }
+  ],
+  "expected": [
+    "PASS",
+    "TIMEOUT"
+  ]
+}

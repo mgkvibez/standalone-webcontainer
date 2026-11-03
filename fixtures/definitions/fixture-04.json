@@ -1,0 +1,62 @@
+{
+  "formatVersion": 1,
+  "id": 4,
+  "slug": "fixture-04",
+  "lane": "front-end-only",
+  "title": "Node core surface in one script: fs, http, streams, timers, EventEmitter",
+  "intent": "The densest fidelity check in the front-end lane. Five core APIs must behave together in one process, which is what an ordinary Node program does before any framework is involved.",
+  "source": "stackblitz-conformance: NodeJS core (multiple processes, fs operations, http server, streams, timers, EventEmitter) (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install",
+      "timeoutClass": "install",
+      "purpose": "Prove the install path runs even with no dependencies to fetch"
+    },
+    {
+      "kind": "run",
+      "command": "node core.mjs",
+      "timeoutClass": "run",
+      "purpose": "Execute the combined core-API scenario"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 0
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "fs-ok"
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "http-ok"
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "stream-ok"
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "timer-ok"
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "events-ok"
+    }
+  ],
+  "expected": [
+    "PASS"
+  ],
+  "knownLimits": [
+    "Each marker is separate so a failure names the API instead of the script. Absence of later markers means execution stopped, which is a liveness finding."
+  ]
+}
