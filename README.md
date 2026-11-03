@@ -12,9 +12,10 @@ A Node-shaped script can read and write files, `require("http")`, listen on a po
 browser request that arrives through the preview gateway. That path is covered end to end by tests.
 
 What is still missing is everything around it: nothing registers a service worker yet, so no request
-reaches the runtime in a browser without a page-side responder wired up by hand; `npm install` exists as a
-library call (`installDependencies`) that reads and writes an npm-compatible `package-lock.json`, but has no CLI,
-so `node_modules` is populated by code, not by a command a user can type; `crypto`, the
+reaches the runtime in a browser without a page-side responder wired up by hand; `npm install` exists as
+`runtime.install()`, which reads `<root>/package.json` and any existing `package-lock.json`, installs into the
+runtime's own VFS and rewrites the lockfile, but has no CLI and is never invoked automatically, so `node_modules` is
+populated by a call rather than by a command a user can type; `crypto`, the
 worker lane, the terminal, persistence and the server-sandbox lane are all unstarted. The twenty
 fixtures are defined (`fixtures/definitions/`) but not frozen, and the gate only counts frozen
 definitions.
@@ -34,7 +35,7 @@ implementation decisions are recorded with an audit question each in
 | Network (service-worker proxy) | Gateway, fetch handler and worker bridge implemented — `src/network/`; registration wiring not started |
 | Terminal (xterm.js + PTY bridge) | Scaffold — Not started |
 | Persistence (session continuity) | Not started — mechanism UNDECIDED |
-| npm install flow | Resolver, tarball reader, integrity checks and npm-compatible `package-lock.json` read/write — `src/npm/`; no CLI, not yet called by the runtime (ADR-0006) |
+| npm install flow | Resolver, tarball reader, integrity checks and npm-compatible `package-lock.json` read/write — `src/npm/`; `runtime.install()` reads/writes it; no CLI (ADR-0006) |
 | Hybrid routing (browser vs server sandbox) | Not started |
 
 ## Local commands
@@ -42,7 +43,7 @@ implementation decisions are recorded with an audit question each in
 ```
 npm install        # dev tooling only (typescript, vitest, @playwright/test, @types/node)
 npm run typecheck  # tsc --noEmit under strict tsconfig
-npm test           # vitest run (VFS, shims, harness, network and npm: 326 tests)
+npm test           # vitest run (VFS, shims, harness, network and npm: 331 tests)
 npm run verify     # typecheck + tests in one command, what CI runs
 ```
 
