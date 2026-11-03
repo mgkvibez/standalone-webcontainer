@@ -6,22 +6,30 @@ Node.js APIs executing on the browser's native V8 — built from scratch,
 MIT-licensed, and fully owned. It is not a wrapper around StackBlitz's
 WebContainers API, Nodebox, or any other third-party proprietary runtime.
 
-## Status: foundation only
+## Status: it serves HTTP, and little else yet
 
-The VFS and the scoring harness exist and are tested; nothing runs Node.js yet. The runtime,
-shims, network proxy and terminal are still empty scaffolds. Fixture contents are not yet
-specified (see `fixtures/manifest.json`), so the gate cannot be computed until they are.
-The charter's architecture is ratified (see
-[ADR-0001](docs/decisions/ADR-0001.md)); every remaining design decision is
-explicitly reserved for the human expert and listed there as OPEN.
+A Node-shaped script can read and write files, `require("http")`, listen on a port, and answer a real
+browser request that arrives through the preview gateway. That path is covered end to end by tests.
+
+What is still missing is everything around it: nothing registers a service worker yet, so no request
+reaches the runtime in a browser without a page-side responder wired up by hand; `npm install` does not
+exist, so `node_modules` can only be populated by writing files into the VFS directly; `crypto`, the
+worker lane, the terminal, persistence and the server-sandbox lane are all unstarted. The twenty
+fixtures are defined (`fixtures/definitions/`) but not frozen, and the gate only counts frozen
+definitions.
+
+The charter's architecture is ratified (see [ADR-0001](docs/decisions/ADR-0001.md)); provisional
+implementation decisions are recorded with an audit question each in
+[ADR-0004](docs/decisions/ADR-0004.md) and [ADR-0005](docs/decisions/ADR-0005.md).
 
 | Lane | Status |
 |---|---|
-| VFS (in-memory POSIX) | Implemented (PR #2) — `src/vfs/` |
-| Node.js shims (fs, path, process, buffer) | Phase 1 shims implemented — `src/shims/` (crypto deferred, ADR-0003) |
-| Test harness (fixtures, timeouts, scoring) | In review — `src/harness/` |
+| VFS (in-memory POSIX) | Implemented — `src/vfs/` |
+| Node.js shims | `fs`, `path`, `process`, `buffer`, `events`, `http` — `src/shims/` (crypto deferred, ADR-0003) |
+| Test harness (fixtures, timeouts, scoring) | Implemented — `src/harness/` |
+| Fixture corpus | 20 definitions written, `status: proposed` — `fixtures/definitions/` (freezing is the owner's act) |
 | Runtime (unified interface, hybrid lanes) | In-process CommonJS lane implemented — `src/runtime/` (worker lane not started) |
-| Network (service-worker proxy) | Scaffold — Not started |
+| Network (service-worker proxy) | Gateway, fetch handler and worker bridge implemented — `src/network/`; registration wiring not started |
 | Terminal (xterm.js + PTY bridge) | Scaffold — Not started |
 | Persistence (session continuity) | Not started — mechanism UNDECIDED |
 | npm install flow | Not started |
@@ -32,7 +40,7 @@ explicitly reserved for the human expert and listed there as OPEN.
 ```
 npm install        # dev tooling only (typescript, vitest, @playwright/test, @types/node)
 npm run typecheck  # tsc --noEmit under strict tsconfig
-npm test           # vitest run (VFS + harness unit tests)
+npm test           # vitest run (VFS, shims, harness and network: 237 tests)
 ```
 
 ## Reviewers start here
