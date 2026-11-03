@@ -12,7 +12,7 @@ import { gzipSync } from "node:zlib";
 
 import { describe, expect, it } from "vitest";
 
-import { createHttpRegistryClient, installDependencies } from "../../src/npm/install.js";
+import { createHttpRegistryClient, installDependencies, InstallError } from "../../src/npm/install.js";
 import type { FileSystem } from "../../src/vfs/index.js";
 import { createFakeRegistry, sha512Integrity, type FakeRegistry, type FakeVersion } from "../helpers/registry.js";
 import { makeTar } from "../helpers/tarball.js";
@@ -180,6 +180,44 @@ describe("installDependencies", () => {
     const report = await installDependencies({ dependencies: { "@scope/pkg": "^1.0.0" } }, { registry, vfs, root });
     expect(report.packages[0]?.path).toBe("/app/node_modules/@scope/pkg");
     expect(exists(vfs, "/app/node_modules/@scope/pkg/index.js")).toBe(true);
+  });
+
+  it("refuses a spec that is not a registry range, naming the reason", async () => {
+    const registry = await fakeRegistry({ packages: { dep: [{ version: "1.0.0" }] } });
+
+    const cases: ReadonlyArray<readonly [string, RegExp]> = [
+      ["file:../shared", /file:\.\.\/shared uses a protocol/],
+      ["workspace:*", /uses a protocol/],
+      ["git+https://github.com/x/y.git", /uses a protocol/],
+      ["npm:other@^1.0.0", /uses a protocol/],
+      ["https://example.test/p.tgz", /is a URL, not a registry range/],
+      ["../local-pkg", /is a local path/],
+      ["someuser/somerepo", /looks like a GitHub shorthand/],
+    ];
+
+    for (const [spec, expected] of cases) {
+      const { vfs, root } = boot();
+      // NO_MATCHING_VERSION here would send the reader hunting for a version that was never the problem, so both
+      // the machine-readable reason and the human message are asserted.
+      const error = await installDependencies({ dependencies: { dep: spec } }, { registry, vfs, root }).then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(InstallError);
+      expect((error as InstallError).code).toBe("UNSUPPORTED_SPEC");
+      expect((error as Error).message).toMatch(expected);
+    }
+  });
+
+  it("warns and continues when an optional dependency has an unsupported spec", async () => {
+    const registry = await fakeRegistry({
+      packages: { watcher: [{ version: "1.0.0", optionalDependencies: { local: "file:../local" } }] },
+    });
+    const { vfs, root } = boot();
+
+    const report = await installDependencies({ dependencies: { watcher: "^1.0.0" } }, { registry, vfs, root });
+    expect(report.packages.map((entry) => entry.name)).toEqual(["watcher"]);
+    expect(report.warnings.join(" ")).toMatch(/local skipped \(optional/);
   });
 
   it("adds devDependencies only when asked", async () => {

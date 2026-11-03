@@ -257,6 +257,29 @@ function isPlatformUsable(entry: { readonly os?: readonly string[]; readonly cpu
   return allows(entry.os) && allows(entry.cpu);
 }
 
+/**
+ * Dependency specs that are not registry ranges.
+ *
+ * npm accepts local paths, git URLs, `workspace:` protocol references and `npm:` aliases. This installer resolves
+ * only against a registry, and without this check those specs fell through to version resolution and failed as
+ * `NO_MATCHING_VERSION ... (newest is 1.0.0)`, which reads like a versioning problem and sends the reader looking in
+ * the wrong place. Naming the real limitation costs one function.
+ *
+ * `owner/repo` shorthand and relative paths are included because they are the two forms people actually type.
+ */
+function unsupportedSpecReason(range: string): string | null {
+  const spec = range.trim();
+  if (/(^|\/)(file|link|workspace|git|git\+https|github|gitlab|bitbucket|npm):/.test(spec)) {
+    return `${spec} uses a protocol this installer does not resolve`;
+  }
+  if (spec.includes("://")) return `${spec} is a URL, not a registry range`;
+  if (spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("/") || spec.startsWith("~/")) {
+    return `${spec} is a local path, and nothing outside the registry is fetched`;
+  }
+  if (/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+/.test(spec)) return `${spec} looks like a GitHub shorthand reference`;
+  return null;
+}
+
 /** A `sha512-<base64>` string, or null when the platform gives us no crypto to compute one with. */
 async function computeIntegrity(bytes: Uint8Array): Promise<string | null> {
   const digest = await sha512Base64(bytes);
@@ -391,6 +414,13 @@ export async function installDependencies(
       const fromLock = chosen !== null;
 
       if (chosen === null) {
+        // Only checked when a registry resolve is actually about to happen: a lockfile pin already carries a concrete
+        // tarball URL, so a project pinned from a local install still installs.
+        const unsupported = unsupportedSpecReason(request.range);
+        if (unsupported !== null) {
+          throw new InstallError("UNSUPPORTED_SPEC", `${request.name}: ${unsupported}`);
+        }
+
         const stale = locked?.packages[key];
         if (stale?.version !== undefined && isRangeExpression(request.range)) {
           warnings.push(
