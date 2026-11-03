@@ -1,0 +1,126 @@
+{
+  "status": "numbering and lanes transcribed from README \u00a75; definitions pending",
+  "note": "definitionPath stays null until the owner/expert specifies what each fixture contains. scoreGate() reports undefined slots as missing rather than scoring them.",
+  "fixtures": [
+    {
+      "id": 1,
+      "slug": "fixture-01",
+      "lane": "front-end-only",
+      "definitionPath": null
+    },
+    {
+      "id": 2,
+      "slug": "fixture-02",
+      "lane": "front-end-only",
+      "definitionPath": null
+    },
+    {
+      "id": 3,
+      "slug": "fixture-03",
+      "lane": "front-end-only",
+      "definitionPath": null
+    },
+    {
+      "id": 4,
+      "slug": "fixture-04",
+      "lane": "front-end-only",
+      "definitionPath": null
+    },
+    {
+      "id": 5,
+      "slug": "fixture-05",
+      "lane": "boundary",
+      "definitionPath": null
+    },
+    {
+      "id": 6,
+      "slug": "fixture-06",
+      "lane": "boundary",
+      "definitionPath": null
+    },
+    {
+      "id": 7,
+      "slug": "fixture-07",
+      "lane": "front-end-only",
+      "definitionPath": null
+    },
+    {
+      "id": 8,
+      "slug": "fixture-08",
+      "lane": "front-end-only",
+      "definitionPath": null
+    },
+    {
+      "id": 9,
+      "slug": "fixture-09",
+      "lane": "front-end-only",
+      "definitionPath": null
+    },
+    {
+      "id": 10,
+      "slug": "fixture-10",
+      "lane": "front-end-only",
+      "definitionPath": null
+    },
+    {
+      "id": 11,
+      "slug": "fixture-11",
+      "lane": "front-end-only",
+      "definitionPath": null
+    },
+    {
+      "id": 12,
+      "slug": "fixture-12",
+      "lane": "front-end-only",
+      "definitionPath": null
+    },
+    {
+      "id": 13,
+      "slug": "fixture-13",
+      "lane": "front-end-only",
+      "definitionPath": null
+    },
+    {
+      "id": 14,
+      "slug": "fixture-14",
+      "lane": "front-end-only",
+      "definitionPath": null
+    },
+    {
+      "id": 15,
+      "slug": "fixture-15",
+      "lane": "boundary",
+      "definitionPath": null
+    },
+    {
+      "id": 16,
+      "slug": "fixture-16",
+      "lane": "boundary",
+      "definitionPath": null
+    },
+    {
+      "id": 17,
+      "slug": "fixture-17",
+      "lane": "boundary",
+      "definitionPath": null
+    },
+    {
+      "id": 18,
+      "slug": "fixture-18",
+      "lane": "front-end-only",
+      "definitionPath": null
+    },
+    {
+      "id": 19,
+      "slug": "fixture-19",
+      "lane": "front-end-only",
+      "definitionPath": null
+    },
+    {
+      "id": 20,
+      "slug": "fixture-20",
+      "lane": "front-end-only",
+      "definitionPath": null
+    }
+  ]
+}
