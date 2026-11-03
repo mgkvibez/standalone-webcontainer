@@ -12,15 +12,17 @@ A Node-shaped script can read and write files, `require("http")`, listen on a po
 browser request that arrives through the preview gateway. That path is covered end to end by tests.
 
 What is still missing is everything around it: nothing registers a service worker yet, so no request
-reaches the runtime in a browser without a page-side responder wired up by hand; `npm install` does not
-exist, so `node_modules` can only be populated by writing files into the VFS directly; `crypto`, the
+reaches the runtime in a browser without a page-side responder wired up by hand; `npm install` exists as a
+library call (`installDependencies`) but has no CLI and writes no lockfile, so `node_modules` is populated by
+code, not by a command a user can type; `crypto`, the
 worker lane, the terminal, persistence and the server-sandbox lane are all unstarted. The twenty
 fixtures are defined (`fixtures/definitions/`) but not frozen, and the gate only counts frozen
 definitions.
 
 The charter's architecture is ratified (see [ADR-0001](docs/decisions/ADR-0001.md)); provisional
 implementation decisions are recorded with an audit question each in
-[ADR-0004](docs/decisions/ADR-0004.md) and [ADR-0005](docs/decisions/ADR-0005.md).
+[ADR-0004](docs/decisions/ADR-0004.md), [ADR-0005](docs/decisions/ADR-0005.md) and
+[ADR-0006](docs/decisions/ADR-0006.md).
 
 | Lane | Status |
 |---|---|
@@ -32,7 +34,7 @@ implementation decisions are recorded with an audit question each in
 | Network (service-worker proxy) | Gateway, fetch handler and worker bridge implemented — `src/network/`; registration wiring not started |
 | Terminal (xterm.js + PTY bridge) | Scaffold — Not started |
 | Persistence (session continuity) | Not started — mechanism UNDECIDED |
-| npm install flow | Not started |
+| npm install flow | Resolver, tarball reader and integrity checks implemented as a library — `src/npm/`; no CLI, no lockfile, not yet called by the runtime (ADR-0006) |
 | Hybrid routing (browser vs server sandbox) | Not started |
 
 ## Local commands
@@ -40,7 +42,7 @@ implementation decisions are recorded with an audit question each in
 ```
 npm install        # dev tooling only (typescript, vitest, @playwright/test, @types/node)
 npm run typecheck  # tsc --noEmit under strict tsconfig
-npm test           # vitest run (VFS, shims, harness and network: 237 tests)
+npm test           # vitest run (VFS, shims, harness, network and npm: 289 tests)
 ```
 
 ## Reviewers start here
