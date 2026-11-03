@@ -1,0 +1,43 @@
+{
+  "formatVersion": 1,
+  "id": 11,
+  "slug": "fixture-11",
+  "lane": "front-end-only",
+  "title": "Vite production build emits dist",
+  "intent": "Development serving and production building exercise different code paths: one is a server, the other is a multi-module transform and write. A runtime can pass one and fail the other.",
+  "source": "stackblitz-conformance: Vite (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install",
+      "timeoutClass": "install",
+      "purpose": "Install build dependencies"
+    },
+    {
+      "kind": "build",
+      "command": "npm run build",
+      "timeoutClass": "build",
+      "purpose": "Run the production build"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 0
+    },
+    {
+      "kind": "file-exists",
+      "step": 1,
+      "target": "dist/index.html"
+    }
+  ],
+  "expected": [
+    "PASS",
+    "TIMEOUT"
+  ],
+  "knownLimits": [
+    "Charter \u00a74.5 gives builds 240s. A build that exceeds it is TIMEOUT and is not retried into a pass."
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "formatVersion": 1,
+  "id": 16,
+  "slug": "fixture-16",
+  "lane": "boundary",
+  "title": "In-process sockets and websockets",
+  "intent": "Boundary fixture: loopback connections inside the runtime are achievable, outbound TCP is not. Keeping the distinction visible matters more than the pass rate, because the two get conflated in marketing claims.",
+  "source": "stackblitz-conformance: NodeJS http server and streams (websocket variant) (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install ws",
+      "timeoutClass": "install",
+      "purpose": "Install a websocket implementation"
+    },
+    {
+      "kind": "run",
+      "command": "node ws-test.mjs",
+      "timeoutClass": "run",
+      "purpose": "Connect to a server inside the same runtime"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 0
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "pong"
+    }
+  ],
+  "expected": [
+    "PASS",
+    "RUNTIME_INCOMPATIBILITY",
+    "TIMEOUT"
+  ],
+  "knownLimits": [
+    "Evidence must record whether the connection was loopback or outbound. Averaging them hides the real boundary."
+  ]
+}

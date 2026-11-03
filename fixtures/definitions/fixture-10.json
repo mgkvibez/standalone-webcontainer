@@ -1,0 +1,43 @@
+{
+  "formatVersion": 1,
+  "id": 10,
+  "slug": "fixture-10",
+  "lane": "front-end-only",
+  "title": "pnpm install path",
+  "intent": "A second package manager, because installing npm itself and letting it run is the strategy the incumbent converged on after abandoning its own client.",
+  "source": "stackblitz-conformance: Package managers (pnpm) (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "pnpm install",
+      "timeoutClass": "install",
+      "purpose": "Install with pnpm, which is itself a Node program"
+    },
+    {
+      "kind": "run",
+      "command": "node check.mjs",
+      "timeoutClass": "run",
+      "purpose": "Require the installed dependency"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 0
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "true"
+    }
+  ],
+  "expected": [
+    "PASS",
+    "NETWORK"
+  ],
+  "knownLimits": [
+    "If pnpm cannot run at all, that is a fidelity finding about executing a large Node tool, not a fixture defect."
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "formatVersion": 1,
+  "id": 1,
+  "slug": "fixture-01",
+  "lane": "front-end-only",
+  "title": "Vite dev server boots and serves its index",
+  "intent": "Proves the shortest useful path end to end: install, start a dev server, and reach it through the preview proxy. If this fails, nothing else in the front-end lane can pass.",
+  "source": "stackblitz-conformance: Vite (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install",
+      "timeoutClass": "install",
+      "purpose": "Resolve and install the Vite toolchain"
+    },
+    {
+      "kind": "run",
+      "command": "npm run dev -- --port 3000 --host 127.0.0.1",
+      "timeoutClass": "run",
+      "purpose": "Start the dev server on a fixed port"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "http-status",
+      "step": 1,
+      "target": "http://localhost:3000/",
+      "equals": 200
+    },
+    {
+      "kind": "http-body-contains",
+      "step": 1,
+      "target": "http://localhost:3000/",
+      "contains": "<div id=\"root\">"
+    }
+  ],
+  "expected": [
+    "PASS"
+  ],
+  "knownLimits": [
+    "Reaching the server through the proxy is the harness's job; a proxy miss is HARNESS_BUG, not a runtime failure."
+  ]
+}

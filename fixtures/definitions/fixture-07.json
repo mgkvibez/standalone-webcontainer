@@ -1,0 +1,53 @@
+{
+  "formatVersion": 1,
+  "id": 7,
+  "slug": "fixture-07",
+  "lane": "front-end-only",
+  "title": "CLI tool honours argv and its documented exit codes",
+  "intent": "Exit codes are a contract, not a side effect. A runtime that runs code but loses the exit code cannot host CI tooling, so this fixture asserts both success and a deliberate failure path.",
+  "source": "stackblitz-conformance: Command line (CLI) (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install",
+      "timeoutClass": "install",
+      "purpose": "Install the CLI's dependencies"
+    },
+    {
+      "kind": "run",
+      "command": "node cli.mjs --input sample.txt --upper",
+      "timeoutClass": "run",
+      "purpose": "Successful invocation"
+    },
+    {
+      "kind": "run",
+      "command": "node cli.mjs --definitely-not-a-flag",
+      "timeoutClass": "run",
+      "purpose": "Invocation that must fail with the documented usage code"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 0
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "HELLO"
+    },
+    {
+      "kind": "exit-code",
+      "step": 2,
+      "equals": 2
+    }
+  ],
+  "expected": [
+    "PASS"
+  ],
+  "knownLimits": [
+    "A CLI that prints the right output but exits 0 on bad input fails this fixture; that is the point of the second step."
+  ]
+}

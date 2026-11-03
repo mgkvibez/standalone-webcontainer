@@ -17,11 +17,23 @@ describe("parseManifest", () => {
     expect(entries.find((entry) => entry.id === 5)?.lane).toBe("boundary");
   });
 
-  it("names every slot that still has no definition", async () => {
+  it("names every slot that still has no definition", () => {
+    // The behaviour still matters even though the corpus is now populated: a slot without a
+    // definition must be reported as undefined rather than silently treated as scored. Testing it
+    // against synthetic data keeps that guarantee independent of how much of the corpus is filled in.
+    const raw = {
+      fixtures: [
+        { id: 1, slug: "fixture-01", lane: "front-end-only", definitionPath: "fixtures/definitions/fixture-01.json" },
+        { id: 2, slug: "fixture-02", lane: "front-end-only", definitionPath: null },
+        { id: 5, slug: "fixture-05", lane: "boundary", definitionPath: null },
+      ],
+    };
+    expect(undefinedFixtures(parseManifest(raw))).toEqual([2, 5]);
+  });
+
+  it("reports the checked-in corpus as fully defined", async () => {
     const raw = JSON.parse(await readFile(join(REPO_ROOT, "fixtures/manifest.json"), "utf8"));
-    // The charter fixes the numbering, not the contents. Until the owner specifies fixtures, every
-    // slot is honestly reported as undefined rather than silently treated as scored.
-    expect(undefinedFixtures(parseManifest(raw))).toHaveLength(20);
+    expect(undefinedFixtures(parseManifest(raw))).toEqual([]);
   });
 
   it("rejects a manifest that moves a fixture out of its charter lane", () => {

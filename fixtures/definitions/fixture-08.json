@@ -1,0 +1,49 @@
+{
+  "formatVersion": 1,
+  "id": 8,
+  "slug": "fixture-08",
+  "lane": "front-end-only",
+  "title": "Express static server",
+  "intent": "The canonical Node HTTP server, and the shape our http shim must support first: createServer, listen, serve bytes, return 200.",
+  "source": "stackblitz-conformance: NodeJS http server, via the most common framework (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install express",
+      "timeoutClass": "install",
+      "purpose": "Install Express"
+    },
+    {
+      "kind": "run",
+      "command": "node server.mjs",
+      "timeoutClass": "run",
+      "purpose": "Start the server on a fixed port"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 0
+    },
+    {
+      "kind": "http-status",
+      "step": 1,
+      "target": "http://localhost:3200/",
+      "equals": 200
+    },
+    {
+      "kind": "http-body-contains",
+      "step": 1,
+      "target": "http://localhost:3200/",
+      "contains": "express-static-ok"
+    }
+  ],
+  "expected": [
+    "PASS"
+  ],
+  "knownLimits": [
+    "Bodies must survive as bytes. A string-only transport corrupts binary responses, which is why the response contract is typed rather than incidental."
+  ]
+}

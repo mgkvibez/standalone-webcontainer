@@ -1,0 +1,50 @@
+{
+  "formatVersion": 1,
+  "id": 6,
+  "slug": "fixture-06",
+  "lane": "boundary",
+  "title": "Nuxt SSR build and server start",
+  "intent": "Boundary fixture: same reason as Next.js, different framework, and its own build conventions. Two independent SSR frameworks failing the same way is evidence about the lane, not about either framework.",
+  "source": "stackblitz-conformance: Nuxt (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install",
+      "timeoutClass": "install",
+      "purpose": "Install the framework"
+    },
+    {
+      "kind": "build",
+      "command": "npm run build",
+      "timeoutClass": "build",
+      "purpose": "Produce a production build"
+    },
+    {
+      "kind": "run",
+      "command": "node .output/server/index.mjs",
+      "timeoutClass": "run",
+      "purpose": "Serve the built output directly"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "file-exists",
+      "step": 1,
+      "target": ".output/server/index.mjs"
+    },
+    {
+      "kind": "http-status",
+      "step": 2,
+      "target": "http://localhost:3000/",
+      "equals": 200
+    }
+  ],
+  "expected": [
+    "PASS",
+    "RUNTIME_INCOMPATIBILITY"
+  ],
+  "knownLimits": [
+    "Charter \u00a75 reports this lane separately."
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "formatVersion": 1,
+  "id": 13,
+  "slug": "fixture-13",
+  "lane": "front-end-only",
+  "title": "Editing a file updates what the dev server serves",
+  "intent": "The closed loop every developer expects: write a file, see the result. It requires fs.watch or an equivalent notification path, which the incumbent shipped late, so it is the most likely honest failure in the lane.",
+  "source": "stackblitz-conformance: Vite (hot module replacement) (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install",
+      "timeoutClass": "install",
+      "purpose": "Install dependencies"
+    },
+    {
+      "kind": "run",
+      "command": "npm run dev -- --port 3300 --host 127.0.0.1",
+      "timeoutClass": "run",
+      "purpose": "Start the dev server"
+    },
+    {
+      "kind": "run",
+      "command": "node edit.mjs",
+      "timeoutClass": "run",
+      "purpose": "Rewrite a source file while the server is running"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "http-body-contains",
+      "step": 1,
+      "target": "http://localhost:3300/",
+      "contains": "initial-marker"
+    },
+    {
+      "kind": "http-body-contains",
+      "step": 2,
+      "target": "http://localhost:3300/",
+      "contains": "edited-marker"
+    }
+  ],
+  "expected": [
+    "PASS",
+    "RUNTIME_INCOMPATIBILITY"
+  ],
+  "knownLimits": [
+    "Depends on a file-change notification path. Charter Q5 places fs.watch outside Phase 1, so a failure here is scope, not regression, and must be recorded as such."
+  ]
+}
