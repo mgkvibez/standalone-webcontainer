@@ -39,7 +39,10 @@ npm test           # vitest run (toolchain smoke test only, for now)
    before any implementation begins.
 2. [docs/decisions/ADR-0000-template.md](docs/decisions/ADR-0000-template.md)
    — the record format for those decisions.
-3. The project charter, embedded verbatim below — it is the law for this
+3. [docs/research/ai-assisted-recreation-estimate.md](docs/research/ai-assisted-recreation-estimate.md)
+   — what an AI pair can and cannot compress, in sessions against the gate,
+   plus the four decisions it raises for the expert.
+4. The project charter, embedded verbatim below — it is the law for this
    repository.
 
 ## Licensing
