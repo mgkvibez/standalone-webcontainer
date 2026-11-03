@@ -10,6 +10,16 @@
  */
 import { Buffer } from "buffer";
 
+import { EventEmitter } from "../shims/events.js";
+import {
+  createServer,
+  IncomingMessage,
+  Server,
+  ServerResponse,
+  type RequestListener,
+} from "../shims/http.js";
+import { PortRegistry } from "../network/port-registry.js";
+import { PreviewGateway } from "../network/preview-gateway.js";
 import { createFsShim, type FsShim } from "../shims/fs.js";
 import { path } from "../shims/path.js";
 import { createProcessShim, createSink, ProcessExit, type ProcessShim } from "../shims/process.js";
@@ -36,11 +46,37 @@ export interface Runtime {
   run(entryPath: string, options?: RunOptions): Promise<ExecutionResult>;
 }
 
+export interface InProcessRuntimeOptions {
+  /**
+   * The port namespace this runtime binds into. Supplied so several runtimes in one page cannot see each
+   * other's preview servers; a private one is created when omitted.
+   */
+  readonly registry?: PortRegistry;
+}
+
 export class InProcessRuntime implements Runtime {
   readonly #vfs: FileSystem;
+  readonly #registry: PortRegistry;
+  readonly #gateway: PreviewGateway;
 
-  constructor(vfs: FileSystem) {
+  constructor(vfs: FileSystem, options: InProcessRuntimeOptions = {}) {
     this.#vfs = vfs;
+    this.#registry = options.registry ?? new PortRegistry();
+    this.#gateway = new PreviewGateway({ registry: this.#registry });
+  }
+
+  /**
+   * The gateway a service worker calls. Exposed because the runtime is the only owner of both the port
+   * registry and the module loader: a server created by user code is registered here, so routing it
+   * requires this gateway rather than a second one that would see a different registry.
+   */
+  get gateway(): PreviewGateway {
+    return this.#gateway;
+  }
+
+  /** The port namespace in use, for callers that need to inspect bindings. */
+  get ports(): PortRegistry {
+    return this.#registry;
   }
 
   async run(entryPath: string, options: RunOptions = {}): Promise<ExecutionResult> {
@@ -77,6 +113,20 @@ export class InProcessRuntime implements Runtime {
         path,
         process: processShim,
         buffer: { Buffer },
+        events: { EventEmitter },
+        // A per-runtime facade rather than the module itself: `createServer` must bind into THIS runtime's
+        // registry and attach to THIS runtime's gateway, or a script's server would listen and never be
+        // routable. Exported classes are passed through so `instanceof` still works for user code.
+        http: {
+          createServer: (handler?: RequestListener): Server => {
+            const server = createServer(handler, { registry: this.#registry });
+            this.#gateway.attach(server);
+            return server;
+          },
+          Server,
+          IncomingMessage,
+          ServerResponse,
+        },
       },
     });
     loader.setRuntimeContext({ process: processShim, console: consoleShim, Buffer });
