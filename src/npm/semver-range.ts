@@ -291,6 +291,18 @@ export function satisfies(candidate: string | Version, range: string): boolean {
   });
 }
 
+/**
+ * Is this a range expression at all?
+ *
+ * The installer needs the distinction to decide whether a locked version may be trusted. If the manifest says
+ * `^1.0.0` and the lockfile pins `1.0.0`, that can be checked offline. If the manifest says `latest`, that is a
+ * dist-tag whose meaning lives on the registry, so a check here would be wrong: the lockfile is the only record
+ * of what `latest` meant, and re-resolving would silently unpin it.
+ */
+export function isRangeExpression(range: string): boolean {
+  return alternatives(range) !== null;
+}
+
 /** The highest version in `versions` that satisfies `range`, or null. Prereleases are excluded by rule 1. */
 export function maxSatisfying(versions: readonly string[], range: string): string | null {
   let best: string | null = null;

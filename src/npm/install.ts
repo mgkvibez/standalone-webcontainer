@@ -21,13 +21,22 @@
  * *application*, not the package manager.
  */
 
-import { compareVersions, maxSatisfying } from "./semver-range.js";
+import { LOCKFILE_VERSION, lockfileKey, serializeLockfile, type Lockfile, type LockfilePackage } from "./lockfile.js";
+import { compareVersions, isRangeExpression, maxSatisfying } from "./semver-range.js";
 import { DEFAULT_TAR_LIMITS, extractTarball, stripTopLevelDirectory, type TarLimits } from "./tarball.js";
 
 export interface PackumentVersion {
   readonly name: string;
   readonly version: string;
   readonly dependencies?: Record<string, string>;
+  /**
+   * Reached through an `optionalDependencies` edge. Kept because a failure here must be a warning, not an
+   * error, which is what lets a package like `chokidar` install on a platform `fsevents` cannot serve.
+   */
+  readonly optionalDependencies?: Record<string, string>;
+  /** npm's platform fields. A package that enumerates real operating systems cannot run in a browser. */
+  readonly os?: readonly string[];
+  readonly cpu?: readonly string[];
   readonly dist: { readonly tarball: string; readonly integrity?: string };
 }
 
@@ -60,6 +69,13 @@ export interface InstallOptions {
   readonly includeDev?: boolean;
   /** Defaults to true. Turning it off is for tests that deliberately serve corrupt bytes. */
   readonly verifyIntegrity?: boolean;
+  /**
+   * A `package-lock.json` to install from. When a locked version still satisfies the manifest range it is used
+   * directly: same version, same URL, same integrity, and no packument fetch at all.
+   */
+  readonly lockfile?: Lockfile;
+  /** Write `package-lock.json` into `root` after a successful install. Defaults to true. */
+  readonly writeLockfile?: boolean;
 }
 
 export interface InstalledPackage {
@@ -72,6 +88,8 @@ export interface InstalledPackage {
 export interface InstallReport {
   readonly packages: readonly InstalledPackage[];
   readonly warnings: readonly string[];
+  /** The lockfile describing what was installed, whether or not it was written to the VFS. */
+  readonly lockfile: Lockfile;
 }
 
 export class InstallError extends Error {
@@ -98,6 +116,8 @@ interface Request {
   /** Directory of the dependent, used to find an already-installed copy above it. */
   readonly fromDir: string;
   readonly requiredBy: string;
+  /** An `optionalDependencies` edge: failure is a warning, and a platform mismatch is expected. */
+  readonly optional: boolean;
 }
 
 function joinPath(...parts: readonly string[]): string {
@@ -171,8 +191,45 @@ function chooseVersion(packument: Packument, range: string, name: string): Packu
   return chosen;
 }
 
+/**
+ * Is this package runnable in a browser?
+ *
+ * npm's `os` and `cpu` fields enumerate the platforms a package supports. A package that lists real operating
+ * systems is, by that declaration, not portable: `fsevents` is darwin-only, and esbuild's platform packages each
+ * name one OS and one architecture because each contains a native binary. No browser appears in those lists and
+ * none ever will, so a non-empty positive list without an entry we can honour means "cannot run here".
+ *
+ * Negations are read in npm's sense (`!win32` excludes, and a list of only negations is otherwise portable),
+ * because treating `!win32` as a positive requirement would wrongly refuse packages that are fine.
+ *
+ * This matters beyond tidiness: every platform-specific optional dependency that survives resolution becomes a
+ * failed fetch and a wasted install in a browser, and `@esbuild/darwin-x64` is a 10 MB tarball of bytes that
+ * cannot execute.
+ */
+function isPlatformUsable(entry: { readonly os?: readonly string[]; readonly cpu?: readonly string[] }): boolean {
+  const allows = (list: readonly string[] | undefined): boolean => {
+    if (list === undefined || list.length === 0) return true;
+    const positives = list.filter((value) => !value.startsWith("!"));
+    const negatives = list.filter((value) => value.startsWith("!")).map((value) => value.slice(1));
+    if (negatives.includes("browser")) return false;
+    return positives.length === 0 || positives.includes("browser");
+  };
+  return allows(entry.os) && allows(entry.cpu);
+}
+
+/** A `sha512-<base64>` string, or null when the platform gives us no crypto to compute one with. */
+async function computeIntegrity(bytes: Uint8Array): Promise<string | null> {
+  const digest = await sha512Base64(bytes);
+  return digest === null ? null : `sha512-${digest}`;
+}
+
 export async function installDependencies(
-  manifest: { readonly dependencies?: Record<string, string>; readonly devDependencies?: Record<string, string> },
+  manifest: {
+    readonly name?: string;
+    readonly version?: string;
+    readonly dependencies?: Record<string, string>;
+    readonly devDependencies?: Record<string, string>;
+  },
   options: InstallOptions,
 ): Promise<InstallReport> {
   const root = stripTrailingSlash(options.root);
@@ -180,6 +237,8 @@ export async function installDependencies(
   const limits = options.limits ?? DEFAULT_TAR_LIMITS;
   const maxPackages = options.maxPackages ?? 500;
   const verify = options.verifyIntegrity ?? true;
+  const writeLockfile = options.writeLockfile ?? true;
+  const locked = options.lockfile;
 
   const warnings: string[] = [];
   const packuments = new Map<string, Packument>();
@@ -229,18 +288,55 @@ export async function installDependencies(
     return fetched;
   };
 
+  /**
+   * Where this request would install, and the lockfile key for that location.
+   *
+   * The decision is forced by the current state rather than guessed: `findExisting` has already failed, so an
+   * existing root copy cannot serve this range, which means a nested copy is the only correct outcome.
+   */
+  const hostForKey = (request: Request): { hostDir: string; key: string } => {
+    const atRoot = placementFor(rootNodeModules, request.name);
+    const hostDir = atRoot === undefined ? rootNodeModules : joinPath(request.fromDir, "node_modules");
+    return { hostDir, key: lockfileKey(root, joinPath(hostDir, request.name)) };
+  };
+
+  /** A locked version, when the lockfile still has something usable at this exact path. */
+  const lockedVersionFor = (key: string, name: string, range: string): PackumentVersion | null => {
+    const entry = locked?.packages[key];
+    if (entry === undefined) return null;
+    if (entry.version === undefined || entry.resolved === undefined) return null;
+    // A parseable range the locked version fails means the manifest moved on, so re-resolve. A dist-tag such as
+    // `latest` cannot be checked offline, and the lockfile is precisely the record of what it meant.
+    if (isRangeExpression(range) && maxSatisfying([entry.version], range) === null) return null;
+    return {
+      name,
+      version: entry.version,
+      dist: { tarball: entry.resolved, ...(entry.integrity === undefined ? {} : { integrity: entry.integrity }) },
+      ...(entry.dependencies === undefined ? {} : { dependencies: entry.dependencies }),
+      // Carried so the platform filter runs on locked entries as well. A lockfile from a local install lists every
+      // OS variant of a package like esbuild, and those must be skipped exactly as a fresh resolution would skip them.
+      ...(entry.os === undefined ? {} : { os: entry.os }),
+      ...(entry.cpu === undefined ? {} : { cpu: entry.cpu }),
+    };
+  };
+
   const initial: Request[] = [];
   for (const [name, range] of Object.entries(manifest.dependencies ?? {})) {
-    initial.push({ name, range, fromDir: root, requiredBy: `${root}/package.json` });
+    initial.push({ name, range, fromDir: root, requiredBy: `${root}/package.json`, optional: false });
   }
   if (options.includeDev === true) {
     for (const [name, range] of Object.entries(manifest.devDependencies ?? {})) {
-      initial.push({ name, range, fromDir: root, requiredBy: `${root}/package.json (dev)` });
+      initial.push({ name, range, fromDir: root, requiredBy: `${root}/package.json (dev)`, optional: false });
     }
   }
 
   const queue: Request[] = [...initial];
-  const resolved: Array<{ placement: Placement; request: Request }> = [];
+  interface ResolvedEntry {
+    readonly placement: Placement;
+    readonly optional: boolean;
+    readonly fromLock: boolean;
+  }
+  const resolved: ResolvedEntry[] = [];
 
   while (queue.length > 0) {
     const request = queue.shift();
@@ -248,43 +344,93 @@ export async function installDependencies(
 
     if (findExisting(request.fromDir, request.name, request.range) !== undefined) continue;
 
-    const packument = await fetchPackument(request.name);
-    const chosen = chooseVersion(packument, request.range, request.name);
-    const key = `${chosen.name}@${chosen.version}`;
+    const { hostDir, key } = hostForKey(request);
 
-    // Hoist to the root when the name is free or already there at this exact version.
-    const atRoot = placementFor(rootNodeModules, chosen.name);
-    let hostDir: string;
-    if (atRoot === undefined) {
-      hostDir = rootNodeModules;
-    } else if (atRoot.version === chosen.version) {
-      continue; // already provided, and findExisting would have caught it only for descendants
-    } else {
-      hostDir = joinPath(request.fromDir, "node_modules");
-    }
+    try {
+      let chosen = lockedVersionFor(key, request.name, request.range);
+      const fromLock = chosen !== null;
 
-    const placement: Placement = { name: chosen.name, version: chosen.version, chosen, hostDir };
-    const hostPlacements = placementsByHost.get(hostDir) ?? new Map<string, Placement>();
-    hostPlacements.set(chosen.name, placement);
-    placementsByHost.set(hostDir, hostPlacements);
-
-    // Counted against `resolved`, not `packages`: the write loop has not run yet, so `packages` is empty
-    // here and the guard used to be a no-op that always passed.
-    if (resolved.length >= maxPackages) {
-      throw new InstallError("TOO_MANY_PACKAGES", `exceeded ${maxPackages} packages; refusing to continue`);
-    }
-
-    if (!visited.has(key)) {
-      visited.add(key);
-      resolved.push({ placement, request });
-      const targetDir = joinPath(hostDir, chosen.name);
-      for (const [name, range] of Object.entries(chosen.dependencies ?? {})) {
-        queue.push({ name, range, fromDir: targetDir, requiredBy: `${key}` });
+      if (chosen === null) {
+        const stale = locked?.packages[key];
+        if (stale?.version !== undefined && isRangeExpression(request.range)) {
+          warnings.push(
+            `${request.name}: lockfile pins ${stale.version}, which does not satisfy "${request.range}"; re-resolved`,
+          );
+        }
+        const packument = await fetchPackument(request.name);
+        chosen = chooseVersion(packument, request.range, request.name);
       }
+
+      // Applied to the chosen version regardless of where it came from, because a lockfile written by a local
+      // install carries the same platform packages a fresh resolution would produce.
+      //
+      // Optionality comes from the lockfile entry when there is one: npm records `optional: true` on the entry, and
+      // the edge that reached it may well be a plain dependency (esbuild lists its platform packages under
+      // optionalDependencies, but a reinstall walks whatever the lockfile says).
+      const optionalEntry = request.optional || locked?.packages[key]?.optional === true;
+      if (!isPlatformUsable(chosen)) {
+        if (optionalEntry) {
+          warnings.push(`${chosen.name}@${chosen.version} skipped: platform-specific (${describePlatform(chosen)})`);
+          continue;
+        }
+        throw new InstallError(
+          "PLATFORM_UNSUPPORTED",
+          `${chosen.name}@${chosen.version} supports ${describePlatform(chosen)}, which cannot run in a browser`,
+        );
+      }
+
+      const existingAtRoot = placementFor(rootNodeModules, chosen.name);
+      if (existingAtRoot?.version === chosen.version) continue;
+
+      const placement: Placement = { name: chosen.name, version: chosen.version, chosen, hostDir };
+      const hostPlacements = placementsByHost.get(hostDir) ?? new Map<string, Placement>();
+      hostPlacements.set(chosen.name, placement);
+      placementsByHost.set(hostDir, hostPlacements);
+
+      // Counted against `resolved`, not `packages`: the write loop has not run yet, so `packages` is empty
+      // here and the guard used to be a no-op that always passed.
+      if (resolved.length >= maxPackages) {
+        throw new InstallError("TOO_MANY_PACKAGES", `exceeded ${maxPackages} packages; refusing to continue`);
+      }
+
+      const identifier = `${chosen.name}@${chosen.version}`;
+      if (!visited.has(identifier)) {
+        visited.add(identifier);
+        resolved.push({ placement, optional: request.optional, fromLock });
+
+        const targetDir = joinPath(hostDir, chosen.name);
+        // An entry with no `dependencies` means a package with none: that is npm's meaning, and it is what makes a
+        // reinstall offline. An earlier version fell back to fetching the packument "just for the edges", which
+        // then fired for every leaf package and defeated the point of having a lockfile at all.
+        for (const [name, range] of Object.entries(chosen.dependencies ?? {})) {
+          queue.push({ name, range, fromDir: targetDir, requiredBy: identifier, optional: false });
+        }
+
+        // Optional edges are only discovered from the registry. With a lockfile the tree is already fixed, so
+        // re-walking optional edges would install packages the lockfile deliberately does not contain.
+        if (!fromLock) {
+          for (const [name, range] of Object.entries(chosen.optionalDependencies ?? {})) {
+            queue.push({ name, range, fromDir: targetDir, requiredBy: identifier, optional: true });
+          }
+        }
+      }
+    } catch (error) {
+      if (request.optional) {
+        const detail = error instanceof Error ? error.message : String(error);
+        warnings.push(`${request.name} skipped (optional, required by ${request.requiredBy}): ${detail}`);
+        continue;
+      }
+      throw error;
     }
   }
 
-  for (const { placement } of resolved) {
+  interface WrittenEntry extends ResolvedEntry {
+    readonly integrity: string | null;
+  }
+  const written: WrittenEntry[] = [];
+
+  for (const entry of resolved) {
+    const { placement } = entry;
     const directory = joinPath(placement.hostDir, placement.name);
     const compressed = await options.registry.tarball(placement.chosen.dist.tarball);
 
@@ -292,24 +438,83 @@ export async function installDependencies(
       const problem = await verifyIntegrity(compressed, placement.chosen.dist.integrity);
       if (problem !== null) warnings.push(`${placement.name}@${placement.version}: ${problem}`);
     }
+    // Every lockfile entry gets an integrity value, including for packages that publish none: a lockfile without
+    // one cannot verify anything the next time it is used.
+    const integrity = placement.chosen.dist.integrity ?? (await computeIntegrity(compressed));
 
     const entries = stripTopLevelDirectory(await extractTarball(compressed, limits));
     options.vfs.mkdirSync(directory, { recursive: true });
-    for (const entry of entries) {
-      const target = joinPath(directory, entry.path);
-      if (entry.type === "directory") {
+    for (const file of entries) {
+      const target = joinPath(directory, file.path);
+      if (file.type === "directory") {
         options.vfs.mkdirSync(target, { recursive: true });
         continue;
       }
       const parent = target.slice(0, Math.max(0, target.lastIndexOf("/")));
       if (parent !== "") options.vfs.mkdirSync(parent, { recursive: true });
-      options.vfs.writeFileSync(target, entry.data);
+      options.vfs.writeFileSync(target, file.data);
     }
 
     packages.push({ name: placement.name, version: placement.version, path: directory });
+    written.push({ ...entry, integrity });
   }
 
-  return { packages, warnings };
+  const lockPackages: Record<string, LockfilePackage> = {};
+  const rootEntry: {
+    name?: string;
+    version?: string;
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+  } = {};
+  if (manifest.name !== undefined) rootEntry.name = manifest.name;
+  if (manifest.version !== undefined) rootEntry.version = manifest.version;
+  // Bound to locals: narrowing `manifest.dependencies ?? {}` does not narrow the property itself.
+  const rootDependencies = manifest.dependencies;
+  if (rootDependencies !== undefined && Object.keys(rootDependencies).length > 0) rootEntry.dependencies = rootDependencies;
+  const rootDevDependencies = manifest.devDependencies;
+  if (options.includeDev === true && rootDevDependencies !== undefined && Object.keys(rootDevDependencies).length > 0) {
+    rootEntry.devDependencies = rootDevDependencies;
+  }
+  lockPackages[""] = rootEntry;
+
+  for (const entry of written) {
+    const { placement } = entry;
+    const key = lockfileKey(root, joinPath(placement.hostDir, placement.name));
+    const lockedEntry: {
+      version?: string;
+      resolved?: string;
+      integrity?: string;
+      dependencies?: Record<string, string>;
+      optional?: boolean;
+    } = { version: placement.version, resolved: placement.chosen.dist.tarball };
+    if (entry.integrity !== null) lockedEntry.integrity = entry.integrity;
+    const declared = placement.chosen.dependencies;
+    if (declared !== undefined && Object.keys(declared).length > 0) lockedEntry.dependencies = declared;
+    // Only recorded for packages actually reached through an optional edge, which is what npm means by it.
+    if (entry.optional) lockedEntry.optional = true;
+    lockPackages[key] = lockedEntry;
+  }
+
+  const lockfile: Lockfile = {
+    ...(manifest.name === undefined ? {} : { name: manifest.name }),
+    ...(manifest.version === undefined ? {} : { version: manifest.version }),
+    lockfileVersion: LOCKFILE_VERSION,
+    requires: true,
+    packages: lockPackages,
+  };
+
+  if (writeLockfile) {
+    options.vfs.writeFileSync(joinPath(root, "package-lock.json"), serializeLockfile(lockfile));
+  }
+
+  return { packages, warnings, lockfile };
+}
+
+/** Human-readable platform description, used in the messages that refuse or skip a package. */
+function describePlatform(entry: { readonly os?: readonly string[]; readonly cpu?: readonly string[] }): string {
+  const os = entry.os === undefined || entry.os.length === 0 ? "any os" : entry.os.join("/");
+  const cpu = entry.cpu === undefined || entry.cpu.length === 0 ? "any cpu" : entry.cpu.join("/");
+  return `${os}, ${cpu}`;
 }
 
 /**
