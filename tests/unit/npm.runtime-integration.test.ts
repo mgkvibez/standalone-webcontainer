@@ -11,67 +11,14 @@
 
 import { describe, expect, it } from "vitest";
 
-import { installDependencies, type RegistryClient } from "../../src/npm/install.js";
+import { installDependencies } from "../../src/npm/install.js";
 import { InProcessRuntime } from "../../src/runtime/in-process.js";
 import { FileSystem } from "../../src/vfs/index.js";
-import { makePackageTarball, packument } from "../helpers/tarball.js";
+import { createFakeRegistry, type FakeRegistry, type FakeVersion } from "../helpers/registry.js";
 
-async function sha512(rows: Uint8Array): Promise<string> {
-  const owned = new ArrayBuffer(rows.byteLength);
-  new Uint8Array(owned).set(rows);
-  const digest = await crypto.subtle.digest("SHA-512", owned);
-  let binary = "";
-  for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte);
-  return `sha512-${btoa(binary)}`;
-}
-
-interface FakePackage {
-  readonly version: string;
-  readonly files: Record<string, string>;
-  readonly main?: string;
-  readonly dependencies?: Record<string, string>;
-}
-
-/** A registry serving the given packages, so the loader's resolution rules are what is under test. */
-async function registryWith(
-  entries: Readonly<Record<string, readonly FakePackage[]>>,
-): Promise<RegistryClient> {
-  const tarballs = new Map<string, Uint8Array>();
-  const packuments = new Map<string, unknown>();
-
-  for (const [name, versions] of Object.entries(entries)) {
-    const published = [];
-    for (const entry of versions) {
-      const bytes = makePackageTarball(entry.files, {
-        name,
-        version: entry.version,
-        ...(entry.main === undefined ? {} : { main: entry.main }),
-        dependencies: entry.dependencies ?? {},
-      });
-      const url = `https://registry.test/${name}/-/${name}-${entry.version}.tgz`;
-      tarballs.set(url, bytes);
-      published.push({
-        name,
-        version: entry.version,
-        ...(entry.dependencies === undefined ? {} : { dependencies: entry.dependencies }),
-        integrity: await sha512(bytes),
-      });
-    }
-    packuments.set(name, packument(name, published));
-  }
-
-  return {
-    async packument(name: string) {
-      const found = packuments.get(name);
-      if (found === undefined) throw new Error(`no such package ${name}`);
-      return found as never;
-    },
-    async tarball(url: string) {
-      const found = tarballs.get(url);
-      if (found === undefined) throw new Error(`no such tarball ${url}`);
-      return found;
-    },
-  };
+/** Thin wrapper so the call sites read as "the registry serving these packages". */
+async function registryWith(packages: Record<string, readonly FakeVersion[]>): Promise<FakeRegistry> {
+  return createFakeRegistry({ packages });
 }
 
 describe("installing, then requiring", () => {

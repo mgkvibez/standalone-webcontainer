@@ -112,20 +112,24 @@ export function makePackageTarball(
   return new Uint8Array(gzipSync(makeTar(entries)));
 }
 
-export interface FakeVersion {
+/** The fields a package version contributes to its packument entry. */
+export interface PackumentVersionInput {
   readonly name: string;
   readonly version: string;
   readonly dependencies?: Record<string, string>;
-  /** Files written into the tarball, besides package.json. */
-  readonly files?: Record<string, string>;
-  /** When set, the served tarball is this instead of one generated from `files`. */
-  readonly rawTarball?: Uint8Array;
-  /** When set, published as the dist integrity value, so a mismatch can be tested. */
+  readonly optionalDependencies?: Record<string, string>;
+  readonly os?: readonly string[];
+  readonly cpu?: readonly string[];
+  /** Published as dist.integrity, so a mismatch can be tested. */
   readonly integrity?: string;
 }
 
 /** Build the packument shape the installer reads. */
-export function packument(name: string, versions: readonly FakeVersion[], latest?: string): Record<string, unknown> {
+export function packument(
+  name: string,
+  versions: readonly PackumentVersionInput[],
+  latest?: string,
+): Record<string, unknown> {
   const map: Record<string, unknown> = {};
   for (const entry of versions) {
     map[entry.version] = {
@@ -136,6 +140,10 @@ export function packument(name: string, versions: readonly FakeVersion[], latest
         tarball: `https://registry.test/${name}/-/${name}-${entry.version}.tgz`,
         ...(entry.integrity === undefined ? {} : { integrity: entry.integrity }),
       },
+      // Optional and platform fields pass through, because the browser-compatibility filter reads them.
+      ...(entry.optionalDependencies === undefined ? {} : { optionalDependencies: entry.optionalDependencies }),
+      ...(entry.os === undefined ? {} : { os: entry.os }),
+      ...(entry.cpu === undefined ? {} : { cpu: entry.cpu }),
     };
   }
   return { name, "dist-tags": { latest: latest ?? versions[versions.length - 1]?.version ?? "0.0.0" }, versions: map };

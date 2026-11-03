@@ -12,103 +12,26 @@ import { gzipSync } from "node:zlib";
 
 import { describe, expect, it } from "vitest";
 
-import {
-  createHttpRegistryClient,
-  installDependencies,
-  InstallError,
-  type Packument,
-  type RegistryClient,
-} from "../../src/npm/install.js";
-import { FileSystem } from "../../src/vfs/index.js";
-import { makePackageTarball, makeTar, packument, type FakeVersion } from "../helpers/tarball.js";
+import { createHttpRegistryClient, installDependencies } from "../../src/npm/install.js";
+import type { FileSystem } from "../../src/vfs/index.js";
+import { createFakeRegistry, sha512Integrity, type FakeRegistry, type FakeVersion } from "../helpers/registry.js";
+import { makeTar } from "../helpers/tarball.js";
+import { bootVfs, exists, text } from "../helpers/vfs.js";
 
-const decoder = new TextDecoder();
-
-interface FakeRegistryOptions {
+async function fakeRegistry(options: {
   readonly packages: Readonly<Record<string, readonly FakeVersion[]>>;
-  /** Optional latest tag overrides, per package. */
   readonly latest?: Readonly<Record<string, string>>;
   readonly withIntegrity?: boolean;
+}): Promise<FakeRegistry> {
+  return createFakeRegistry(options);
 }
 
-function tarballFor(entry: FakeVersion): Uint8Array {
-  return (
-    entry.rawTarball ??
-    makePackageTarball(entry.files ?? { "index.js": `module.exports = ${JSON.stringify(entry.name)};` }, {
-      name: entry.name,
-      version: entry.version,
-      dependencies: entry.dependencies ?? {},
-    })
-  );
-}
-
-async function sha512Integrity(bytes: Uint8Array): Promise<string> {
-  const owned = new ArrayBuffer(bytes.byteLength);
-  new Uint8Array(owned).set(bytes);
-  const digest = await crypto.subtle.digest("SHA-512", owned);
-  let binary = "";
-  for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte);
-  return `sha512-${btoa(binary)}`;
-}
-
-async function fakeRegistry(options: FakeRegistryOptions): Promise<RegistryClient & { fetched: string[] }> {
-  const fetched: string[] = [];
-  const tarballs = new Map<string, Uint8Array>();
-  const packuments = new Map<string, Packument>();
-
-  for (const [name, versions] of Object.entries(options.packages)) {
-    const withDist: FakeVersion[] = [];
-    for (const entry of versions) {
-      const bytes = tarballFor(entry);
-      tarballs.set(`https://registry.test/${name}/-/${name}-${entry.version}.tgz`, bytes);
-      const integrity = options.withIntegrity === false ? undefined : (entry.integrity ?? (await sha512Integrity(bytes)));
-      withDist.push(integrity === undefined ? { ...entry } : { ...entry, integrity });
-    }
-    packuments.set(name, packument(name, withDist, options.latest?.[name]) as unknown as Packument);
-  }
-
-  return {
-    fetched,
-    async packument(name: string): Promise<Packument> {
-      fetched.push(name);
-      const found = packuments.get(name);
-      if (found === undefined) throw new InstallError("REGISTRY_ERROR", `404 for ${name}`);
-      return found;
-    },
-    async tarball(url: string): Promise<Uint8Array> {
-      const found = tarballs.get(url);
-      if (found === undefined) throw new InstallError("REGISTRY_ERROR", `404 for ${url}`);
-      return found;
-    },
-  };
-}
-
-/** The VFS reports existence by throwing from statSync, so tests get a predicate rather than try/catch each time. */
-function exists(vfs: FileSystem, path: string): boolean {
-  try {
-    vfs.statSync(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Read a file as text whether the VFS handed back a string or bytes. */
-function text(vfs: FileSystem, path: string): string {
-  const contents = vfs.readFileSync(path);
-  return typeof contents === "string" ? contents : decoder.decode(contents);
-}
-
-function boot(): { vfs: FileSystem; root: string } {
-  const vfs = new FileSystem();
-  vfs.mkdirSync("/app", { recursive: true });
-  return { vfs, root: "/app" };
-}
+const boot = (): { vfs: FileSystem; root: string } => bootVfs();
 
 describe("installDependencies", () => {
   it("installs a single dependency and writes its files", async () => {
     const registry = await fakeRegistry({
-      packages: { a: [{ name: "a", version: "1.0.0", files: { "index.js": "exports.a = 1;" } }] },
+      packages: { a: [{ version: "1.0.0", files: { "index.js": "exports.a = 1;" } }] },
     });
     const { vfs, root } = boot();
 
@@ -118,7 +41,6 @@ describe("installDependencies", () => {
     expect(text(vfs, "/app/node_modules/a/index.js")).toBe("exports.a = 1;");
     // The package.json inside the tarball is real, and its wrapper directory was stripped.
     expect(JSON.parse(text(vfs, "/app/node_modules/a/package.json"))).toMatchObject({
-      name: "a",
       version: "1.0.0",
     });
   });
@@ -127,9 +49,9 @@ describe("installDependencies", () => {
     const registry = await fakeRegistry({
       packages: {
         a: [
-          { name: "a", version: "1.0.0" },
-          { name: "a", version: "1.1.0" },
-          { name: "a", version: "2.0.0" },
+          { version: "1.0.0" },
+          { version: "1.1.0" },
+          { version: "2.0.0" },
         ],
       },
     });
@@ -142,8 +64,8 @@ describe("installDependencies", () => {
   it("walks transitive dependencies", async () => {
     const registry = await fakeRegistry({
       packages: {
-        a: [{ name: "a", version: "1.0.0", dependencies: { b: "^1.0.0" } }],
-        b: [{ name: "b", version: "1.0.0" }],
+        a: [{ version: "1.0.0", dependencies: { b: "^1.0.0" } }],
+        b: [{ version: "1.0.0" }],
       },
     });
     const { vfs, root } = boot();
@@ -156,9 +78,9 @@ describe("installDependencies", () => {
   it("installs one copy for a shared dependency", async () => {
     const registry = await fakeRegistry({
       packages: {
-        a: [{ name: "a", version: "1.0.0", dependencies: { c: "^1.0.0" } }],
-        b: [{ name: "b", version: "1.0.0", dependencies: { c: "^1.0.0" } }],
-        c: [{ name: "c", version: "1.0.0" }],
+        a: [{ version: "1.0.0", dependencies: { c: "^1.0.0" } }],
+        b: [{ version: "1.0.0", dependencies: { c: "^1.0.0" } }],
+        c: [{ version: "1.0.0" }],
       },
     });
     const { vfs, root } = boot();
@@ -172,11 +94,11 @@ describe("installDependencies", () => {
   it("nests a conflicting version under the dependent that needs it", async () => {
     const registry = await fakeRegistry({
       packages: {
-        a: [{ name: "a", version: "1.0.0", dependencies: { shared: "^1.0.0" } }],
-        b: [{ name: "b", version: "1.0.0", dependencies: { shared: "^2.0.0" } }],
+        a: [{ version: "1.0.0", dependencies: { shared: "^1.0.0" } }],
+        b: [{ version: "1.0.0", dependencies: { shared: "^2.0.0" } }],
         shared: [
-          { name: "shared", version: "1.0.0", files: { "index.js": "exports.v = 1;" } },
-          { name: "shared", version: "2.0.0", files: { "index.js": "exports.v = 2;" } },
+          { version: "1.0.0", files: { "index.js": "exports.v = 1;" } },
+          { version: "2.0.0", files: { "index.js": "exports.v = 2;" } },
         ],
       },
     });
@@ -195,9 +117,9 @@ describe("installDependencies", () => {
     const registry = await fakeRegistry({
       packages: {
         a: [
-          { name: "a", version: "1.0.0" },
-          { name: "a", version: "1.5.0" },
-          { name: "a", version: "2.0.0" },
+          { version: "1.0.0" },
+          { version: "1.5.0" },
+          { version: "2.0.0" },
         ],
       },
       latest: { a: "1.5.0" },
@@ -211,8 +133,8 @@ describe("installDependencies", () => {
   it("terminates on a dependency cycle", async () => {
     const registry = await fakeRegistry({
       packages: {
-        a: [{ name: "a", version: "1.0.0", dependencies: { b: "^1.0.0" } }],
-        b: [{ name: "b", version: "1.0.0", dependencies: { a: "^1.0.0" } }],
+        a: [{ version: "1.0.0", dependencies: { b: "^1.0.0" } }],
+        b: [{ version: "1.0.0", dependencies: { a: "^1.0.0" } }],
       },
     });
     const { vfs, root } = boot();
@@ -222,7 +144,7 @@ describe("installDependencies", () => {
   });
 
   it("installs a scoped package at its scoped path", async () => {
-    const registry = await fakeRegistry({ packages: { "@scope/pkg": [{ name: "@scope/pkg", version: "1.0.0" }] } });
+    const registry = await fakeRegistry({ packages: { "@scope/pkg": [{ version: "1.0.0" }] } });
     const { vfs, root } = boot();
 
     const report = await installDependencies({ dependencies: { "@scope/pkg": "^1.0.0" } }, { registry, vfs, root });
@@ -231,7 +153,7 @@ describe("installDependencies", () => {
   });
 
   it("adds devDependencies only when asked", async () => {
-    const registry = await fakeRegistry({ packages: { dev: [{ name: "dev", version: "1.0.0" }] } });
+    const registry = await fakeRegistry({ packages: { dev: [{ version: "1.0.0" }] } });
 
     const withoutDev = boot();
     await installDependencies({ devDependencies: { dev: "^1.0.0" } }, { registry, vfs: withoutDev.vfs, root: withoutDev.root });
@@ -247,7 +169,7 @@ describe("installDependencies", () => {
 
   it("refuses a tarball whose bytes do not match the published integrity", async () => {
     const registry = await fakeRegistry({
-      packages: { a: [{ name: "a", version: "1.0.0", integrity: await sha512Integrity(new TextEncoder().encode("something else")) }] },
+      packages: { a: [{ version: "1.0.0", integrity: await sha512Integrity(new TextEncoder().encode("something else")) }] },
     });
     const { vfs, root } = boot();
 
@@ -259,7 +181,7 @@ describe("installDependencies", () => {
   });
 
   it("warns instead of failing when no integrity was published", async () => {
-    const registry = await fakeRegistry({ packages: { a: [{ name: "a", version: "1.0.0" }] }, withIntegrity: false });
+    const registry = await fakeRegistry({ packages: { a: [{ version: "1.0.0" }] }, withIntegrity: false });
     const { vfs, root } = boot();
 
     const report = await installDependencies({ dependencies: { a: "^1.0.0" } }, { registry, vfs, root });
@@ -268,7 +190,7 @@ describe("installDependencies", () => {
   });
 
   it("reports an unsatisfiable range with the newest published version named", async () => {
-    const registry = await fakeRegistry({ packages: { a: [{ name: "a", version: "1.0.0" }] } });
+    const registry = await fakeRegistry({ packages: { a: [{ version: "1.0.0" }] } });
     const { vfs, root } = boot();
 
     await expect(installDependencies({ dependencies: { a: "^9.0.0" } }, { registry, vfs, root })).rejects.toThrow(
@@ -279,9 +201,9 @@ describe("installDependencies", () => {
   it("stops at the package limit rather than filling the tab", async () => {
     const registry = await fakeRegistry({
       packages: {
-        a: [{ name: "a", version: "1.0.0", dependencies: { b: "^1.0.0" } }],
-        b: [{ name: "b", version: "1.0.0", dependencies: { c: "^1.0.0" } }],
-        c: [{ name: "c", version: "1.0.0" }],
+        a: [{ version: "1.0.0", dependencies: { b: "^1.0.0" } }],
+        b: [{ version: "1.0.0", dependencies: { c: "^1.0.0" } }],
+        c: [{ version: "1.0.0" }],
       },
     });
     const { vfs, root } = boot();
@@ -302,7 +224,7 @@ describe("installDependencies", () => {
       ),
     );
     const registry = await fakeRegistry({
-      packages: { a: [{ name: "a", version: "1.0.0", rawTarball: escape }] },
+      packages: { a: [{ version: "1.0.0", rawTarball: escape }] },
     });
     const { vfs, root } = boot();
 
@@ -315,9 +237,9 @@ describe("installDependencies", () => {
   it("does not refetch a packument for a repeated package", async () => {
     const registry = await fakeRegistry({
       packages: {
-        a: [{ name: "a", version: "1.0.0", dependencies: { c: "^1.0.0" } }],
-        b: [{ name: "b", version: "1.0.0", dependencies: { c: "^1.0.0" } }],
-        c: [{ name: "c", version: "1.0.0" }],
+        a: [{ version: "1.0.0", dependencies: { c: "^1.0.0" } }],
+        b: [{ version: "1.0.0", dependencies: { c: "^1.0.0" } }],
+        c: [{ version: "1.0.0" }],
       },
     });
     const { vfs, root } = boot();
