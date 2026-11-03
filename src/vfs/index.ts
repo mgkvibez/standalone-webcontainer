@@ -109,6 +109,17 @@ export class FileSystem {
   /** Write `data` to `path`, creating the file and derived parents. */
   async writeFile(path: string, data: string | Uint8Array): Promise<void> {
     await Promise.resolve(); // async-first contract (ADR-0002 #2)
+    this.writeFileSync(path, data);
+  }
+
+  /**
+   * Synchronous write. ADR-0002 #2 states that sync APIs block ONLY the worker
+   * thread, which presupposes a sync path exists inside the worker; ADR-0002 #7
+   * makes `fs` the first shim, and Node's `fs.writeFileSync` has no async
+   * equivalent that CommonJS `require()` can await. The body is the same code the
+   * async method runs after its yield, so the two cannot diverge.
+   */
+  writeFileSync(path: string, data: string | Uint8Array): void {
     const p = normalizeVfsPath(path);
     // CRITICAL integrity guard (expert review of PR #2): derived directories
     // have NO Map entry, so the old `existing?.kind === "dir"` check missed
@@ -160,6 +171,11 @@ export class FileSystem {
   /** Read `path`. Returns `Uint8Array`, or `string` when encoding is "utf8". */
   async readFile(path: string, encoding?: "utf8"): Promise<Uint8Array | string> {
     await Promise.resolve();
+    return this.readFileSync(path, encoding);
+  }
+
+  /** Synchronous read. Same rationale as `writeFileSync`. */
+  readFileSync(path: string, encoding?: "utf8"): Uint8Array | string {
     const p = normalizeVfsPath(path);
     if (encoding !== undefined && encoding !== "utf8") {
       // Runtime guard: JS callers bypassing the TS types must not reach
@@ -181,6 +197,11 @@ export class FileSystem {
   /** Create a directory. Node semantics: `recursive` is `mkdir -p`. */
   async mkdir(path: string, options: { readonly recursive?: boolean } = {}): Promise<void> {
     await Promise.resolve();
+    this.mkdirSync(path, options);
+  }
+
+  /** Synchronous mkdir. Same rationale as `writeFileSync` (ADR-0002 #2, #7). */
+  mkdirSync(path: string, options: { readonly recursive?: boolean } = {}): void {
     const p = normalizeVfsPath(path);
     const recursive = options.recursive === true;
     this.#assertNoFileAncestors(p);
@@ -221,6 +242,11 @@ export class FileSystem {
   /** List direct child names of the directory at `path`, sorted. */
   async readdir(path: string): Promise<string[]> {
     await Promise.resolve();
+    return this.readdirSync(path);
+  }
+
+  /** Synchronous readdir. Same rationale as `writeFileSync` (ADR-0002 #2, #7). */
+  readdirSync(path: string): string[] {
     const p = normalizeVfsPath(path);
     this.#assertNoFileAncestors(p);
     const node = this.#nodes.get(p);
@@ -250,6 +276,11 @@ export class FileSystem {
   /** Stat the file or directory at `path`. */
   async stat(path: string): Promise<Stats> {
     await Promise.resolve();
+    return this.statSync(path);
+  }
+
+  /** Synchronous stat. Same rationale as `writeFileSync` (ADR-0002 #2, #7). */
+  statSync(path: string): Stats {
     const p = normalizeVfsPath(path);
     this.#assertNoFileAncestors(p);
     const node = this.#nodes.get(p);
@@ -271,6 +302,11 @@ export class FileSystem {
   /** Remove the file at `path`. Directories are never removable (POSIX). */
   async unlink(path: string): Promise<void> {
     await Promise.resolve();
+    this.unlinkSync(path);
+  }
+
+  /** Synchronous unlink. Same rationale as `writeFileSync` (ADR-0002 #2, #7). */
+  unlinkSync(path: string): void {
     const p = normalizeVfsPath(path);
     this.#assertNoFileAncestors(p);
     const node = this.#nodes.get(p);
@@ -300,6 +336,11 @@ export class FileSystem {
    */
   async rmdir(path: string): Promise<void> {
     await Promise.resolve();
+    this.rmdirSync(path);
+  }
+
+  /** Synchronous rmdir. Same rationale as `writeFileSync` (ADR-0002 #2, #7). */
+  rmdirSync(path: string): void {
     const p = normalizeVfsPath(path);
     if (p === "/") {
       // The root is always in use; POSIX reports EBUSY, Node surfaces
@@ -334,6 +375,11 @@ export class FileSystem {
    */
   async rename(from: string, to: string): Promise<void> {
     await Promise.resolve();
+    this.renameSync(from, to);
+  }
+
+  /** Synchronous rename. Same rationale as `writeFileSync` (ADR-0002 #2, #7). */
+  renameSync(from: string, to: string): void {
     const src = normalizeVfsPath(from);
     const dst = normalizeVfsPath(to);
     if (src === "/" || dst === "/") {
