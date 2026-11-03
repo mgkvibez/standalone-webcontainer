@@ -13,6 +13,13 @@ import { assertSafeSlug } from "./evidence.js";
 export interface ManifestEntry extends FixtureSlot {
   /** Path to the fixture definition, or null while the corpus is still being specified. */
   readonly definitionPath: string | null;
+  /**
+   * SHA-256 of the definition's canonical content, recorded when the owner froze it (see `freeze.ts`).
+   *
+   * Null means no pin exists. That is not the same as "matches": a frozen definition with no pin cannot be verified,
+   * and `checkFreeze` reports it as `unpinned` rather than scoreable.
+   */
+  readonly frozenHash: string | null;
 }
 
 interface RawEntry {
@@ -20,6 +27,12 @@ interface RawEntry {
   readonly slug?: unknown;
   readonly lane?: unknown;
   readonly definitionPath?: unknown;
+  readonly frozenHash?: unknown;
+}
+
+/** Lowercase hex SHA-256. Rejecting other shapes here means a typo cannot masquerade as a pin mismatch later. */
+function isHash(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 
 function isLane(value: unknown): value is Lane {
@@ -69,12 +82,20 @@ export function parseManifest(raw: unknown): readonly ManifestEntry[] {
       throw new Error(`fixture ${entry.id} definitionPath must be a string or null`);
     }
 
+    const frozenHash = entry.frozenHash;
+    if (frozenHash !== undefined && frozenHash !== null && !isHash(frozenHash)) {
+      throw new Error(
+        `fixture ${entry.id} frozenHash must be a 64-character lowercase hex digest or null, got ${JSON.stringify(frozenHash)}`,
+      );
+    }
+
     seen.add(entry.id);
     entries.push({
       id: entry.id,
       slug: entry.slug,
       lane: entry.lane,
       definitionPath: typeof entry.definitionPath === "string" ? entry.definitionPath : null,
+      frozenHash: isHash(frozenHash) ? frozenHash : null,
     });
   }
 
