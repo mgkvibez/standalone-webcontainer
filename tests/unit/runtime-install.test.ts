@@ -98,6 +98,26 @@ describe("runtime.install", () => {
     expect(exists(vfs, "/app/package.json")).toBe(false);
   });
 
+  it("installs devDependencies by default, and omits them when asked, as npm does", async () => {
+    const manifest = {
+      name: "demo",
+      dependencies: { greeting: "^1.0.0" },
+      devDependencies: { shouty: "^1.0.0" },
+    };
+    const registry = await createFakeRegistry({ packages });
+
+    const withDev = bootVfs();
+    writeManifest(withDev.vfs, manifest);
+    const both = await new InProcessRuntime(withDev.vfs).install({ registry });
+    expect(both.packages.map((entry) => entry.name).sort()).toEqual(["greeting", "shouty"]);
+
+    const production = bootVfs();
+    writeManifest(production.vfs, manifest);
+    const prod = await new InProcessRuntime(production.vfs).install({ registry, includeDev: false });
+    expect(prod.packages.map((entry) => entry.name)).toEqual(["greeting"]);
+    expect(exists(production.vfs, "/app/node_modules/shouty")).toBe(false);
+  });
+
   it("installs into a non-default root", async () => {
     const { vfs } = bootVfs();
     vfs.mkdirSync("/workspace/project", { recursive: true });

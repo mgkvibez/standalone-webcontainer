@@ -119,7 +119,10 @@ export class InProcessRuntime implements Runtime {
       vfs: this.#vfs,
       root,
       lockfile: loadLockfile(this.#vfs, root),
-      ...(options.includeDev === undefined ? {} : { includeDev: options.includeDev }),
+      // npm installs devDependencies by default; --omit=dev is the opt-out. The installer's own default is the
+      // conservative one (top-level callers say what they mean), and the facade restores npm's behaviour here so
+      // that a project's own install brings its test tooling with it.
+      includeDev: options.includeDev ?? true,
       ...(options.writeLockfile === undefined ? {} : { writeLockfile: options.writeLockfile }),
       ...(options.maxPackages === undefined ? {} : { maxPackages: options.maxPackages }),
     });
