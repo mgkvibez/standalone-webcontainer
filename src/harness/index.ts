@@ -7,6 +7,8 @@ export type { EvidenceBundle } from "./evidence.js";
 export type { GateReport, LaneScore } from "./score.js";
 export type { ManifestEntry } from "./manifest.js";
 export type { FreezeCheck, FreezeState, VerifiedScoring } from "./freeze.js";
+export type { AssertionEnvironment, AssertionResult, HttpProbe, StepRecord } from "./assertions.js";
+export type { ExecuteStep, FixtureRunInput, FixtureRunReport, StepExecution, StepRun, StepTermination } from "./runner.js";
 
 export { CLASSIFICATIONS, TIMEOUTS, isClassification } from "./types.js";
 export { normalizeText } from "./normalize.js";
@@ -16,6 +18,8 @@ export { BOUNDARY_IDS, FRONT_END_ONLY_IDS, GATE_THRESHOLD, laneForId, scoreGate 
 export type { AssertionKind, DefinitionStatus, FixtureAssertion, FixtureDefinition, FixtureStep, StepKind, TimeoutClass } from "./definition.js";
 export { isExpectedOutcome, isScoreable, parseDefinition } from "./definition.js";
 export { parseManifest, undefinedFixtures } from "./manifest.js";
+export { evaluateAssertion, ProbeFault } from "./assertions.js";
+export { DEFAULT_BUDGETS, decideVerdict, runFixture } from "./runner.js";
 export {
   assertFreezeIntact,
   checkFreeze,
