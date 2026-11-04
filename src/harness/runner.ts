@@ -149,7 +149,7 @@ export function verifyRefusal(
     };
   }
 
-  const failed = assertions.filter((assertion) => assertion.state === "failed");
+  const failed = assertions.filter((assertion) => assertionState(assertion) === "failed");
   const first = failed[0];
   if (first !== undefined) {
     const more = failed.length > 1 ? ` (and ${failed.length - 1} more)` : "";
@@ -165,7 +165,7 @@ export function verifyRefusal(
     refusal,
     stepIndex: refused.index,
     skippedSteps: steps.filter((step) => step.state === "skipped").length,
-    notEvaluated: assertions.filter((assertion) => assertion.state === "not-evaluated").length,
+    notEvaluated: assertions.filter((assertion) => assertionState(assertion) === "not-evaluated").length,
   };
 }
 
@@ -209,6 +209,17 @@ interface Verdict {
  * A harness fault outranks a timeout for the same reason: if our own interpreter could not run the step, the budget it
  * did or did not exceed is not evidence about anything.
  */
+/**
+ * The state of a result, tolerating a schema-v1 shape.
+ *
+ * A v1 `assertions.json` has no `state`, and a consumer replaying one would otherwise see every entry as neither passed
+ * nor failed. For v1, `passed: false` did mean failure, so that is the correct reading; the fallback exists so old
+ * evidence keeps its original meaning instead of silently dropping out of the count.
+ */
+export function assertionState(assertion: AssertionResult): "passed" | "failed" | "not-evaluated" {
+  return assertion.state ?? (assertion.passed ? "passed" : "failed");
+}
+
 export function decideVerdict(
   steps: readonly StepRun[],
   assertions: readonly AssertionResult[],
@@ -216,7 +227,7 @@ export function decideVerdict(
 ): Verdict {
   // `state`, not `passed`: `passed: false` also covers not-evaluated, and counting that as a failure would turn every
   // legitimate refusal into RUNTIME_INCOMPATIBILITY (ADR-0014 D-8).
-  const failedAssertions = assertions.filter((assertion) => assertion.state === "failed");
+  const failedAssertions = assertions.filter((assertion) => assertionState(assertion) === "failed");
   const describeFailures = (prefix: string): string => {
     const first = failedAssertions[0];
     const more = failedAssertions.length > 1 ? ` (and ${failedAssertions.length - 1} more)` : "";
