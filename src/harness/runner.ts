@@ -116,6 +116,16 @@ export function verifyRefusal(
     };
   }
 
+  if (!Object.isFrozen(refusal)) {
+    // Evidence that can still be mutated is not evidence (ADR-0014 D-10). The runtime freezes at capture via
+    // createRefusal; an unfrozen object means something built this refusal outside that path, so it cannot be trusted.
+    return {
+      verified: false,
+      cause: "malformed",
+      detail: `step ${refused.index} refusal evidence was not frozen at capture, so it could still be mutated`,
+    };
+  }
+
   const required = ["code", "capability", "message", "subject"] as const;
   const missing = required.filter((field) => {
     const value: unknown = refusal[field];
@@ -281,12 +291,39 @@ async function writeRunEvidence(
 ): Promise<FixtureOutcome | null> {
   if (input.evidenceRoot === null) return null;
 
-  const bundle = await writeEvidence(input.evidenceRoot, input.definition.slug, {
+  // One capture, two files (ADR-0014 D-11). The refusal is the SAME frozen object in both renders and is never copied
+  // into a mutable shape: JSON.stringify reads it, so what lands on disk is what the runtime captured.
+  const refusedStep = steps.find((step) => step.refusal !== undefined);
+  const files: Record<string, string> = {
+    // Kept as bare arrays on purpose. Wrapping them to carry a version would break every existing consumer of
+    // steps.json and assertions.json, and backward compatibility outranks a tidier shape (ADR-0014 D-8, condition 1).
+    // The version therefore lives in schema.json and in verdict.txt, beside the files rather than inside them.
     "steps.json": `${JSON.stringify(steps, null, 2)}\n`,
     "assertions.json": `${JSON.stringify(assertions, null, 2)}\n`,
+    "schema.json": `${JSON.stringify({ schemaVersion: 2, fixture: input.definition.slug }, null, 2)}\n`,
     // The verdict is text so a human reading the evidence directory sees it without a tool.
-    "verdict.txt": `fixture: ${input.definition.slug}\nclassification: ${verdict.classification}\nreason: ${verdict.reason}\n`,
-  });
+    "verdict.txt":
+      `fixture: ${input.definition.slug}\n` +
+      `evidence schema: 2\n` +
+      `classification: ${verdict.classification}\n` +
+      `reason: ${verdict.reason}\n`,
+  };
+  if (refusedStep !== undefined) {
+    files["refusals.json"] =
+      `${JSON.stringify(
+        {
+          schemaVersion: 2,
+          stepIndex: refusedStep.index,
+          exitCode: refusedStep.record?.exitCode ?? null,
+          refusal: refusedStep.refusal,
+        },
+        null,
+        2,
+      )}\n`;
+    files["verdict.txt"] += `refusal: ${refusedStep.refusal?.code ?? "unknown"} (${refusedStep.refusal?.capability ?? "unknown"})\n`;
+  }
+
+  const bundle = await writeEvidence(input.evidenceRoot, input.definition.slug, files);
 
   return {
     fixture: { id: input.definition.id, slug: input.definition.slug, lane: input.definition.lane },

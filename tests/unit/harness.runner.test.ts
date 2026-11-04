@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { evaluateAssertion, ProbeFault, type AssertionEnvironment, type StepRecord } from "../../src/harness/assertions.js";
 import { parseDefinition, type FixtureDefinition } from "../../src/harness/definition.js";
 import { decideVerdict, runFixture, type StepRun } from "../../src/harness/runner.js";
-import type { Refusal } from "../../src/runtime/refusal.js";
+import { createRefusal, type Refusal } from "../../src/runtime/refusal.js";
 
 const created: string[] = [];
 
@@ -186,12 +186,12 @@ describe("evaluateAssertion", () => {
 });
 
 function refusalEvidence(): Refusal {
-  return {
+  return createRefusal({
     code: "native-addon",
     capability: "native addon",
     message: "Cannot load native addon /app/x.node: native addons are not supported in this runtime.",
     subject: "/app/x.node",
-  };
+  });
 }
 
 function stepRun(overrides: Partial<StepRun> = {}): StepRun {
