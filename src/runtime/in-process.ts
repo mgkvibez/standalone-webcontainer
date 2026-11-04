@@ -21,6 +21,7 @@ import {
 import { PortRegistry } from "../network/port-registry.js";
 import { PreviewGateway } from "../network/preview-gateway.js";
 import { createFsShim, type FsShim } from "../shims/fs.js";
+import { Duplex, PassThrough, pipeline, Readable, Transform, Writable } from "../shims/stream.js";
 import { path } from "../shims/path.js";
 import { createProcessShim, createSink, ProcessExit, type ProcessShim } from "../shims/process.js";
 import {
@@ -217,6 +218,9 @@ export class InProcessRuntime implements Runtime {
         process: processShim,
         buffer: { Buffer },
         events: { EventEmitter },
+        // ADR-0015's six classes plus pipeline. Real behaviour, not import-only stubs: fixture 4 fails on this import alone,
+        // and a stub would turn four honest failures into four unexplained ones.
+        stream: { Readable, Writable, Duplex, Transform, PassThrough, pipeline },
         // A per-runtime facade rather than the module itself: `createServer` must bind into THIS runtime's
         // registry and attach to THIS runtime's gateway, or a script's server would listen and never be
         // routable. Exported classes are passed through so `instanceof` still works for user code.
