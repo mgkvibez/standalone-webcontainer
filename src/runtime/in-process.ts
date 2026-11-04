@@ -33,6 +33,7 @@ import {
 } from "../npm/install.js";
 import { FileSystem } from "../vfs/index.js";
 import { CommonJsLoader } from "./commonjs.js";
+import { ProcessRefusal, type Refusal } from "./refusal.js";
 
 export interface RunOptions {
   /** Bounds awaits only; synchronous loops cannot be interrupted in-process. */
@@ -69,7 +70,12 @@ export interface ExecutionResult {
   /** True when an async gap exceeded `timeoutMs`; sync hangs cannot set this. */
   readonly timedOut: boolean;
   readonly durationMs: number;
-}
+
+  /**
+   * Present only when an UNHANDLED refusal ended the program (ADR-0014). A program that caught the refusal and carried
+   * on has none: it handled the refusal, so there is nothing to classify.
+   */
+  readonly refusal?: Refusal;}
 
 export interface Runtime {
   run(entryPath: string, options?: RunOptions): Promise<ExecutionResult>;
@@ -228,12 +234,20 @@ export class InProcessRuntime implements Runtime {
     });
     loader.setRuntimeContext({ process: processShim, console: consoleShim, Buffer });
 
+    let capturedRefusal: Refusal | undefined;
+
     const execute = (): number => {
       try {
         loader.loadFile(path.resolve(entryPath));
         return 0;
       } catch (error) {
         if (error instanceof ProcessExit) return error.code;
+        if (error instanceof ProcessRefusal) {
+          // Unhandled: it escaped evaluation, so it terminated the program and the step is a refusal, not a failure.
+          capturedRefusal = error.refusal;
+          stderr.write(`${error.stack ?? error.message}\n`);
+          return 1;
+        }
         const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
         stderr.write(`${message}\n`);
         return 1;
@@ -272,6 +286,8 @@ export class InProcessRuntime implements Runtime {
       exitCode,
       timedOut,
       durationMs: Date.now() - started,
+      // Spread rather than `refusal: undefined`, so the field is absent instead of present-and-empty.
+      ...(capturedRefusal === undefined ? {} : { refusal: capturedRefusal }),
     };
   }
 }

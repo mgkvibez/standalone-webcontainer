@@ -16,6 +16,7 @@
 import { path as nodePath } from "../shims/path.js";
 import { transformEsm } from "./esm.js";
 import type { FsShim } from "../shims/fs.js";
+import { ProcessRefusal } from "./refusal.js";
 
 /** Thrown for a resolver failure; `code` matches Node so callers can branch. */
 export class ModuleNotFoundError extends Error {
@@ -209,10 +210,16 @@ export class CommonJsLoader {
     // JavaScript and failed with "binary is not defined", which reads as a bug in this loader rather than a capability
     // the runtime does not have. The distinction matters to a fixture that is supposed to assert on the refusal.
     if (path.endsWith(".node")) {
-      throw new Error(
-        `Cannot load native addon ${path}: native addons are not supported in this runtime. ` +
+      // A typed refusal (ADR-0014) rather than a plain Error: the fixture layer has to distinguish "the runtime declined
+      // this on purpose" from "the runtime broke", and it can only do that if the refusal carries its own evidence.
+      throw new ProcessRefusal({
+        code: "native-addon",
+        capability: "native addon",
+        message:
+          `Cannot load native addon ${path}: native addons are not supported in this runtime. ` +
           "A package that needs one must ship a WASM build or be replaced with a pure-JS alternative.",
-      );
+        subject: path,
+      });
     }
 
     const record: ModuleRecord = { id: path, exports: {}, loaded: false };
