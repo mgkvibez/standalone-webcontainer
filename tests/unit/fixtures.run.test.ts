@@ -72,7 +72,7 @@ describe("the corpus runs", () => {
     expect(report.outcome?.evidenceDir).toContain("fixture-07");
   });
 
-  it("does not pass fixture 4, which ships no project yet, so its entry point does not exist", async () => {
+  it("passes fixture 4 once its project is staged: five core APIs behaving in one process", async () => {
     const definition = loadDefinition("fixture-04");
     const { runtime, registry, environment, root } = await stage(definition);
 
@@ -80,13 +80,26 @@ describe("the corpus runs", () => {
       definition,
       executeStep: createStepExecutor({ runtime, registry, root }),
       environment,
-      evidenceRoot: null,
+      evidenceRoot: join(scratch, "fixture-04"),
     });
 
-    // The honest current state, and a guard on staging rather than a wish about shims: an unstaged definition points
-    // `node core.mjs` at a file that is not there, so the run fails and is reported as a failure. This test becomes a
-    // PASS assertion the day fixture 4 is staged and the streams/timers shims exist; until then it must not go green.
-    expect(report.classification).toBe("RUNTIME_INCOMPATIBILITY");
-    expect(report.reason).toBe("assertion failed: exit-code: expected exit code 0, observed 1 (and 5 more)");
+    expect(report.classification).toBe("PASS");
+    expect(report.reason).toBe("all 6 assertion(s) passed");
+
+    // Every assertion is reported individually, and each marker is checked separately so a regression names the API rather
+    // than "the fixture broke". The timer and stream markers matter most: they are the two the R3 and R4 subsystems carry,
+    // and a pass that only proved the imports would be worthless here.
+    const step = report.steps[1];
+    expect(step, "the run step is missing from the report").toBeDefined();
+    const stdout = step?.record?.stdout ?? "";
+    for (const marker of ["fs-ok", "http-ok", "stream-ok", "timer-ok", "events-ok"]) {
+      expect(stdout, `missing marker ${marker}`).toContain(marker);
+    }
+    expect(step?.record?.exitCode).toBe(0);
+    expect(step?.record?.stderr).toBe("");
+
+    expect(report.assertions).toHaveLength(6);
+    expect(report.assertions.every((assertion) => assertion.passed)).toBe(true);
+    expect(report.outcome?.evidenceDir).toContain("fixture-04");
   });
 });

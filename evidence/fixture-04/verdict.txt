@@ -1,0 +1,4 @@
+fixture: fixture-04
+evidence schema: 2
+classification: PASS
+reason: all 6 assertion(s) passed
