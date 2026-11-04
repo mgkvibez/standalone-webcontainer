@@ -33,6 +33,7 @@ import {
 } from "./lockfile.js";
 import { compareVersions, isRangeExpression, maxSatisfying } from "./semver-range.js";
 import { DEFAULT_TAR_LIMITS, extractTarball, stripTopLevelDirectory, type TarLimits } from "./tarball.js";
+import { computeIntegrity, sha512Base64 } from "./digest.js";
 
 export interface PackumentVersion {
   readonly name: string;
@@ -158,22 +159,6 @@ function joinPath(...parts: readonly string[]): string {
 
 function stripTrailingSlash(path: string): string {
   return path.length > 1 ? path.replace(/\/+$/, "") : path;
-}
-
-function base64(bytes: Uint8Array): string {
-  // btoa exists in browsers and in Node 16+; going through a binary string keeps one code path.
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
-}
-
-async function sha512Base64(bytes: Uint8Array): Promise<string | null> {
-  const subtle = (globalThis.crypto as Crypto | undefined)?.subtle;
-  if (subtle === undefined) return null;
-  const owned = new ArrayBuffer(bytes.byteLength);
-  new Uint8Array(owned).set(bytes);
-  const digest = await subtle.digest("SHA-512", owned);
-  return base64(new Uint8Array(digest));
 }
 
 /**
@@ -360,11 +345,6 @@ function unsupportedSpecReason(range: string): string | null {
   return null;
 }
 
-/** A `sha512-<base64>` string, or null when the platform gives us no crypto to compute one with. */
-async function computeIntegrity(bytes: Uint8Array): Promise<string | null> {
-  const digest = await sha512Base64(bytes);
-  return digest === null ? null : `sha512-${digest}`;
-}
 
 export async function installDependencies(
   manifest: PackageManifest,
