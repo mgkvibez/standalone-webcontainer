@@ -28,7 +28,16 @@ import { withTimeout } from "./timeout.js";
 import { TIMEOUTS, type Classification, type FixtureOutcome } from "./types.js";
 
 /** How a step ended, independent of what it printed. */
-export type StepTermination = "ok" | "timeout" | "unsupported" | "error";
+/**
+ * How a step ended.
+ *
+ * `unsupported` and `harness-fault` are deliberately different. `unsupported` is a refusal the RUNTIME makes on
+ * purpose (a native addon it will not load), and it is a legitimate result for a fixture that exists to prove the
+ * refusal. `harness-fault` is OUR gap: a command the interpreter cannot run yet, or a shell feature the harness does
+ * not implement. Collapsing the two would report our missing feature as the runtime's design decision, and inflate the
+ * by-design bucket that the gate treats as a legitimate outcome.
+ */
+export type StepTermination = "ok" | "timeout" | "unsupported" | "harness-fault" | "error";
 
 export interface StepExecution {
   /**
@@ -89,14 +98,27 @@ interface Verdict {
  * Precedence is deliberate and stated so a report is reproducible: a harness or network fault outranks everything,
  * because a run we could not observe tells us nothing about the runtime. Then a budget, then a refusal the runtime
  * made on purpose, then a step that errored, and only then a failed assertion.
+ *
+ * A harness fault outranks a timeout for the same reason: if our own interpreter could not run the step, the budget it
+ * did or did not exceed is not evidence about anything.
  */
 export function decideVerdict(steps: readonly StepRun[], assertions: readonly AssertionResult[]): Verdict {
   const failedAssertions = assertions.filter((assertion) => !assertion.passed);
   const describeFailures = (prefix: string): string => {
     const first = failedAssertions[0];
     const more = failedAssertions.length > 1 ? ` (and ${failedAssertions.length - 1} more)` : "";
-    return first === undefined ? prefix : `${prefix}: ${first.detail}${more}`;
+    // The kind is included because "expected 0, got 2" does not say what was expected to be 0, and a report is read by
+    // someone who did not write the fixture.
+    return first === undefined ? prefix : `${prefix}: ${first.kind}: ${first.detail}${more}`;
   };
+
+  const harnessFault = steps.find((step) => step.termination === "harness-fault");
+  if (harnessFault !== undefined) {
+    return {
+      classification: "HARNESS_BUG",
+      reason: `step ${harnessFault.index} (${harnessFault.command}) could not be run by the harness: ${harnessFault.detail}`,
+    };
+  }
 
   const timedOut = steps.find((step) => step.termination === "timeout");
   if (timedOut !== undefined) {

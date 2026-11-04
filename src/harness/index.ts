@@ -9,6 +9,8 @@ export type { ManifestEntry } from "./manifest.js";
 export type { FreezeCheck, FreezeState, VerifiedScoring } from "./freeze.js";
 export type { AssertionEnvironment, AssertionResult, HttpProbe, StepRecord } from "./assertions.js";
 export type { ExecuteStep, FixtureRunInput, FixtureRunReport, StepExecution, StepRun, StepTermination } from "./runner.js";
+export type { CommandPlan, ExecPlan, InstallPlan, InvalidPlan, NodePlan, RunScriptPlan } from "./command.js";
+export type { StepExecutorOptions, StepRuntime } from "./execute.js";
 
 export { CLASSIFICATIONS, TIMEOUTS, isClassification } from "./types.js";
 export { normalizeText } from "./normalize.js";
@@ -20,6 +22,8 @@ export { isExpectedOutcome, isScoreable, parseDefinition } from "./definition.js
 export { parseManifest, undefinedFixtures } from "./manifest.js";
 export { evaluateAssertion, ProbeFault } from "./assertions.js";
 export { DEFAULT_BUDGETS, decideVerdict, runFixture } from "./runner.js";
+export { parseStepCommand } from "./command.js";
+export { createStepExecutor } from "./execute.js";
 export {
   assertFreezeIntact,
   checkFreeze,

@@ -113,6 +113,13 @@ export interface InstallReport {
   readonly warnings: readonly string[];
   /** The lockfile describing what was installed, whether or not it was written to the VFS. */
   readonly lockfile: Lockfile;
+  /**
+   * True when the tree came from an existing lockfile rather than from registry resolution.
+   *
+   * Reported because `npm ci` is defined by refusing to run without one: a caller that wants ci semantics needs to
+   * know whether a lockfile was actually used, and inferring it from "did anything get fetched" is guesswork.
+   */
+  readonly usedLockfile: boolean;
 }
 
 export class InstallError extends Error {
@@ -650,7 +657,7 @@ export async function installDependencies(
     options.vfs.writeFileSync(joinPath(root, "package-lock.json"), serializeLockfile(lockfile));
   }
 
-  return { packages, warnings, lockfile };
+  return { packages, warnings, lockfile, usedLockfile: locked !== null };
 }
 
 /** Human-readable platform description, used in the messages that refuse or skip a package. */
