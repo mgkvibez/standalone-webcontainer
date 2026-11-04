@@ -46,6 +46,22 @@ export interface RunOptions {
   readonly env?: Readonly<Record<string, string>>;
 }
 
+/**
+ * Let queued promise continuations finish, then return.
+ *
+ * A macrotask boundary, deliberately, not `await Promise.resolve()`: one microtask hop only lets the FIRST continuation
+ * run, so a `.then` that queues another `.then` would still be pending. The microtask queue is empty by the time a timer
+ * callback runs, which is the one cheap guarantee available in both a browser and Node.
+ *
+ * This does not wait for anything in the timer queue, because the runtime has no timer queue of its own yet; work
+ * scheduled with a real `setTimeout` of any delay is still unobserved (ADR-0013).
+ */
+async function drainAfterEvaluation(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
+}
+
 export interface ExecutionResult {
   readonly stdout: string;
   readonly stderr: string;
@@ -245,6 +261,10 @@ export class InProcessRuntime implements Runtime {
     } else {
       exitCode = execute();
     }
+
+    // Promise continuations get their turn before the output is read (ADR-0013). Without this, `console.log` inside a
+    // `.then` wrote into a sink nobody read yet, which is indistinguishable from the program printing nothing.
+    if (!timedOut) await drainAfterEvaluation();
 
     return {
       stdout: stdout.text,

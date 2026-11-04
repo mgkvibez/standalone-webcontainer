@@ -34,6 +34,56 @@ describe("InProcessRuntime", () => {
     expect(vfs.readFileSync("/app/data.txt", "utf8")).toBe("written-by-user-code");
   });
 
+  it("includes output written in a promise continuation", async () => {
+    const { vfs, root } = boot({
+      "/app/main.js": 'Promise.resolve().then(() => console.log("from a continuation"));',
+    });
+    const result = await new InProcessRuntime(vfs).run(`${root}/main.js`);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("from a continuation\n");
+  });
+
+  it("includes output from a chain of continuations, not just the first", async () => {
+    const { vfs, root } = boot({
+      "/app/main.js": [
+        "Promise.resolve()",
+        '  .then(() => console.log("one"))',
+        '  .then(() => Promise.resolve())',
+        '  .then(() => console.log("two"))',
+        "  .catch(() => {});",
+      ].join("\n"),
+    });
+    const result = await new InProcessRuntime(vfs).run(`${root}/main.js`);
+
+    // The reason the drain crosses a macrotask boundary: one microtask hop would print "one" and lose "two".
+    expect(result.stdout).toBe("one\ntwo\n");
+  });
+
+  it("includes output written after awaiting Promise.all", async () => {
+    const { vfs, root } = boot({
+      "/app/main.js": [
+        "async function main() {",
+        '  const parts = await Promise.all([Promise.resolve("a"), Promise.resolve("b")]);',
+        "  console.log(parts.join(\"-\"));",
+        "}",
+        "main().catch((error) => console.error(error));",
+      ].join("\n"),
+    });
+    const result = await new InProcessRuntime(vfs).run(`${root}/main.js`);
+
+    expect(result.stdout).toBe("a-b\n");
+  });
+
+  it("still reports synchronous output in order, with continuations after it", async () => {
+    const { vfs, root } = boot({
+      "/app/main.js": 'console.log("sync");\nPromise.resolve().then(() => console.log("async"));',
+    });
+    const result = await new InProcessRuntime(vfs).run(`${root}/main.js`);
+
+    expect(result.stdout).toBe("sync\nasync\n");
+  });
+
   it("starts a script that begins with a shebang, as every installed bin does", async () => {
     const { vfs, root } = boot({
       "/app/bin/tool.js": "#!/usr/bin/env node\nconsole.log('tool ran');",

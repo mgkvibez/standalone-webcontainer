@@ -170,7 +170,7 @@ describe("ES modules", () => {
     expect(result.stdout).toBe("lazy module evaluated\n");
   });
 
-  it("does not observe output written in a promise continuation, which is a known limitation", async () => {
+  it("observes output written in a promise continuation, now that evaluation is followed by a drain", async () => {
     const result = await run(
       {
         "/app/package.json": JSON.stringify({ name: "app", type: "module" }),
@@ -180,11 +180,10 @@ describe("ES modules", () => {
       "main.js",
     );
 
-    // Asserted deliberately: run() snapshots stdout when synchronous evaluation ends, so a continuation writes into a
-    // sink nobody reads. Node would keep the loop alive; we do not, and pretending otherwise would hide real failures.
-    // ADR-0012 records this as the next liveness gap to close.
+    // This asserted the opposite until ADR-0013: the output was written into a sink nobody had read yet, which looked
+    // exactly like a program printing nothing. The test is flipped rather than deleted so the change is visible.
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe("");
+    expect(result.stdout).toBe("after the microtask\n");
   });
 
   it("exposes import.meta.url as a file URL", async () => {
