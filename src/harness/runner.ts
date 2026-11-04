@@ -25,7 +25,8 @@ import { evaluateAssertion, ProbeFault } from "./assertions.js";
 import type { FixtureDefinition, FixtureStep, TimeoutClass } from "./definition.js";
 import { writeEvidence } from "./evidence.js";
 import { withTimeout } from "./timeout.js";
-import { TIMEOUTS, type Classification, type FixtureOutcome } from "./types.js";
+import { CLASSIFICATIONS, TIMEOUTS, type Classification, type FixtureOutcome } from "./types.js";
+import type { Refusal } from "../runtime/refusal.js";
 
 /** How a step ended, independent of what it printed. */
 /**
@@ -46,20 +47,116 @@ export interface StepExecution {
    */
   readonly termination: StepTermination;
   readonly detail: string;
-  /** Absent when the step never produced a process result (timeout or refusal). */
+  /** Absent when the step never produced a process result (timeout). Present for a refusal: its exit is evidence. */
   readonly record: StepRecord | null;
+  /** Required iff `termination === "unsupported"`, carried by reference from the runtime (ADR-0014 D-6). */
+  readonly refusal?: Refusal;
 }
 
 export type ExecuteStep = (step: FixtureStep, index: number) => Promise<StepExecution>;
+
+/** Ran or never ran. A skipped step is recorded, not omitted, so a short report cannot hide a truncated run. */
+export type StepState = "ran" | "skipped";
 
 export interface StepRun {
   readonly index: number;
   readonly kind: FixtureStep["kind"];
   readonly command: string;
-  readonly termination: StepTermination;
+  readonly state: StepState;
+  /** Required iff `state === "skipped"`: names the step and the reason the rest of the fixture did not run. */
+  readonly skipReason?: string;
+  /** `"not-run"` iff skipped, so a skipped step can never be mistaken for an execution outcome. */
+  readonly termination: StepTermination | "not-run";
   readonly detail: string;
   readonly elapsedMs: number;
   readonly record: StepRecord | null;
+  /** The refusal this step produced, carried by reference from the runtime. Never rebuilt from stderr (ADR-0014 D-6). */
+  readonly refusal?: Refusal;
+}
+
+/**
+ * The outcome of verifying a refusal (ADR-0014 D-5). Deliberately a discriminated union rather than a set of booleans:
+ * atomicity is a property of the type, so no caller can combine "well formed" with "declared" and forget the rest.
+ */
+export type RefusalVerification =
+  | {
+      readonly verified: true;
+      readonly refusal: Refusal;
+      readonly stepIndex: number;
+      readonly skippedSteps: number;
+      readonly notEvaluated: number;
+    }
+  | {
+      readonly verified: false;
+      readonly cause: "malformed" | "undeclared" | "assertions-failed";
+      readonly detail: string;
+    };
+
+/**
+ * Decide whether an observed refusal is a verified, by-design refusal — in one pass, with no partial credit.
+ *
+ * Every condition is checked here and nowhere else, in the order that matters: malformedness first (a broken refusal
+ * must not be rescued by a permissive definition), then declaration (an undeclared refusal is a runtime failure), then
+ * the assertions on steps that ran (a refusal whose own evidence contradicts it is not a refusal we can believe).
+ */
+export function verifyRefusal(
+  steps: readonly StepRun[],
+  assertions: readonly AssertionResult[],
+  expected: readonly Classification[],
+): RefusalVerification | null {
+  const refused = steps.find((step) => step.termination === "unsupported");
+  if (refused === undefined) return null;
+
+  const refusal = refused.refusal;
+  if (refusal === undefined) {
+    return {
+      verified: false,
+      cause: "malformed",
+      detail: `step ${refused.index} (${refused.command}) refused without attaching refusal evidence`,
+    };
+  }
+
+  const required = ["code", "capability", "message", "subject"] as const;
+  const missing = required.filter((field) => {
+    const value: unknown = refusal[field];
+    return typeof value !== "string" || value.length === 0;
+  });
+  if (missing.length > 0) {
+    return {
+      verified: false,
+      cause: "malformed",
+      detail: `step ${refused.index} refusal is missing ${missing.join(", ")}`,
+    };
+  }
+
+  if (!expected.includes("UNSUPPORTED_BY_DESIGN")) {
+    return {
+      verified: false,
+      cause: "undeclared",
+      detail:
+        `step ${refused.index} refused ${refusal.capability} (${refusal.code}) but the definition expects only ` +
+        `${expected.join(", ")}`,
+    };
+  }
+
+  const failed = assertions.filter((assertion) => assertion.state === "failed");
+  const first = failed[0];
+  if (first !== undefined) {
+    const more = failed.length > 1 ? ` (and ${failed.length - 1} more)` : "";
+    return {
+      verified: false,
+      cause: "assertions-failed",
+      detail: `refusal evidence did not hold: ${first.kind}: ${first.detail}${more}`,
+    };
+  }
+
+  return {
+    verified: true,
+    refusal,
+    stepIndex: refused.index,
+    skippedSteps: steps.filter((step) => step.state === "skipped").length,
+    notEvaluated: assertions.filter((assertion) => assertion.state === "not-evaluated").length,
+  };
 }
 
 /** Charter §4.5 budgets, mapped onto the step classes the definitions cite. */
@@ -102,8 +199,14 @@ interface Verdict {
  * A harness fault outranks a timeout for the same reason: if our own interpreter could not run the step, the budget it
  * did or did not exceed is not evidence about anything.
  */
-export function decideVerdict(steps: readonly StepRun[], assertions: readonly AssertionResult[]): Verdict {
-  const failedAssertions = assertions.filter((assertion) => !assertion.passed);
+export function decideVerdict(
+  steps: readonly StepRun[],
+  assertions: readonly AssertionResult[],
+  expected: readonly Classification[] = CLASSIFICATIONS,
+): Verdict {
+  // `state`, not `passed`: `passed: false` also covers not-evaluated, and counting that as a failure would turn every
+  // legitimate refusal into RUNTIME_INCOMPATIBILITY (ADR-0014 D-8).
+  const failedAssertions = assertions.filter((assertion) => assertion.state === "failed");
   const describeFailures = (prefix: string): string => {
     const first = failedAssertions[0];
     const more = failedAssertions.length > 1 ? ` (and ${failedAssertions.length - 1} more)` : "";
@@ -130,9 +233,28 @@ export function decideVerdict(steps: readonly StepRun[], assertions: readonly As
 
   const unsupported = steps.find((step) => step.termination === "unsupported");
   if (unsupported !== undefined) {
+    const verification = verifyRefusal(steps, assertions, expected);
+    // verifyRefusal cannot return null here: `unsupported` was found in the same list it was given.
+    if (verification !== null && verification.verified) {
+      const skipped = verification.skippedSteps === 1 ? "1 later step skipped" : `${verification.skippedSteps} later steps skipped`;
+      const notEvaluated =
+        verification.notEvaluated === 0
+          ? "no assertions left unevaluated"
+          : `${verification.notEvaluated} assertion(s) not evaluated`;
+      return {
+        classification: "UNSUPPORTED_BY_DESIGN",
+        reason:
+          `step ${verification.stepIndex} (${unsupported.command}) was refused by design: ` +
+          `${verification.refusal.capability} (${verification.refusal.code}) — ${verification.refusal.message} ` +
+          `[${skipped}; ${notEvaluated}]`,
+      };
+    }
+    // A refusal that cannot be verified is a runtime failure, never a by-design outcome: the bucket must be earned.
     return {
-      classification: "UNSUPPORTED_BY_DESIGN",
-      reason: `step ${unsupported.index} (${unsupported.command}) was refused: ${unsupported.detail}`,
+      classification: "RUNTIME_INCOMPATIBILITY",
+      reason: `a refusal was recorded but could not be verified (${verification?.cause ?? "malformed"}): ${
+        verification?.detail ?? "no evidence"
+      }`,
     };
   }
 
@@ -179,6 +301,11 @@ export async function runFixture(input: FixtureRunInput): Promise<FixtureRunRepo
   const records: StepRecord[] = [];
   const assertions: AssertionResult[] = [];
 
+  /** Which steps ran, so the assertion phase can tell "not run" from "ran and produced nothing". */
+  const availability = new Map<number, StepState>();
+  /** The step that ended the run, and why, so every later step can carry a specific reason rather than a shrug. */
+  let stoppedAt: { readonly index: number; readonly reason: string } | null = null;
+
   for (const [index, step] of input.definition.steps.entries()) {
     const budget = budgets[step.timeoutClass];
     const result = await withTimeout(() => input.executeStep(step, index), budget);
@@ -190,11 +317,14 @@ export async function runFixture(input: FixtureRunInput): Promise<FixtureRunRepo
         index,
         kind: step.kind,
         command: step.command,
+        state: "ran",
         termination: "timeout",
         detail: `no result within ${budget}ms`,
         elapsedMs: result.elapsedMs,
         record: null,
       });
+      availability.set(index, "ran");
+      stoppedAt = { index, reason: `exceeded its ${step.timeoutClass} budget after ${budget}ms` };
       break;
     }
 
@@ -203,40 +333,113 @@ export async function runFixture(input: FixtureRunInput): Promise<FixtureRunRepo
       index,
       kind: step.kind,
       command: step.command,
+      state: "ran",
       termination: execution.termination,
       detail: execution.detail,
       elapsedMs: result.elapsedMs,
       record: execution.record,
+      ...(execution.refusal === undefined ? {} : { refusal: execution.refusal }),
     });
+    availability.set(index, "ran");
     if (execution.record !== null) records.push(execution.record);
     // A step that timed out, was refused, or errored cannot be followed by a meaningful one: continuing would
     // produce assertions against a world that never got built.
-    if (execution.termination !== "ok") break;
+    if (execution.termination !== "ok") {
+      const reason =
+        execution.termination === "unsupported"
+          ? `refused ${execution.refusal?.capability ?? "a capability"} (${execution.refusal?.code ?? "unknown"})`
+          : execution.termination === "harness-fault"
+            ? "could not be run by the harness"
+            : "failed";
+      stoppedAt = { index, reason };
+      break;
+    }
   }
 
-  const allStepsRan = steps.length === input.definition.steps.length && steps.every((step) => step.termination === "ok");
+  if (stoppedAt !== null) {
+    // Recorded rather than omitted (ADR-0014 D-3): a report that simply ends says nothing about what was meant to run,
+    // and a reader cannot tell a truncated fixture from a short one.
+    const stop = stoppedAt;
+    for (const [index, step] of input.definition.steps.entries()) {
+      if (index <= stop.index) continue;
+      availability.set(index, "skipped");
+      steps.push({
+        index,
+        kind: step.kind,
+        command: step.command,
+        state: "skipped",
+        skipReason: `step ${stop.index} ${stop.reason}`,
+        termination: "not-run",
+        detail: `not run: step ${stop.index} ${stop.reason}`,
+        elapsedMs: 0,
+        record: null,
+      });
+    }
+  }
 
+  // Assertions are evaluated by availability, not gated on the whole run succeeding (ADR-0014 D-2/D-4): the step that
+  // was refused still ran, so assertions about its evidence are meaningful and must actually be checked.
   let fault: ProbeFault | null = null;
-  if (allStepsRan) {
-    for (const [index, assertion] of input.definition.assertions.entries()) {
-      try {
-        assertions.push(await evaluateAssertion(assertion, index, records, input.environment));
-      } catch (error) {
-        if (error instanceof ProbeFault) {
-          fault = error;
-          break;
-        }
-        throw error;
+  // A refusal is the one stop whose evidence must still be checked, because the classification depends on it. Every
+  // other stop keeps the older rule: nothing is evaluated once the world stopped being built, which is what the
+  // timeout fixture asserts and what stops a half-built environment reporting NETWORK for a step that never ran.
+  const stoppedStep = stoppedAt === null ? undefined : steps.find((step) => step.index === stoppedAt?.index);
+  const refusalStop = stoppedStep?.termination === "unsupported";
+
+  for (const [index, assertion] of input.definition.assertions.entries()) {
+    const stepIndex = "step" in assertion && typeof assertion.step === "number" ? assertion.step : null;
+    if (stepIndex !== null && availability.get(stepIndex) === "ran" && stoppedAt !== null && !refusalStop) {
+      assertions.push({
+        index,
+        kind: assertion.kind,
+        state: "not-evaluated",
+        passed: false,
+        stepAvailable: true,
+        detail: `step ${stoppedAt.index} ${stoppedAt.reason} before this could be checked`,
+      });
+      continue;
+    }
+    if (stepIndex === null && stoppedAt !== null) {
+      // A file or http assertion observes the world AFTER all steps. If the run stopped early, that world was never
+      // built, so evaluating it would probe a half-built environment and report NETWORK for what is really "not run".
+      // This preserves the pre-ADR behaviour exactly: nothing outside a step is evaluated when the run stopped.
+      assertions.push({
+        index,
+        kind: assertion.kind,
+        state: "not-evaluated",
+        passed: false,
+        stepAvailable: false,
+        detail: `the run stopped at step ${stoppedAt.index} (${stoppedAt.reason}), so ${assertion.kind} was never reached`,
+      });
+      continue;
+    }
+    if (stepIndex !== null && availability.get(stepIndex) === "skipped") {
+      const skipped = steps.find((step) => step.index === stepIndex);
+      assertions.push({
+        index,
+        kind: assertion.kind,
+        state: "not-evaluated",
+        passed: false,
+        stepAvailable: false,
+        detail: `step ${stepIndex} did not run (${skipped?.skipReason ?? "skipped"}), so ${assertion.kind} cannot be checked`,
+      });
+      continue;
+    }
+    try {
+      assertions.push(await evaluateAssertion(assertion, index, records, input.environment));
+    } catch (error) {
+      if (error instanceof ProbeFault) {
+        fault = error;
+        break;
       }
+      throw error;
     }
   }
 
   const verdict: Verdict =
     fault !== null
       ? { classification: fault.classification, reason: fault.message }
-      : allStepsRan
-        ? decideVerdict(steps, assertions)
-        : decideVerdict(steps, []);
+      : decideVerdict(steps, assertions, input.definition.expected);
 
   // Only a surprise PASS is held back. Every failure classification is reported as itself: relabelling a TIMEOUT,
   // NETWORK or HARNESS_BUG as a bad baseline would accuse the fixture of a fault it did not cause and erase the

@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { evaluateAssertion, ProbeFault, type AssertionEnvironment, type StepRecord } from "../../src/harness/assertions.js";
 import { parseDefinition, type FixtureDefinition } from "../../src/harness/definition.js";
 import { decideVerdict, runFixture, type StepRun } from "../../src/harness/runner.js";
+import type { Refusal } from "../../src/runtime/refusal.js";
 
 const created: string[] = [];
 
@@ -184,11 +185,21 @@ describe("evaluateAssertion", () => {
   });
 });
 
+function refusalEvidence(): Refusal {
+  return {
+    code: "native-addon",
+    capability: "native addon",
+    message: "Cannot load native addon /app/x.node: native addons are not supported in this runtime.",
+    subject: "/app/x.node",
+  };
+}
+
 function stepRun(overrides: Partial<StepRun> = {}): StepRun {
   return {
     index: 0,
     kind: "install",
     command: "npm install",
+    state: "ran",
     termination: "ok",
     detail: "installed",
     elapsedMs: 5,
@@ -198,8 +209,22 @@ function stepRun(overrides: Partial<StepRun> = {}): StepRun {
 }
 
 describe("decideVerdict precedence", () => {
-  const passed = { index: 0, kind: "exit-code" as const, passed: true, detail: "ok" };
-  const failed = { index: 0, kind: "exit-code" as const, passed: false, detail: "expected exit code 0, observed 1" };
+  const passed = {
+    index: 0,
+    kind: "exit-code" as const,
+    state: "passed" as const,
+    passed: true,
+    stepAvailable: true,
+    detail: "ok",
+  };
+  const failed = {
+    index: 0,
+    kind: "exit-code" as const,
+    state: "failed" as const,
+    passed: false,
+    stepAvailable: true,
+    detail: "expected exit code 0, observed 1",
+  };
 
   it("prefers a timeout over anything that may also have gone wrong", () => {
     const verdict = decideVerdict([stepRun({ termination: "timeout", elapsedMs: 180000 })], [failed]);
@@ -207,9 +232,38 @@ describe("decideVerdict precedence", () => {
     expect(verdict.reason).toContain("180000ms");
   });
 
-  it("prefers a designed refusal over an assertion failure", () => {
-    const verdict = decideVerdict([stepRun({ termination: "unsupported", detail: "native addon refused" })], [failed]);
+  it("does not verify a refusal whose own evidence failed, because the bucket must be earned", () => {
+    // This previously asserted the opposite: that a refusal outranked a failed assertion. ADR-0014 D-5 makes
+    // classification atomic, so a refusal contradicted by its own evidence is a runtime failure, not a by-design result.
+    const verdict = decideVerdict(
+      [stepRun({ termination: "unsupported", detail: "native addon refused", refusal: refusalEvidence() })],
+      [failed],
+      ["UNSUPPORTED_BY_DESIGN"],
+    );
+    expect(verdict.classification).toBe("RUNTIME_INCOMPATIBILITY");
+    expect(verdict.reason).toContain("assertions-failed");
+  });
+
+  it("prefers a verified refusal over a step error, since the refusal is the finding", () => {
+    const verdict = decideVerdict(
+      [
+        stepRun({ termination: "unsupported", detail: "native addon refused", refusal: refusalEvidence() }),
+        { ...stepRun({ index: 1 }), termination: "error", detail: "TypeError: x is not a function" },
+      ],
+      [passed],
+      ["UNSUPPORTED_BY_DESIGN"],
+    );
     expect(verdict.classification).toBe("UNSUPPORTED_BY_DESIGN");
+  });
+
+  it("treats a refusal with no evidence as a runtime failure, never as a refusal by design", () => {
+    const verdict = decideVerdict(
+      [stepRun({ termination: "unsupported", detail: "refused" })],
+      [passed],
+      ["UNSUPPORTED_BY_DESIGN"],
+    );
+    expect(verdict.classification).toBe("RUNTIME_INCOMPATIBILITY");
+    expect(verdict.reason).toContain("malformed");
   });
 
   it("prefers a step error over a failed assertion", () => {
@@ -272,18 +326,40 @@ describe("runFixture", () => {
     expect(report.classification).toBe("TIMEOUT");
     expect(report.steps).toHaveLength(2);
     expect(report.steps[1]?.termination).toBe("timeout");
-    expect(report.assertions).toHaveLength(0);
+    // ADR-0014 D-4: an assertion that could not be evaluated is recorded as not-evaluated, not dropped. Dropping it made
+    // a truncated run indistinguishable from a fixture with nothing to check. Its earlier assertion (on the step that
+    // did run) is also not evaluated, because a timeout keeps the older rule that nothing is checked once the run stops.
+    expect(report.assertions).toHaveLength(1);
+    expect(report.assertions[0]?.state).toBe("not-evaluated");
+    expect(report.assertions[0]?.passed).toBe(false);
     expect(report.outcome).toBeNull();
   });
 
   it("classifies a designed refusal, which is how the native-addon fixture is meant to end", async () => {
     const report = await runFixture({
-      definition: definition({ expected: ["UNSUPPORTED_BY_DESIGN"] }),
-      executeStep: async () => ({ termination: "unsupported", detail: "native addon loading is disabled", record: null }),
+      definition: definition({
+        expected: ["UNSUPPORTED_BY_DESIGN"],
+        assertions: [
+          { kind: "exit-code", step: 0, equals: 1 },
+          { kind: "stderr-contains", step: 0, contains: "native addon" },
+        ],
+      }),
+      executeStep: async () => ({
+        termination: "unsupported",
+        detail: "native addon loading is disabled",
+        record: record({
+          exitCode: 1,
+          stderr: "Cannot load native addon /app/x.node: native addons are not supported in this runtime.\n",
+        }),
+        refusal: refusalEvidence(),
+      }),
       environment: environment(),
       evidenceRoot: null,
     });
     expect(report.classification).toBe("UNSUPPORTED_BY_DESIGN");
+    // The point of the fixture: its evidence was actually checked, not skipped.
+    expect(report.assertions.map((assertion) => assertion.state)).toEqual(["passed", "passed"]);
+    expect(report.reason).toContain("native-addon");
   });
 
   it("holds back a surprise PASS, because a fixture that cannot pass passing is a bad baseline", async () => {
@@ -303,8 +379,16 @@ describe("runFixture", () => {
     // A fixture declaring only PASS is expected to pass, but a timeout is still a timeout: calling it INVALID_BASELINE
     // would hide what actually happened and blame the fixture for the runtime's or the harness's behaviour.
     const report = await runFixture({
-      definition: definition(),
-      executeStep: async () => ({ termination: "unsupported", detail: "refused", record: null }),
+      definition: definition({
+        expected: ["UNSUPPORTED_BY_DESIGN"],
+        assertions: [{ kind: "exit-code", step: 0, equals: 1 }],
+      }),
+      executeStep: async () => ({
+        termination: "unsupported",
+        detail: "refused",
+        record: record({ exitCode: 1, stderr: "native addon refused\n" }),
+        refusal: refusalEvidence(),
+      }),
       environment: environment(),
       evidenceRoot: null,
     });

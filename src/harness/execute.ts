@@ -17,6 +17,7 @@ import type { FixtureStep } from "./definition.js";
 import { parseStepCommand } from "./command.js";
 import { ProjectError, readPackageScripts, resolveBin } from "./scripts.js";
 import type { StepRecord } from "./assertions.js";
+import type { Refusal } from "../runtime/refusal.js";
 import type { ExecuteStep, StepExecution } from "./runner.js";
 
 /** The runtime capabilities a step can use. Narrow on purpose: the harness needs a slice, not a runtime. */
@@ -32,6 +33,8 @@ export interface StepRuntime {
     readonly stdout: string;
     readonly stderr: string;
     readonly exitCode: number;
+    /** Present only when an unhandled refusal ended the program (ADR-0014). */
+    readonly refusal?: Refusal;
   }>;
 }
 
@@ -118,6 +121,29 @@ async function runInstall(
   };
 }
 
+/** The runtime's result, classified: a run that carried an unhandled refusal is a refusal, not an ordinary exit. */
+function fromRun(
+  index: number,
+  detail: string,
+  result: Awaited<ReturnType<StepRuntime["run"]>>,
+): StepExecution {
+  const record: StepRecord = {
+    index,
+    exitCode: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
+  if (result.refusal !== undefined) {
+    return {
+      termination: "unsupported",
+      detail: `${detail}; refused ${result.refusal.capability} (${result.refusal.code})`,
+      record,
+      refusal: result.refusal,
+    };
+  }
+  return { termination: "ok", detail, record };
+}
+
 async function runNode(
   plan: { readonly kind: "node"; readonly entry: string; readonly args: readonly string[] },
   index: number,
@@ -127,13 +153,7 @@ async function runNode(
   const entry = plan.entry.startsWith("/") ? plan.entry : `${root.replace(/\/$/, "")}/${plan.entry}`;
   try {
     const result = await options.runtime.run(entry, { argv: ["node", plan.entry, ...plan.args], cwd: root });
-    const record: StepRecord = {
-      index,
-      exitCode: result.exitCode,
-      stdout: result.stdout,
-      stderr: result.stderr,
-    };
-    return { termination: "ok", detail: `node ${plan.entry} exited ${result.exitCode}`, record };
+    return fromRun(index, `node ${plan.entry} exited ${result.exitCode}`, result);
   } catch (error) {
     // A thrown load error is the runtime being unable to execute the program at all. That is a finding about the
     // runtime, and the runner classifies `error` as RUNTIME_INCOMPATIBILITY.
@@ -222,11 +242,7 @@ async function runBin(
     const result = await options.runtime.run(resolved.entryPath, {
       argv: ["node", resolved.entryPath, ...args],
     });
-    return {
-      termination: "ok",
-      detail: `${bin} (${resolved.packageName}) exited ${result.exitCode}`,
-      record: { index, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr },
-    };
+    return fromRun(index, `${bin} (${resolved.packageName}) exited ${result.exitCode}`, result);
   } catch (error) {
     return {
       termination: "error",

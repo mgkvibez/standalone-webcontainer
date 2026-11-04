@@ -57,10 +57,28 @@ export class ProbeFault extends Error {
   }
 }
 
+/**
+ * A three-state result, because "did not pass" is two different findings (ADR-0014 D-4).
+ *
+ * `not-evaluated` means the step this asserts on never ran, so there was nothing to observe. Counting it as a failure
+ * would accuse the runtime of producing a wrong value it was never asked for.
+ */
+export type AssertionState = "passed" | "failed" | "not-evaluated";
+
 export interface AssertionResult {
   readonly index: number;
   readonly kind: AssertionKind;
+  /** Authoritative. Every scoring path reads this rather than `passed`. */
+  readonly state: AssertionState;
+  /**
+   * Retained for backward compatibility and derived as exactly `state === "passed"`.
+   *
+   * It is NOT a synonym for "failed": `passed: false` covers both `failed` and `not-evaluated`. Schema v2 therefore
+   * requires state-aware consumers; a reader that treats `false` as failure will misreport a legitimate refusal.
+   */
   readonly passed: boolean;
+  /** Whether the step this assertion refers to actually ran. Always true for file and http assertions. */
+  readonly stepAvailable: boolean;
   /** Human-readable, always naming what was expected and what was observed. */
   readonly detail: string;
 }
@@ -87,14 +105,24 @@ export async function evaluateAssertion(
   const result = (passed: boolean, detail: string): AssertionResult => ({
     index,
     kind: assertion.kind,
+    state: passed ? "passed" : "failed",
     passed,
+    stepAvailable: true,
     detail,
   });
 
   if (STEP_KINDS.includes(assertion.kind)) {
     const step = steps.find((candidate) => candidate.index === assertion.step);
     if (step === undefined) {
-      return result(false, `step ${assertion.step} did not run, so ${assertion.kind} cannot be checked`);
+      // Not a failure: the step never produced a record, so the assertion could not be evaluated at all.
+      return {
+        index,
+        kind: assertion.kind,
+        state: "not-evaluated",
+        passed: false,
+        stepAvailable: false,
+        detail: `step ${assertion.step} did not run, so ${assertion.kind} cannot be checked`,
+      };
     }
 
     if (assertion.kind === "exit-code") {

@@ -200,6 +200,8 @@ describe("a whole fixture through the harness", () => {
     });
 
     expect(report.classification).toBe("TIMEOUT");
-    expect(report.assertions).toHaveLength(0);
+    // ADR-0014 D-4 records an unevaluated assertion instead of dropping it, so the report shows what was never checked.
+    expect(report.assertions).toHaveLength(1);
+    expect(report.assertions[0]?.state).toBe("not-evaluated");
   });
 });
