@@ -1,6 +1,6 @@
 {
   "status": "numbering and lanes from README \u00a75; content defined from published evidence, status=proposed pending owner sign-off",
-  "note": "Each definitionPath points at fixtures/definitions/fixture-NN.json. A definition with status=proposed is not scoreable: the gate may only count frozen definitions, because charter \u00a74.9 forbids redefining the gate after results exist.",
+  "note": "Each definitionPath points at fixtures/definitions/fixture-NN.json. A definition with status=proposed is not scoreable: the gate may only count frozen definitions, because charter \u00a74.9 forbids redefining the gate after results exist. frozenHash is the SHA-256 of the definition's canonical content with the status field excluded; it is written by `npm run fixtures:freeze` once the owner marks a definition frozen, and verified by `npm run fixtures:check`, which fails on drift (ADR-0007).",
   "fixtures": [
     {
       "id": 1,

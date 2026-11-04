@@ -30,7 +30,7 @@ implementation decisions are recorded with an audit question each in
 | VFS (in-memory POSIX) | Implemented — `src/vfs/` |
 | Node.js shims | `fs`, `path`, `process`, `buffer`, `events`, `http` — `src/shims/` (crypto deferred, ADR-0003) |
 | Test harness (fixtures, timeouts, scoring) | Implemented — `src/harness/` |
-| Fixture corpus | 20 definitions written, `status: proposed` — `fixtures/definitions/` (freezing is the owner's act) |
+| Fixture corpus | 20 definitions written, `status: proposed` — `fixtures/definitions/`. Freezing is the owner's act; `npm run fixtures:freeze` records the pins, `npm run fixtures:check` (part of `verify`) fails on drift (ADR-0007) |
 | Runtime (unified interface, hybrid lanes) | In-process CommonJS lane implemented — `src/runtime/` (worker lane not started) |
 | Network (service-worker proxy) | Gateway, fetch handler and worker bridge implemented — `src/network/`; registration wiring not started |
 | Terminal (xterm.js + PTY bridge) | Scaffold — Not started |
@@ -43,8 +43,9 @@ implementation decisions are recorded with an audit question each in
 ```
 npm install        # dev tooling only (typescript, vitest, @playwright/test, @types/node)
 npm run typecheck  # tsc --noEmit under strict tsconfig
-npm test           # vitest run (VFS, shims, harness, network and npm: 332 tests)
-npm run verify     # typecheck + tests in one command, what CI runs
+npm test           # vitest run (VFS, shims, harness, network and npm: 360 tests)
+npm run fixtures:check   # verify frozen fixture pins (no writes); part of `verify`
+npm run verify     # typecheck + tests + fixture pins, what CI runs
 ```
 
 ## Reviewers start here
