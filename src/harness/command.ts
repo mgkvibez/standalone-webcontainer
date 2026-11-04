@@ -41,6 +41,14 @@ export interface ExecPlan {
   readonly kind: "exec";
   readonly bin: string;
   readonly args: readonly string[];
+  /**
+   * Set when the command was written `npx <bin>`.
+   *
+   * It changes what a missing binary MEANS. A bare `vite` that is not installed is a broken project, so it is a project
+   * failure. `npx vite` that is not installed is npm offering to fetch it, which is a harness limitation, and calling
+   * that a project failure would blame the fixture for our missing feature.
+   */
+  readonly via?: "npx";
 }
 
 export interface InvalidPlan {
@@ -74,12 +82,69 @@ export function parseStepCommand(command: string): CommandPlan {
   const rest = tokens.slice(1);
 
   if (program === "npm") return parseNpm(rest);
+  if (program === "npx") return parseNpx(rest);
   if (program === "node") {
     const entry = rest[0];
     if (entry === undefined) return { kind: "invalid", reason: "node: an entry file is required" };
     return { kind: "node", entry, args: rest.slice(1) };
   }
   return { kind: "exec", bin: program, args: rest };
+}
+
+/**
+ * The npx flags we honour. `--yes`/`-y` only suppress a prompt we never show, and `--no-install` only forbids something
+ * we refuse anyway, so both are accepted and have no further effect.
+ */
+const KNOWN_NPX_FLAGS: readonly string[] = ["--yes", "-y", "--no-install", "--no", "--quiet", "-q"];
+
+/**
+ * `npx`, in the limited form this harness can honour.
+ *
+ * Supported: `npx <bin> [args]` and `npx --no-install <bin> [args]`, where `<bin>` is provided by a package the project
+ * already installed. That is resolution, not acquisition.
+ *
+ * Refused by name: a versioned or tagged package spec (`npx shadcn@latest add button`, `npx cowsay@1 hello`), because
+ * npx would fetch and install a package the project does not declare, and a fixture that ran it would be testing a tree
+ * its own package.json does not describe. Also refused by name: any flag not in the list above, so an unimplemented flag
+ * cannot quietly change what the fixture tests.
+ */
+function parseNpx(rest: readonly string[]): CommandPlan {
+  let spec: string | undefined;
+  const args: string[] = [];
+  for (const token of rest) {
+    if (spec === undefined) {
+      if (token.startsWith("-")) {
+        if (!KNOWN_NPX_FLAGS.includes(token)) {
+          return { kind: "invalid", reason: `npx ${token}: not interpreted by this harness` };
+        }
+        continue;
+      }
+      spec = token;
+      continue;
+    }
+    args.push(token);
+  }
+  if (spec === undefined) return { kind: "invalid", reason: "npx: a binary name is required" };
+  if (isVersionedSpec(spec)) {
+    return {
+      kind: "invalid",
+      reason:
+        `npx ${spec}: fetching a package from the registry is not supported; ` +
+        `declare it in package.json and install it`,
+    };
+  }
+  return { kind: "exec", bin: spec, args, via: "npx" };
+}
+
+/**
+ * Whether a spec names a version or tag, i.e. whether npx would install something.
+ *
+ * `pkg@1`, `pkg@latest` and `@scope/pkg@1` are versioned. `@scope/pkg` is not: its first `@` belongs to the scope, and
+ * reading it as a version would refuse a legitimate binary name.
+ */
+function isVersionedSpec(spec: string): boolean {
+  const body = spec.startsWith("@") ? spec.slice(spec.indexOf("/") + 1) : spec;
+  return body.includes("@");
 }
 
 function parseNpm(rest: readonly string[]): CommandPlan {

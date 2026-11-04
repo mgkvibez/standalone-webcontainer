@@ -62,8 +62,9 @@ export function createStepExecutor(options: StepExecutorOptions): ExecuteStep {
     if (plan.kind === "run-script") {
       return runScript(plan, index, root, options, 0);
     }
-    // A bare binary (`vite`, `tsc`) resolves through the installed packages' `bin` fields.
-    return runBin(plan.bin, plan.args, index, root, options);
+    // A bare binary (`vite`, `tsc`) resolves through the installed packages' `bin` fields. `via` travels with the plan:
+    // dropping it here made `npx tsc` look like a bare `tsc` and reported our limitation as a broken project.
+    return runBin(plan.bin, plan.args, index, root, options, plan.via);
 
   };
 }
@@ -208,7 +209,7 @@ async function runScript(
     case "node":
       return runNode({ kind: "node", entry: parsed.entry, args: [...parsed.args, ...forwarded] }, index, root, options);
     case "exec":
-      return runBin(parsed.bin, [...parsed.args, ...forwarded], index, root, options);
+      return runBin(parsed.bin, [...parsed.args, ...forwarded], index, root, options, parsed.via);
     case "run-script":
       return runScript(
         { kind: "run-script", script: parsed.script, args: [...parsed.args, ...forwarded] },
@@ -231,9 +232,18 @@ async function runBin(
   index: number,
   root: string,
   options: StepExecutorOptions,
+  via?: "npx",
 ): Promise<StepExecution> {
   const resolved = resolveBin(options.runtime, root, bin);
   if (resolved === null) {
+    if (via === "npx") {
+      // npx's documented job is to fetch a missing package. We do not, so this is our limitation, not a broken project:
+      // a harness fault keeps it out of the runtime's and the fixture's score.
+      return harnessFault(
+        index,
+        `npx ${bin}: not provided by an installed package, and fetching it from the registry is not supported`,
+      );
+    }
     return projectFailure(index, `npm error command not found: ${bin}`);
   }
 

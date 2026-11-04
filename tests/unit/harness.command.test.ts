@@ -68,6 +68,48 @@ describe("parseStepCommand", () => {
     expect(parseStepCommand("vite build")).toEqual({ kind: "exec", bin: "vite", args: ["build"] });
   });
 
+  it("reads npx as resolution of an installed bin, not as an install", () => {
+    expect(parseStepCommand("npx tsc -p tsconfig.json")).toEqual({
+      kind: "exec",
+      bin: "tsc",
+      args: ["-p", "tsconfig.json"],
+      via: "npx",
+    });
+    expect(parseStepCommand("npx --no-install cowsay hello")).toEqual({
+      kind: "exec",
+      bin: "cowsay",
+      args: ["hello"],
+      via: "npx",
+    });
+    // --yes and -y only suppress a prompt we never show.
+    expect(parseStepCommand("npx --yes tsc --version")).toEqual({ kind: "exec", bin: "tsc", args: ["--version"], via: "npx" });
+  });
+
+  it("keeps a scoped package name intact, because its first @ is a scope and not a version", () => {
+    expect(parseStepCommand("npx @scope/pkg run")).toEqual({ kind: "exec", bin: "@scope/pkg", args: ["run"], via: "npx" });
+  });
+
+  it("refuses a versioned npx spec by name, because npx would install it", () => {
+    const latest = parseStepCommand("npx --yes shadcn@latest add button");
+    expect(latest.kind).toBe("invalid");
+    expect(latest.kind === "invalid" ? latest.reason : "").toMatch(/registry/);
+    expect(latest.kind === "invalid" ? latest.reason : "").toContain("shadcn@latest");
+
+    const scopedVersioned = parseStepCommand("npx @scope/pkg@1 run");
+    expect(scopedVersioned.kind).toBe("invalid");
+    expect(scopedVersioned.kind === "invalid" ? scopedVersioned.reason : "").toContain("@scope/pkg@1");
+  });
+
+  it("refuses an npx flag it does not implement, rather than ignoring it", () => {
+    const result = parseStepCommand("npx --package=left-pad cowsay");
+    expect(result.kind).toBe("invalid");
+    expect(result.kind === "invalid" ? result.reason : "").toContain("--package=left-pad");
+  });
+
+  it("requires a binary name after npx", () => {
+    expect(parseStepCommand("npx --yes").kind).toBe("invalid");
+  });
+
   it("honours quotes so an argument may contain a space", () => {
     expect(parseStepCommand('node app.js --message "hello world"')).toEqual({
       kind: "node",
@@ -239,6 +281,53 @@ describe("createStepExecutor", () => {
     expect(result.termination).toBe("ok");
     expect(result.record?.exitCode).toBe(1);
     expect(result.record?.stderr).toMatch(/command not found: vite/);
+  });
+
+  it("reports a missing npx target as our limitation, and a missing bare binary as the project's", async () => {
+    const empty = fakeRuntime({
+      readDirNames: (path) => (path.endsWith("/node_modules") ? ["other"] : []),
+      readFileText: (path) =>
+        path.endsWith("/package.json") && path.includes("/node_modules/other")
+          ? JSON.stringify({ name: "other", bin: { other: "cli.js" } })
+          : null,
+    });
+
+    // `npx tsc` with nothing installed: npx would fetch it, which we refuse. That is a harness limitation, so it must not
+    // be scored against the runtime or the fixture.
+    const viaNpx = await executor(empty)(step("npx tsc -p tsconfig.json"), 1);
+    expect(viaNpx.termination).toBe("harness-fault");
+    expect(viaNpx.detail).toMatch(/npx tsc/);
+    expect(viaNpx.detail).toMatch(/registry is not supported/);
+
+    // The same binary written bare is a broken project: npm would say "command not found" in its own shell.
+    const bare = await executor(empty)(step("tsc -p tsconfig.json"), 1);
+    expect(bare.termination).toBe("ok");
+    expect(bare.record?.exitCode).toBe(1);
+    expect(bare.record?.stderr).toMatch(/command not found: tsc/);
+  });
+
+  it("runs an npx target that an installed package does provide", async () => {
+    const seen: string[][] = [];
+    const installed = fakeRuntime({
+      readDirNames: (path) => (path.endsWith("/node_modules") ? ["typescript"] : []),
+      readFileText: (path) => {
+        if (path.endsWith("/package.json") && path.includes("/node_modules/typescript")) {
+          return JSON.stringify({ name: "typescript", bin: { tsc: "bin/tsc" } });
+        }
+        if (path.endsWith("/package.json")) return JSON.stringify({ name: "app", version: "1.0.0" });
+        return null;
+      },
+      async run(entryPath, options) {
+        seen.push([entryPath, ...(options?.argv ?? [])]);
+        return { stdout: "tsc 5.0.0\n", stderr: "", exitCode: 0 };
+      },
+    });
+
+    const result = await executor(installed)(step("npx --no-install tsc -p tsconfig.json"), 1);
+
+    expect(result.termination).toBe("ok");
+    expect(result.record?.exitCode).toBe(0);
+    expect(seen).toEqual([["/app/node_modules/typescript/bin/tsc", "node", "/app/node_modules/typescript/bin/tsc", "-p", "tsconfig.json"]]);
   });
 
   it("refuses a script that hides an install inside a run step", async () => {
