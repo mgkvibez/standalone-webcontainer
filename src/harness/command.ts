@@ -54,6 +54,11 @@ export interface ExecPlan {
 export interface InvalidPlan {
   readonly kind: "invalid";
   readonly reason: string;
+  /**
+   * Set when the command is refused by POLICY rather than because we have not implemented it. The executor then reports a
+   * `restricted` outcome instead of a harness fault, so our deliberate scope never reads as a defect (ADR-0010 am. 2).
+   */
+  readonly restriction?: Restriction;
 }
 
 export type CommandPlan = InstallPlan | RunScriptPlan | NodePlan | ExecPlan | InvalidPlan;
@@ -70,6 +75,8 @@ const KNOWN_INSTALL_FLAGS: readonly string[] = [
   "--silent",
   "--loglevel=error",
 ];
+
+import { createRestriction, type Restriction } from "./restriction.js";
 
 const SHELL_SYNTAX = /[|&;<>()`$]/;
 
@@ -126,12 +133,14 @@ function parseNpx(rest: readonly string[]): CommandPlan {
   }
   if (spec === undefined) return { kind: "invalid", reason: "npx: a binary name is required" };
   if (isVersionedSpec(spec)) {
-    return {
-      kind: "invalid",
-      reason:
-        `npx ${spec}: fetching a package from the registry is not supported; ` +
-        `declare it in package.json and install it`,
-    };
+    // A policy restriction, not a defect: npx would fetch, and fetching is disabled on purpose this milestone.
+    const restriction = createRestriction({
+      policy: "offline-registry",
+      operation: `npx ${spec}`,
+      reason: "registry fetches are disabled by policy for this milestone",
+      alternative: `declare the package in package.json (currently ${spec}) and install it from the project tree`,
+    });
+    return { kind: "invalid", reason: `${spec}: ${restriction.reason}`, restriction };
   }
   return { kind: "exec", bin: spec, args, via: "npx" };
 }

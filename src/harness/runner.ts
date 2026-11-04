@@ -27,6 +27,7 @@ import { writeEvidence } from "./evidence.js";
 import { withTimeout } from "./timeout.js";
 import { CLASSIFICATIONS, TIMEOUTS, type Classification, type FixtureOutcome } from "./types.js";
 import type { Refusal } from "../runtime/refusal.js";
+import { describeRestriction, type Restriction } from "./restriction.js";
 
 /** How a step ended, independent of what it printed. */
 /**
@@ -37,8 +38,12 @@ import type { Refusal } from "../runtime/refusal.js";
  * refusal. `harness-fault` is OUR gap: a command the interpreter cannot run yet, or a shell feature the harness does
  * not implement. Collapsing the two would report our missing feature as the runtime's design decision, and inflate the
  * by-design bucket that the gate treats as a legitimate outcome.
+ *
+ * `restricted` is the third case (ADR-0010 amendment 2): a boundary we chose, such as the offline-registry policy. It is
+ * not a defect to fix, so it must not read as HARNESS_BUG, and it is not a runtime property, so it must not read as a
+ * refusal. It carries a `restriction` record naming the policy, the blocked operation and the supported alternative.
  */
-export type StepTermination = "ok" | "timeout" | "unsupported" | "harness-fault" | "error";
+export type StepTermination = "ok" | "timeout" | "unsupported" | "harness-fault" | "restricted" | "error";
 
 export interface StepExecution {
   /**
@@ -51,6 +56,8 @@ export interface StepExecution {
   readonly record: StepRecord | null;
   /** Required iff `termination === "unsupported"`, carried by reference from the runtime (ADR-0014 D-6). */
   readonly refusal?: Refusal;
+  /** Required iff `termination === "restricted"`: the policy, operation, reason and alternative. */
+  readonly restriction?: Restriction;
 }
 
 export type ExecuteStep = (step: FixtureStep, index: number) => Promise<StepExecution>;
@@ -72,6 +79,8 @@ export interface StepRun {
   readonly record: StepRecord | null;
   /** The refusal this step produced, carried by reference from the runtime. Never rebuilt from stderr (ADR-0014 D-6). */
   readonly refusal?: Refusal;
+  /** The policy record for a `restricted` step, so evidence explains a non-PASS without the source (ADR-0010 am. 2). */
+  readonly restriction?: Restriction;
 }
 
 /**
@@ -236,7 +245,19 @@ export function decideVerdict(
     return first === undefined ? prefix : `${prefix}: ${first.kind}: ${first.detail}${more}`;
   };
 
-  const harnessFault = steps.find((step) => step.termination === "harness-fault");
+  // A restriction is checked before a harness fault on purpose: both stop the run, but only one of them is a bug. A
+  // restriction without its record is our mistake, so that case falls through to HARNESS_BUG below.
+  const restricted = steps.find((step) => step.termination === "restricted");
+  if (restricted !== undefined && restricted.restriction !== undefined) {
+    return {
+      classification: "UNSUPPORTED_BY_DESIGN",
+      reason: `step ${restricted.index} (${restricted.command}) was blocked by policy: ${describeRestriction(
+        restricted.restriction,
+      )}`,
+    };
+  }
+
+  const harnessFault = steps.find((step) => step.termination === "harness-fault" || step.termination === "restricted");
   if (harnessFault !== undefined) {
     return {
       classification: "HARNESS_BUG",
@@ -387,6 +408,7 @@ export async function runFixture(input: FixtureRunInput): Promise<FixtureRunRepo
       elapsedMs: result.elapsedMs,
       record: execution.record,
       ...(execution.refusal === undefined ? {} : { refusal: execution.refusal }),
+      ...(execution.restriction === undefined ? {} : { restriction: execution.restriction }),
     });
     availability.set(index, "ran");
     if (execution.record !== null) records.push(execution.record);
@@ -396,9 +418,11 @@ export async function runFixture(input: FixtureRunInput): Promise<FixtureRunRepo
       const reason =
         execution.termination === "unsupported"
           ? `refused ${execution.refusal?.capability ?? "a capability"} (${execution.refusal?.code ?? "unknown"})`
-          : execution.termination === "harness-fault"
-            ? "could not be run by the harness"
-            : "failed";
+          : execution.termination === "restricted"
+            ? `blocked by ${execution.restriction?.policy ?? "an unrecorded"} policy`
+            : execution.termination === "harness-fault"
+              ? "could not be run by the harness"
+              : "failed";
       stoppedAt = { index, reason };
       break;
     }

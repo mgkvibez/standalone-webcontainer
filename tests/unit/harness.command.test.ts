@@ -292,18 +292,35 @@ describe("createStepExecutor", () => {
           : null,
     });
 
-    // `npx tsc` with nothing installed: npx would fetch it, which we refuse. That is a harness limitation, so it must not
-    // be scored against the runtime or the fixture.
+    // `npx tsc` with nothing installed would have made npx fetch it. Fetching is disabled by policy, and a policy we chose
+    // is neither a defect to file nor a broken project to blame (ADR-0010 am. 2).
     const viaNpx = await executor(empty)(step("npx tsc -p tsconfig.json"), 1);
-    expect(viaNpx.termination).toBe("harness-fault");
-    expect(viaNpx.detail).toMatch(/npx tsc/);
-    expect(viaNpx.detail).toMatch(/registry is not supported/);
+    expect(viaNpx.termination).toBe("restricted");
+    expect(viaNpx.termination).not.toBe("harness-fault");
+    expect(viaNpx.restriction?.policy).toBe("offline-registry");
+    expect(viaNpx.restriction?.operation).toBe("npx tsc");
+    expect(viaNpx.restriction?.alternative).toMatch(/package\.json/);
+    expect(viaNpx.detail).toMatch(/offline-registry policy/);
 
     // The same binary written bare is a broken project: npm would say "command not found" in its own shell.
     const bare = await executor(empty)(step("tsc -p tsconfig.json"), 1);
     expect(bare.termination).toBe("ok");
     expect(bare.record?.exitCode).toBe(1);
     expect(bare.record?.stderr).toMatch(/command not found: tsc/);
+  });
+
+  it("presents an install-shaped npx as a policy restriction, and an unknown flag as our defect", async () => {
+    const empty = fakeRuntime({ readDirNames: () => [], readFileText: () => null });
+
+    const versioned = await executor(empty)(step("npx --yes shadcn@latest add button"), 1);
+    expect(versioned.termination).toBe("restricted");
+    expect(versioned.restriction?.policy).toBe("offline-registry");
+    expect(versioned.restriction?.operation).toContain("shadcn@latest");
+
+    // An unimplemented flag is our gap, not a policy: it stays a harness fault so it gets fixed.
+    const unknownFlag = await executor(empty)(step("npx --package=left-pad cowsay"), 1);
+    expect(unknownFlag.termination).toBe("harness-fault");
+    expect(unknownFlag.restriction).toBeUndefined();
   });
 
   it("runs an npx target that an installed package does provide", async () => {

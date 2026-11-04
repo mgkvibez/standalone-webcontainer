@@ -15,6 +15,7 @@
 import type { RegistryClient } from "../npm/install.js";
 import type { FixtureStep } from "./definition.js";
 import { parseStepCommand } from "./command.js";
+import { createRestriction, describeRestriction, type Restriction } from "./restriction.js";
 import { ProjectError, readPackageScripts, resolveBin } from "./scripts.js";
 import type { StepRecord } from "./assertions.js";
 import type { Refusal } from "../runtime/refusal.js";
@@ -51,6 +52,8 @@ export function createStepExecutor(options: StepExecutorOptions): ExecuteStep {
   return async (step: FixtureStep, index: number): Promise<StepExecution> => {
     const plan = parseStepCommand(step.command);
     if (plan.kind === "invalid") {
+      // A refused-by-policy command is not a defect. Only an unimplemented one is (ADR-0010 am. 2).
+      if (plan.restriction !== undefined) return restricted(index, plan.restriction);
       return harnessFault(index, plan.reason);
     }
     if (plan.kind === "install") {
@@ -237,11 +240,16 @@ async function runBin(
   const resolved = resolveBin(options.runtime, root, bin);
   if (resolved === null) {
     if (via === "npx") {
-      // npx's documented job is to fetch a missing package. We do not, so this is our limitation, not a broken project:
-      // a harness fault keeps it out of the runtime's and the fixture's score.
-      return harnessFault(
+      // npx's documented job is to fetch a missing package, and fetching is disabled by policy this milestone. That is a
+      // chosen boundary, so it is reported as a restriction: neither a bug to file nor a broken project to blame.
+      return restricted(
         index,
-        `npx ${bin}: not provided by an installed package, and fetching it from the registry is not supported`,
+        createRestriction({
+          policy: "offline-registry",
+          operation: `npx ${bin}`,
+          reason: "registry fetches are disabled by policy for this milestone",
+          alternative: `declare ${bin} in package.json and install it from the project tree`,
+        }),
       );
     }
     return projectFailure(index, `npm error command not found: ${bin}`);
@@ -273,6 +281,19 @@ function projectFailure(index: number, stderr: string): StepExecution {
   };
 }
 
+/**
+ * A step stopped by a policy we chose. Distinct from a harness fault on purpose: the run ended by design, not by a bug,
+ * and the record explains which policy and what to do instead.
+ */
+function restricted(index: number, restriction: Restriction): StepExecution {
+  const detail = describeRestriction(restriction);
+  return {
+    termination: "restricted",
+    detail,
+    record: { index, exitCode: 1, stdout: "", stderr: `${detail}\n` },
+    restriction,
+  };
+}
 function harnessFault(index: number, detail: string): StepExecution {
   return { termination: "harness-fault", detail, record: { index, exitCode: 1, stdout: "", stderr: `${detail}\n` } };
 }
