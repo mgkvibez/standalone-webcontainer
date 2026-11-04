@@ -15,6 +15,7 @@
 import type { RegistryClient } from "../npm/install.js";
 import type { FixtureStep } from "./definition.js";
 import { parseStepCommand } from "./command.js";
+import type { SchedulerEvidence } from "../runtime/scheduler.js";
 import { createRestriction, describeRestriction, type Restriction } from "./restriction.js";
 import { ProjectError, readPackageScripts, resolveBin } from "./scripts.js";
 import type { StepRecord } from "./assertions.js";
@@ -36,6 +37,8 @@ export interface StepRuntime {
     readonly exitCode: number;
     /** Present only when an unhandled refusal ended the program (ADR-0014). */
     readonly refusal?: Refusal;
+    /** Present when the runtime has a timer queue; absent for a runtime that does not schedule (ADR-0013 am. 2). */
+    readonly scheduler?: SchedulerEvidence;
   }>;
 }
 
@@ -126,6 +129,21 @@ async function runInstall(
 }
 
 /** The runtime's result, classified: a run that carried an unhandled refusal is a refusal, not an ordinary exit. */
+/**
+ * Says so when the scheduler, rather than the program, ended the run (ADR-0013 amendment 2).
+ *
+ * A guarded stop must never be read as the program finishing: a zero-delay loop and a program that simply ended produce
+ * the same exit code, and the only thing that separates them is this sentence.
+ */
+function schedulerNote(result: Awaited<ReturnType<StepRuntime["run"]>>): string {
+  const scheduler = result.scheduler;
+  if (scheduler === undefined || !scheduler.guarded) return "";
+  return (
+    `; scheduler stopped by a guard: ${scheduler.stop} after ${scheduler.callbacks} callbacks ` +
+    `(${scheduler.virtualElapsedMs} ms virtual, ${scheduler.realElapsedMs} ms real)`
+  );
+}
+
 function fromRun(
   index: number,
   detail: string,
@@ -140,12 +158,12 @@ function fromRun(
   if (result.refusal !== undefined) {
     return {
       termination: "unsupported",
-      detail: `${detail}; refused ${result.refusal.capability} (${result.refusal.code})`,
+      detail: `${detail}; refused ${result.refusal.capability} (${result.refusal.code})${schedulerNote(result)}`,
       record,
       refusal: result.refusal,
     };
   }
-  return { termination: "ok", detail, record };
+  return { termination: "ok", detail: `${detail}${schedulerNote(result)}`, record };
 }
 
 async function runNode(

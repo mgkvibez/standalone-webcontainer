@@ -33,7 +33,8 @@ import {
   type RegistryClient,
 } from "../npm/install.js";
 import { FileSystem } from "../vfs/index.js";
-import { CommonJsLoader } from "./commonjs.js";
+import { CommonJsLoader, type RuntimeGlobals } from "./commonjs.js";
+import { createVirtualDate, createVirtualPerformance, Scheduler, type SchedulerEvidence, type TimerHandle } from "./scheduler.js";
 import { ProcessRefusal, type Refusal } from "./refusal.js";
 
 export interface RunOptions {
@@ -71,6 +72,11 @@ export interface ExecutionResult {
   /** True when an async gap exceeded `timeoutMs`; sync hangs cannot set this. */
   readonly timedOut: boolean;
   readonly durationMs: number;
+  /**
+   * Why the timer queue stopped, and what it consumed (ADR-0013 amendment 2). Always present: a program that scheduled
+   * nothing reports `queue-empty` with zero callbacks, which is evidence rather than an absence.
+   */
+  readonly scheduler: SchedulerEvidence;
 
   /**
    * Present only when an UNHANDLED refusal ended the program (ADR-0014). A program that caught the refusal and carried
@@ -194,6 +200,15 @@ export class InProcessRuntime implements Runtime {
       stderr,
     });
 
+    // One scheduler per execution, created before any user code runs: its construction is the wall-clock baseline both
+    // Date.now() and performance.timeOrigin are measured from (ADR-0013 amendment 2).
+    const scheduler = new Scheduler({}, (error: unknown) => {
+      // Node would kill the process. Killing the run would make one bad callback look like a broken harness, so the error
+      // is reported on stderr and draining continues deterministically.
+      const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+      stderr.write(`Uncaught ${message}\n`);
+    });
+
     const consoleShim = {
       log: (...args: unknown[]) => {
         stdout.write(`${args.map((value) => formatForConsole(value)).join(" ")}\n`);
@@ -236,7 +251,23 @@ export class InProcessRuntime implements Runtime {
         },
       },
     });
-    loader.setRuntimeContext({ process: processShim, console: consoleShim, Buffer });
+    loader.setRuntimeContext({
+      process: processShim,
+      console: consoleShim,
+      Buffer,
+      globals: {
+        Date: createVirtualDate(() => scheduler.now()),
+        performance: createVirtualPerformance(scheduler),
+        setTimeout: ((fn: (...args: never[]) => void, delay?: number, ...args: unknown[]) =>
+          scheduler.setTimeout(fn, delay ?? 0, ...args)) as RuntimeGlobals["setTimeout"],
+        setInterval: ((fn: (...args: never[]) => void, delay?: number, ...args: unknown[]) =>
+          scheduler.setInterval(fn, delay ?? 0, ...args)) as RuntimeGlobals["setInterval"],
+        clearTimeout: ((handle: TimerHandle | number) => scheduler.clear(handle)) as RuntimeGlobals["clearTimeout"],
+        clearInterval: ((handle: TimerHandle | number) => scheduler.clear(handle)) as RuntimeGlobals["clearInterval"],
+        setImmediate: ((fn: (...args: never[]) => void, ...args: unknown[]) =>
+          scheduler.setImmediate(fn, ...args)) as RuntimeGlobals["setImmediate"],
+      },
+    });
 
     let capturedRefusal: Refusal | undefined;
 
@@ -280,9 +311,14 @@ export class InProcessRuntime implements Runtime {
       exitCode = execute();
     }
 
-    // Promise continuations get their turn before the output is read (ADR-0013). Without this, `console.log` inside a
-    // `.then` wrote into a sink nobody read yet, which is indistinguishable from the program printing nothing.
-    if (!timedOut) await drainAfterEvaluation();
+    // The timer queue runs to termination BEFORE the output is read, and before the continuation drain: a callback that
+    // logs, and a `.then` inside that callback, must both be in the snapshot (ADR-0013 amendment 2).
+    if (!timedOut) {
+      await scheduler.drain();
+      // Promise continuations get their turn before the output is read (ADR-0013). Without this, `console.log` inside a
+      // `.then` wrote into a sink nobody read yet, which is indistinguishable from the program printing nothing.
+      await drainAfterEvaluation();
+    }
 
     return {
       stdout: stdout.text,
@@ -290,6 +326,7 @@ export class InProcessRuntime implements Runtime {
       exitCode,
       timedOut,
       durationMs: Date.now() - started,
+      scheduler: scheduler.evidence,
       // Spread rather than `refusal: undefined`, so the field is absent instead of present-and-empty.
       ...(capturedRefusal === undefined ? {} : { refusal: capturedRefusal }),
     };

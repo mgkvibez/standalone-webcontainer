@@ -61,6 +61,40 @@ function prepareSource(raw: string): string {
   return withoutBom.startsWith("#!") ? withoutBom.replace(/^#![^\n]*/, "") : withoutBom;
 }
 
+/** The clock and timer surface a run exposes to user code (ADR-0013 amendment 2). */
+export interface RuntimeGlobals {
+  readonly Date: unknown;
+  readonly performance: unknown;
+  readonly setTimeout: (...args: never[]) => unknown;
+  readonly setInterval: (...args: never[]) => unknown;
+  readonly clearTimeout: (handle: never) => void;
+  readonly clearInterval: (handle: never) => void;
+  readonly setImmediate: (...args: never[]) => unknown;
+}
+
+export interface RuntimeContext {
+  readonly process: unknown;
+  readonly console: unknown;
+  readonly Buffer: unknown;
+  readonly globals?: RuntimeGlobals;
+}
+
+/**
+ * The host's own clock and timers, used when a caller does not supply a scheduler.
+ *
+ * Defaulting to these keeps every existing caller meaningful rather than making an unscheduled runtime throw, while
+ * InProcessRuntime always supplies the virtual clock.
+ */
+const HOST_GLOBALS: RuntimeGlobals = {
+  Date,
+  performance: globalThis.performance ?? { now: () => Date.now() },
+  setTimeout: (...args: Parameters<typeof setTimeout>) => setTimeout(...args),
+  setInterval: (...args: Parameters<typeof setInterval>) => setInterval(...args),
+  clearTimeout: (handle: Parameters<typeof clearTimeout>[0]) => clearTimeout(handle),
+  clearInterval: (handle: Parameters<typeof clearInterval>[0]) => clearInterval(handle),
+  setImmediate: (callback: (...args: never[]) => void, ...args: unknown[]) => setTimeout(callback, 0, ...args),
+};
+
 export class CommonJsLoader {
   readonly #deps: LoaderDeps;
   readonly #cache = new Map<string, ModuleRecord>();
@@ -253,6 +287,15 @@ export class CommonJsLoader {
       "process",
       "console",
       "Buffer",
+      // The clock and the timers are parameters for the same reason process and console are: user code sees exactly these
+      // names as free variables, so a run's setTimeout IS the scheduler's and its Date.now() IS virtual (ADR-0013).
+      "Date",
+      "performance",
+      "setTimeout",
+      "setInterval",
+      "clearTimeout",
+      "clearInterval",
+      "setImmediate",
       code + "\n//# sourceURL=" + path,
     );
 
@@ -268,6 +311,13 @@ export class CommonJsLoader {
       runtime.process,
       runtime.console,
       runtime.Buffer,
+      (runtime.globals ?? HOST_GLOBALS).Date,
+      (runtime.globals ?? HOST_GLOBALS).performance,
+      (runtime.globals ?? HOST_GLOBALS).setTimeout,
+      (runtime.globals ?? HOST_GLOBALS).setInterval,
+      (runtime.globals ?? HOST_GLOBALS).clearTimeout,
+      (runtime.globals ?? HOST_GLOBALS).clearInterval,
+      (runtime.globals ?? HOST_GLOBALS).setImmediate,
     );
 
     record.loaded = true;
@@ -275,13 +325,9 @@ export class CommonJsLoader {
   }
 
   /** Runtime-provided globals; set by the Runtime before any load. */
-  #runtimeContext: {
-    process: unknown;
-    console: unknown;
-    Buffer: unknown;
-  } = { process: undefined, console: undefined, Buffer: undefined };
+  #runtimeContext: RuntimeContext = { process: undefined, console: undefined, Buffer: undefined, globals: HOST_GLOBALS };
 
-  setRuntimeContext(context: { process: unknown; console: unknown; Buffer: unknown }): void {
+  setRuntimeContext(context: RuntimeContext): void {
     this.#runtimeContext = context;
   }
 
