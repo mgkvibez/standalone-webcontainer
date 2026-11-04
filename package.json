@@ -15,7 +15,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "verify": "npm run typecheck && npm test"
+    "verify": "npm run typecheck && npm test && npm run fixtures:check",
+    "fixtures:freeze": "vite-node tools/freeze-fixtures.ts",
+    "fixtures:check": "vite-node tools/freeze-fixtures.ts --check"
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0",
