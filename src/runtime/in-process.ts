@@ -37,6 +37,11 @@ import { CommonJsLoader } from "./commonjs.js";
 export interface RunOptions {
   /** Bounds awaits only; synchronous loops cannot be interrupted in-process. */
   readonly timeoutMs?: number;
+  /**
+   * Working directory for the program, which is what a relative `fs` path resolves against and what `process.cwd()`
+   * reports. Node takes it from the shell; a fixture step takes it from the project root it runs in.
+   */
+  readonly cwd?: string;
   readonly argv?: readonly string[];
   readonly env?: Readonly<Record<string, string>>;
 }
@@ -157,8 +162,10 @@ export class InProcessRuntime implements Runtime {
     const started = Date.now();
     const stdout = createSink();
     const stderr = createSink();
+    const cwd = options.cwd ?? "/";
     const processShim: ProcessShim = createProcessShim({
       argv: options.argv !== undefined ? [...options.argv] : ["node", entryPath],
+      cwd,
       env: options.env ?? {},
       stdout,
       stderr,
@@ -179,7 +186,7 @@ export class InProcessRuntime implements Runtime {
       },
     };
 
-    const fsShim: FsShim = createFsShim(this.#vfs);
+    const fsShim: FsShim = createFsShim(this.#vfs, { cwd });
     const loader = new CommonJsLoader({
       fs: fsShim,
       builtins: {

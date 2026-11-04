@@ -12,6 +12,7 @@
  * error classes breaks them at the first `catch`.
  */
 import { FileSystem } from "../vfs/index.js";
+import { path as nodePath } from "./path.js";
 import { VFSError } from "../vfs/errors.js";
 import { Buffer } from "buffer";
 
@@ -88,7 +89,8 @@ export interface FsShim {
   };
 }
 
-export const createFsShim = (vfs: FileSystem): FsShim => ({
+/** Absolute-path-only core. Everything outside this module goes through the cwd-aware wrapper below. */
+const createAbsoluteFsShim = (vfs: FileSystem): FsShim => ({
   readFileSync(path, encoding) {
     try {
       const out = encoding === "utf8" ? vfs.readFileSync(path, "utf8") : vfs.readFileSync(path);
@@ -210,3 +212,35 @@ export const createFsShim = (vfs: FileSystem): FsShim => ({
     },
   },
 });
+
+/**
+ * The shim user code sees: Node resolves a relative path against the process working directory, and the VFS only knows
+ * absolute ones. Without this, `fs.readFileSync("sample.txt")` from a script started in /app looks for /sample.txt, and
+ * every ordinary CLI fails with ENOENT while the file sits exactly where the author put it.
+ *
+ * Error mapping lives in the absolute shim, so this layer only rewrites paths and cannot change how failures surface.
+ */
+export const createFsShim = (vfs: FileSystem, options: { readonly cwd?: string } = {}): FsShim => {
+  const cwd = options.cwd ?? "/";
+  const at = (path: string): string => (path.startsWith("/") ? path : nodePath.resolve(cwd, path));
+  const inner = createAbsoluteFsShim(vfs);
+
+  return {
+    readFileSync: (path, encoding) => inner.readFileSync(at(path), encoding),
+    writeFileSync: (path, data) => inner.writeFileSync(at(path), data),
+    existsSync: (path) => inner.existsSync(at(path)),
+    mkdirSync: (path, mkdirOptions) => inner.mkdirSync(at(path), mkdirOptions),
+    readdirSync: (path) => inner.readdirSync(at(path)),
+    statSync: (path) => inner.statSync(at(path)),
+    unlinkSync: (path) => inner.unlinkSync(at(path)),
+    rmdirSync: (path) => inner.rmdirSync(at(path)),
+    renameSync: (from, to) => inner.renameSync(at(from), at(to)),
+    promises: {
+      readFile: (path, encoding) => inner.promises.readFile(at(path), encoding),
+      writeFile: (path, data) => inner.promises.writeFile(at(path), data),
+      mkdir: (path, mkdirOptions) => inner.promises.mkdir(at(path), mkdirOptions),
+      readdir: (path) => inner.promises.readdir(at(path)),
+      unlink: (path) => inner.promises.unlink(at(path)),
+    },
+  };
+};

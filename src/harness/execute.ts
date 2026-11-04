@@ -28,7 +28,7 @@ export interface StepRuntime {
   }): Promise<{ readonly packages: readonly unknown[]; readonly warnings: readonly string[]; readonly usedLockfile: boolean }>;
   readFileText(path: string): string | null;
   readDirNames(path: string): readonly string[];
-  run(entryPath: string, options?: { readonly argv?: readonly string[] }): Promise<{
+  run(entryPath: string, options?: { readonly argv?: readonly string[]; readonly cwd?: string }): Promise<{
     readonly stdout: string;
     readonly stderr: string;
     readonly exitCode: number;
@@ -126,7 +126,7 @@ async function runNode(
 ): Promise<StepExecution> {
   const entry = plan.entry.startsWith("/") ? plan.entry : `${root.replace(/\/$/, "")}/${plan.entry}`;
   try {
-    const result = await options.runtime.run(entry, { argv: ["node", plan.entry, ...plan.args] });
+    const result = await options.runtime.run(entry, { argv: ["node", plan.entry, ...plan.args], cwd: root });
     const record: StepRecord = {
       index,
       exitCode: result.exitCode,

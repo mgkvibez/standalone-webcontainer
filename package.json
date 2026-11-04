@@ -28,6 +28,7 @@
     "vitest": "^2.1.0"
   },
   "dependencies": {
+    "acorn": "^8.19.0",
     "buffer": "^6.0.3",
     "pathe": "^2.0.3"
   }

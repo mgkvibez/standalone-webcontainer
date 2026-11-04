@@ -14,6 +14,7 @@
  * dynamic `require(expr)` outside the pre-resolved set are not supported.
  */
 import { path as nodePath } from "../shims/path.js";
+import { transformEsm } from "./esm.js";
 import type { FsShim } from "../shims/fs.js";
 
 /** Thrown for a resolver failure; `code` matches Node so callers can branch. */
@@ -62,9 +63,54 @@ function prepareSource(raw: string): string {
 export class CommonJsLoader {
   readonly #deps: LoaderDeps;
   readonly #cache = new Map<string, ModuleRecord>();
+  /** Directory -> format, because deciding from `type` means reading package.json on every require otherwise. */
+  readonly #formats = new Map<string, "esm" | "cjs">();
 
   constructor(deps: LoaderDeps) {
     this.#deps = deps;
+  }
+
+  /**
+   * Is this file an ES module?
+   *
+   * Extension first (`.mjs`/`.cjs` are explicit and override everything), then the nearest package.json `type`, which
+   * is Node's rule and the reason `import` statements work in files whose extension is plain `.js`. Walking up stops at
+   * the filesystem root so a project without a package.json still resolves to "commonjs" rather than looping.
+   */
+  #moduleFormat(path: string): "esm" | "cjs" {
+    if (path.endsWith(".mjs")) return "esm";
+    if (path.endsWith(".cjs")) return "cjs";
+
+    const startDir = nodePath.dirname(path);
+    const cached = this.#formats.get(startDir);
+    if (cached !== undefined) return cached;
+
+    let format: "esm" | "cjs" = "cjs";
+    let dir = startDir;
+    for (;;) {
+      const manifest = this.#readManifestQuietly(nodePath.join(dir, "package.json"));
+      if (manifest !== null) {
+        format = manifest["type"] === "module" ? "esm" : "cjs";
+        break;
+      }
+      const parent = nodePath.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+
+    this.#formats.set(startDir, format);
+    return format;
+  }
+
+  /** package.json contents, or null when it is absent or unparseable: a missing manifest is not a load failure here. */
+  #readManifestQuietly(path: string): Record<string, unknown> | null {
+    try {
+      const raw = this.#deps.fs.readFileSync(path, "utf8");
+      const parsed: unknown = JSON.parse(typeof raw === "string" ? raw : raw.toString());
+      return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Resolve a specifier to an absolute VFS path, or return a builtin name. */
@@ -172,7 +218,11 @@ export class CommonJsLoader {
     }
 
     const source = this.#deps.fs.readFileSync(path, "utf8");
-    const code = prepareSource(typeof source === "string" ? source : source.toString());
+    const prepared = prepareSource(typeof source === "string" ? source : source.toString());
+    // ES modules are reduced to the same factory shape rather than dispatched differently, so both formats resolve
+    // every specifier through this one loader (ADR-0012). The compile step below does not care which it got.
+    const code =
+      this.#moduleFormat(path) === "esm" ? transformEsm(prepared, { url: `file://${path}` }).code : prepared;
     const moduleDir = nodePath.dirname(path);
 
     // The function's parameter list IS the shim surface: user code sees exactly
