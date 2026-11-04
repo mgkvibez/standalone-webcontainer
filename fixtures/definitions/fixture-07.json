@@ -44,6 +44,11 @@
       "equals": 2
     }
   ],
+  "files": {
+    "package.json": "{\n  \"name\": \"fixture-07-cli\",\n  \"private\": true,\n  \"version\": \"0.0.0\",\n  \"type\": \"module\"\n}\n",
+    "sample.txt": "hello world\n",
+    "cli.mjs": "#!/usr/bin/env node\n// A deliberately ordinary CLI: one flag that takes a value, one boolean flag, and a documented exit code of 2 for\n// anything it does not understand. The fixture asserts on argv parsing and on the exit code, not on output prettiness.\nimport fs from \"node:fs\";\n\nconst argv = process.argv.slice(2);\nlet input = null;\nlet upper = false;\n\nfor (let i = 0; i < argv.length; i += 1) {\n  const arg = argv[i];\n  if (arg === \"--input\") {\n    input = typeof argv[i + 1] === \"string\" ? argv[i + 1] : null;\n    i += 1;\n  } else if (arg === \"--upper\") {\n    upper = true;\n  } else {\n    console.error(\"unknown flag: \" + arg);\n    process.exit(2);\n  }\n}\n\nif (input === null) {\n  console.error(\"usage: cli.mjs --input <file> [--upper]\");\n  process.exit(2);\n}\n\nconst text = fs.readFileSync(input, \"utf8\").trim();\nconsole.log(upper ? text.toUpperCase() : text);\n"
+  },
   "expected": [
     "PASS"
   ],
