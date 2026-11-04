@@ -1,6 +1,6 @@
 # R2: pnpm command contract, for review
 
-Status: **proposal only**. No pnpm support is implemented, `fixture-10.json` is untouched, and nothing here changes a
+Status: **contract approved with amendments** (owner decisions below). Implementation not started. No pnpm support is implemented, `fixture-10.json` is untouched, and nothing here changes a
 classification. Baseline `ec9b6ea`, 511 tests.
 
 ## 1. Why this cannot be an alias
@@ -84,6 +84,53 @@ the owner's call under the charter.
 3. **Store, ever?** If a later milestone wants `node_modules/.pnpm` with symlinks, the installer needs a second tree shape.
    Worth knowing now, because it changes whether the installer grows a layout abstraction or stays flat.
 4. **Refusal vocabulary**: are the messages in 2.2 the wording you want fixtures and humans to see?
+
+## 4a. Owner decisions recorded (Nov 4 2026)
+
+### D-1. Fixture 10 measures real pnpm semantics, so it stays unscored
+
+**Decided:** the `pnpm-resolution` profile must not score fixture 10, and no `pnpm` command may be counted toward the gate
+through it. Reading B from section 3 is adopted: fixture 10 measures pnpm's installation semantics (isolated store, yaml
+lockfile), which this harness does not have.
+
+Consequence, recorded so it cannot drift: the profile is a **command-vocabulary** facility, tested by its own unit tests,
+not a scoring path. If a future milestone implements the store, that milestone decides fixture 10's fate explicitly.
+
+### D-2. `pnpm run` must carry a documented lifecycle environment
+
+**Decided:** provide this subset, and only this subset:
+
+| Variable | Value |
+|---|---|
+| `npm_lifecycle_event` | the script name that is running |
+| `npm_package_name` | `name` from the project's `package.json` |
+| `npm_package_version` | `version` from the project's `package.json` |
+| `INIT_CWD` | the directory the command was invoked from (the project root) |
+| `PATH` | the existing path plus `node_modules/.bin` entries, nearest first |
+| `npm_config_user_agent` | a stated, stable string identifying this harness, never a fake npm version |
+| executable-path variables | `npm_execpath` pointing at the resolved script runner, `npm_node_execpath` pointing at the runtime entry |
+
+Variables npm sets that are not in this table are **absent rather than invented**. A script reading `npm_package_json`
+sees nothing, and that is the documented behaviour.
+
+### D-3. Flat `node_modules` is final for this milestone
+
+**Decided:** no `.pnpm` store, not even partial. The installer keeps one layout, and the profile never claims otherwise.
+
+### D-4. Refusal wording approved, with a four-part shape
+
+**Decided:** every refusal names (a) the operation, (b) the reason, (c) that the limitation is intentional, and (d) the
+supported alternative where one exists. This revises the messages in 2.2, which named the operation and the reason but not
+the intentionality:
+
+| Command | Refusal message |
+|---|---|
+| `pnpm add <pkg>` / `pnpm install <pkg>` | `pnpm add <pkg>: intentionally not supported: dependency installation is limited to package.json, so a new package cannot be added at run time (instead: declare it in package.json) ` |
+| `pnpm remove` | `pnpm remove: intentionally not supported: the installer only materialises package.json (instead: remove the entry and reinstall) ` |
+| `pnpm update` | `pnpm update: intentionally not supported: installs are exact, so there is no range to advance (instead: change the version in package.json) ` |
+| `pnpm install --frozen-lockfile` | `pnpm --frozen-lockfile: intentionally not supported: pnpm-lock.yaml is not parsed, so it cannot be verified (instead: use package-lock.json, which is verified) ` |
+| `pnpm dlx <pkg>` | `pnpm dlx: intentionally not supported: registry fetches are disabled by policy (instead: declare the package and install it) ` |
+| `pnpm store` / `link` / `publish` / `patch` / `workspace*` | `pnpm <sub>: intentionally not supported: outside this profile (instead: the four supported forms are install, i, run, and an installed binary) ` |
 
 ## 5. Implementation sketch, if approved
 
