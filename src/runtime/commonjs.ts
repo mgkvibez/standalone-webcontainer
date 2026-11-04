@@ -46,6 +46,19 @@ const isRelative = (specifier: string): boolean =>
   specifier.startsWith("./") ||
   specifier.startsWith("../");
 
+/**
+ * The two things Node removes before compiling a file, and `new Function` would reject.
+ *
+ * A shebang is not academic: every executable installed from npm begins with `#!`, so a runtime that cannot load one
+ * cannot start any tool. A BOM is rarer but equally fatal, and it arrives from files edited on Windows.
+ *
+ * The shebang line is replaced rather than deleted so line numbers in stack traces still match the file on disk.
+ */
+function prepareSource(raw: string): string {
+  const withoutBom = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+  return withoutBom.startsWith("#!") ? withoutBom.replace(/^#![^\n]*/, "") : withoutBom;
+}
+
 export class CommonJsLoader {
   readonly #deps: LoaderDeps;
   readonly #cache = new Map<string, ModuleRecord>();
@@ -159,7 +172,7 @@ export class CommonJsLoader {
     }
 
     const source = this.#deps.fs.readFileSync(path, "utf8");
-    const code = typeof source === "string" ? source : source.toString();
+    const code = prepareSource(typeof source === "string" ? source : source.toString());
     const moduleDir = nodePath.dirname(path);
 
     // The function's parameter list IS the shim surface: user code sees exactly

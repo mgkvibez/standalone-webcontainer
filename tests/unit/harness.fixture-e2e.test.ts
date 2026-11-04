@@ -60,6 +60,62 @@ function environmentFor(vfs: FileSystem): AssertionEnvironment {
   };
 }
 
+  it("runs npm run, which reaches the bin an installed package provides", async () => {
+    // The chain under test: package.json script -> command interpreter -> bin lookup in node_modules -> the runtime
+    // loading a file that starts with a shebang. Anything broken in that chain fails here rather than at gate time.
+    const { vfs, root } = bootVfs();
+    vfs.writeFileSync(
+      `${root}/package.json`,
+      JSON.stringify({ name: "app", scripts: { start: "tool --loud" }, dependencies: { tool: "^1.0.0" } }, null, 2),
+    );
+
+    const registry = await createFakeRegistry({
+      packages: {
+        tool: [
+          {
+            version: "1.0.0",
+            bin: { tool: "cli.js" },
+            files: {
+              "cli.js": "#!/usr/bin/env node\nconsole.log('tool v1 ' + process.argv.slice(2).join(','));",
+            },
+          },
+        ],
+      },
+    });
+    const runtime = new InProcessRuntime(vfs);
+
+    const scripted: FixtureDefinition = parseDefinition({
+      formatVersion: 1,
+      id: 18,
+      slug: "fixture-18",
+      lane: "front-end-only",
+      title: "npm run reaches an installed bin",
+      intent: "Proves a package.json script resolves through node_modules to a file the runtime can start.",
+      source: "harness integration test",
+      status: "frozen",
+      steps: [
+        { kind: "install", command: "npm install", timeoutClass: "install", purpose: "Install the tool" },
+        { kind: "run", command: "npm run start", timeoutClass: "run", purpose: "Run the project's start script" },
+      ],
+      assertions: [
+        { kind: "exit-code", step: 1, equals: 0 },
+        { kind: "stdout-contains", step: 1, contains: "tool v1 --loud" },
+      ],
+      expected: ["PASS"],
+    });
+
+    const report = await runFixture({
+      definition: scripted,
+      executeStep: createStepExecutor({ runtime, registry, root }),
+      environment: environmentFor(vfs),
+      evidenceRoot: null,
+    });
+
+    expect(report.steps.map((entry) => entry.termination)).toEqual(["ok", "ok"]);
+    expect(report.assertions.every((assertion) => assertion.passed)).toBe(true);
+    expect(report.classification).toBe("PASS");
+  });
+
 describe("a whole fixture through the harness", () => {
   it("installs, runs, and passes with evidence on disk", async () => {
     const { vfs, root } = bootVfs();

@@ -34,6 +34,46 @@ describe("InProcessRuntime", () => {
     expect(vfs.readFileSync("/app/data.txt", "utf8")).toBe("written-by-user-code");
   });
 
+  it("starts a script that begins with a shebang, as every installed bin does", async () => {
+    const { vfs, root } = boot({
+      "/app/bin/tool.js": "#!/usr/bin/env node\nconsole.log('tool ran');",
+    });
+    const result = await new InProcessRuntime(vfs).run(`${root}/bin/tool.js`);
+
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("tool ran\n");
+  });
+
+  it("strips a byte-order mark rather than failing to parse the first line", async () => {
+    const { vfs, root } = boot({
+      "/app/bom.js": "\ufeffconst answer = 42;\nconsole.log(answer);",
+    });
+    const result = await new InProcessRuntime(vfs).run(`${root}/bom.js`);
+
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("42\n");
+  });
+
+  it("runs a file that is nothing but a shebang, rather than failing to parse it", async () => {
+    const { vfs, root } = boot({ "/app/empty.js": "#!/usr/bin/env node" });
+    const result = await new InProcessRuntime(vfs).run(`${root}/empty.js`);
+
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("keeps every line after the shebang, including ones that depend on each other", async () => {
+    const { vfs, root } = boot({
+      "/app/two.js": "#!/usr/bin/env node\nconst a = 20;\nconsole.log(a + 22);",
+    });
+    const result = await new InProcessRuntime(vfs).run(`${root}/two.js`);
+
+    // A strip that consumed one line too many would lose `const a`, and this would be a ReferenceError.
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("42\n");
+  });
+
   it("resolves a bare specifier through node_modules with a package.json main", async () => {
     const { vfs, root } = boot({
       "/app/main.js": 'const greet = require("greeter");\nconsole.log(greet("world"));',

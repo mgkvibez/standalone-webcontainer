@@ -14,7 +14,8 @@
 
 import type { RegistryClient } from "../npm/install.js";
 import type { FixtureStep } from "./definition.js";
-import { parseStepCommand, type CommandPlan } from "./command.js";
+import { parseStepCommand } from "./command.js";
+import { ProjectError, readPackageScripts, resolveBin } from "./scripts.js";
 import type { StepRecord } from "./assertions.js";
 import type { ExecuteStep, StepExecution } from "./runner.js";
 
@@ -25,6 +26,8 @@ export interface StepRuntime {
     readonly root?: string;
     readonly includeDev?: boolean;
   }): Promise<{ readonly packages: readonly unknown[]; readonly warnings: readonly string[]; readonly usedLockfile: boolean }>;
+  readFileText(path: string): string | null;
+  readDirNames(path: string): readonly string[];
   run(entryPath: string, options?: { readonly argv?: readonly string[] }): Promise<{
     readonly stdout: string;
     readonly stderr: string;
@@ -53,13 +56,12 @@ export function createStepExecutor(options: StepExecutorOptions): ExecuteStep {
     if (plan.kind === "node") {
       return runNode(plan, index, root, options);
     }
-    // run-script and exec need an npm script runner and .bin resolution, neither of which exists yet. Named rather
-    // than approximated: running `npm run dev` as if it were `node dev` would score a different command.
-    return harnessFault(
-      index,
-      `${describePlan(plan)} is not implemented yet: the harness has no ` +
-        (plan.kind === "run-script" ? "npm script runner" : "node_modules/.bin resolution"),
-    );
+    if (plan.kind === "run-script") {
+      return runScript(plan, index, root, options, 0);
+    }
+    // A bare binary (`vite`, `tsc`) resolves through the installed packages' `bin` fields.
+    return runBin(plan.bin, plan.args, index, root, options);
+
   };
 }
 
@@ -139,16 +141,114 @@ async function runNode(
   }
 }
 
-function harnessFault(index: number, detail: string): StepExecution {
-  return { termination: "harness-fault", detail, record: { index, exitCode: 1, stdout: "", stderr: `${detail}\n` } };
+/**
+ * `npm run <script>`: look the command up in package.json and run it.
+ *
+ * The script body is itself a command line, so it goes through the same interpreter as a fixture step. That is the
+ * whole reason a script containing `&&` reports a harness fault instead of being half-executed: there is no shell, and
+ * running the first half of `vite build && tsc` would score something the author never wrote.
+ *
+ * Arguments after `--` are appended, which is what npm does: `npm run dev -- --port 3000` runs `vite --port 3000`.
+ */
+async function runScript(
+  plan: { readonly kind: "run-script"; readonly script: string; readonly args: readonly string[] },
+  index: number,
+  root: string,
+  options: StepExecutorOptions,
+  depth: number,
+): Promise<StepExecution> {
+  if (depth > MAX_SCRIPT_DEPTH) {
+    return harnessFault(index, `npm run recursed more than ${MAX_SCRIPT_DEPTH} levels at script "${plan.script}"`);
+  }
+
+  let scripts: Readonly<Record<string, string>>;
+  try {
+    scripts = readPackageScripts(options.runtime, root);
+  } catch (error) {
+    // A project with an unreadable package.json is the project's problem, and npm reports it as its own failure.
+    if (error instanceof ProjectError) return projectFailure(index, `npm error ${error.message}`);
+    return harnessFault(index, message(error));
+  }
+
+  const command = scripts[plan.script];
+  if (command === undefined) {
+    const available = Object.keys(scripts);
+    const hint = available.length === 0 ? "no scripts are defined" : `available: ${available.join(", ")}`;
+    return projectFailure(index, `npm error Missing script: "${plan.script}" (${hint})`);
+  }
+
+  const parsed = parseStepCommand(command);
+  const forwarded = [...plan.args];
+  switch (parsed.kind) {
+    case "invalid":
+      return harnessFault(
+        index,
+        `script "${plan.script}" is ${JSON.stringify(command)}, which needs a shell: ${parsed.reason}`,
+      );
+    case "node":
+      return runNode({ kind: "node", entry: parsed.entry, args: [...parsed.args, ...forwarded] }, index, root, options);
+    case "exec":
+      return runBin(parsed.bin, [...parsed.args, ...forwarded], index, root, options);
+    case "run-script":
+      return runScript(
+        { kind: "run-script", script: parsed.script, args: [...parsed.args, ...forwarded] },
+        index,
+        root,
+        options,
+        depth + 1,
+      );
+    case "install":
+      // A script that installs is a script whose install step belongs in the fixture, not hidden inside a run step:
+      // the install budget and the run budget are different, and swallowing one inside the other would falsify both.
+      return harnessFault(index, `script "${plan.script}" runs "${command}", which must be its own install step`);
+  }
 }
 
-function describePlan(plan: CommandPlan): string {
-  if (plan.kind === "run-script") return `npm run ${plan.script}`;
-  if (plan.kind === "exec") return plan.bin;
-  if (plan.kind === "node") return `node ${plan.entry}`;
-  if (plan.kind === "install") return "npm install";
-  return "command";
+/** Resolve a command name through the installed packages' `bin` fields and run it. */
+async function runBin(
+  bin: string,
+  args: readonly string[],
+  index: number,
+  root: string,
+  options: StepExecutorOptions,
+): Promise<StepExecution> {
+  const resolved = resolveBin(options.runtime, root, bin);
+  if (resolved === null) {
+    return projectFailure(index, `npm error command not found: ${bin}`);
+  }
+
+  try {
+    // argv follows Node's convention: argv[0] is the executable, argv[1] the script being run.
+    const result = await options.runtime.run(resolved.entryPath, {
+      argv: ["node", resolved.entryPath, ...args],
+    });
+    return {
+      termination: "ok",
+      detail: `${bin} (${resolved.packageName}) exited ${result.exitCode}`,
+      record: { index, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr },
+    };
+  } catch (error) {
+    return {
+      termination: "error",
+      detail: `${bin} (${resolved.packageName}) could not run: ${message(error)}`,
+      record: null,
+    };
+  }
+}
+
+const MAX_SCRIPT_DEPTH = 5;
+
+/** The project made a mistake: npm-shaped exit code and stderr, so the fixture's own assertions can judge it. */
+function projectFailure(index: number, stderr: string): StepExecution {
+  return {
+    termination: "ok",
+    detail: stderr,
+    record: { index, exitCode: 1, stdout: "", stderr: `${stderr}\n` },
+  };
+}
+
+function harnessFault(index: number, detail: string): StepExecution {
+  return { termination: "harness-fault", detail, record: { index, exitCode: 1, stdout: "", stderr: `${detail}\n` } };
 }
 
 function message(error: unknown): string {

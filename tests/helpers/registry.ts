@@ -15,6 +15,8 @@ export interface FakeVersion {
   readonly files?: Record<string, string>;
   /** `main` field for the generated package.json. */
   readonly main?: string;
+  /** `bin` field for the generated package.json: a string (named after the package) or a name-to-entry map. */
+  readonly bin?: string | Readonly<Record<string, string>>;
   readonly dependencies?: Record<string, string>;
   readonly optionalDependencies?: Record<string, string>;
   /** npm's platform fields, used to test the browser-compatibility filter. */
@@ -74,6 +76,7 @@ export async function createFakeRegistry(options: FakeRegistryOptions): Promise<
           name,
           version: entry.version,
           ...(entry.main === undefined ? {} : { main: entry.main }),
+          ...(entry.bin === undefined ? {} : { bin: entry.bin }),
           dependencies: entry.dependencies ?? {},
           ...(entry.optionalDependencies === undefined ? {} : { optionalDependencies: entry.optionalDependencies }),
           ...(entry.os === undefined ? {} : { os: entry.os }),

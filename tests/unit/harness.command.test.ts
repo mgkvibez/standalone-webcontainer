@@ -10,7 +10,6 @@ import { describe, expect, it } from "vitest";
 
 import { parseStepCommand } from "../../src/harness/command.js";
 import { createStepExecutor, type StepRuntime } from "../../src/harness/execute.js";
-import { decideVerdict, type StepRun } from "../../src/harness/runner.js";
 import type { FixtureStep } from "../../src/harness/definition.js";
 
 const step = (command: string): FixtureStep => ({
@@ -106,6 +105,12 @@ describe("createStepExecutor", () => {
       async run() {
         return { stdout: "ok\n", stderr: "", exitCode: 0 };
       },
+      readFileText() {
+        return null;
+      },
+      readDirNames() {
+        return [];
+      },
       ...overrides,
     };
     return runtime;
@@ -159,16 +164,93 @@ describe("createStepExecutor", () => {
     expect(result.record?.stderr).toContain("MISSING_PACKAGE_JSON");
   });
 
-  it("reports an unimplemented command as a harness fault, not as a runtime refusal", async () => {
-    const result = await executor(fakeRuntime())(step("npm run dev -- --port 3000"), 1);
-    expect(result.termination).toBe("harness-fault");
-    expect(result.detail).toMatch(/npm script runner/);
+  it("reports a missing package.json as npm's failure, not as a harness fault", async () => {
+    const result = await executor(fakeRuntime())(step("npm run dev"), 1);
 
-    // The distinction matters downstream: a harness fault becomes HARNESS_BUG, never UNSUPPORTED_BY_DESIGN.
-    const steps: StepRun[] = [
-      { index: 1, kind: "run", command: "npm run dev -- --port 3000", termination: result.termination, detail: result.detail, record: result.record, elapsedMs: 1 },
-    ];
-    expect(decideVerdict(steps, []).classification).toBe("HARNESS_BUG");
+    // npm exits 1 and says so. The runtime is not implicated, and a harness fault here would be a false accusation.
+    expect(result.termination).toBe("ok");
+    expect(result.record?.exitCode).toBe(1);
+    expect(result.record?.stderr).toMatch(/package\.json is missing/);
+  });
+
+  it("reports a script the project does not define by name, listing what it does define", async () => {
+    const runtime = fakeRuntime({
+      readFileText: (path) =>
+        path.endsWith("/package.json") ? JSON.stringify({ scripts: { build: "vite build" } }) : null,
+    });
+    const result = await executor(runtime)(step("npm run dev"), 1);
+
+    expect(result.termination).toBe("ok");
+    expect(result.record?.exitCode).toBe(1);
+    expect(result.record?.stderr).toMatch(/Missing script: "dev"/);
+    expect(result.record?.stderr).toMatch(/available: build/);
+  });
+
+  it("refuses a script body that needs a shell, naming the script and the command", async () => {
+    const runtime = fakeRuntime({
+      readFileText: (path) =>
+        path.endsWith("/package.json")
+          ? JSON.stringify({ scripts: { build: "vite build && tsc -p ." } })
+          : null,
+    });
+    const result = await executor(runtime)(step("npm run build"), 1);
+
+    // Half of `vite build && tsc` is not the command the author wrote, and running it would score a fiction.
+    expect(result.termination).toBe("harness-fault");
+    expect(result.detail).toMatch(/script "build"/);
+    expect(result.detail).toMatch(/needs a shell/);
+  });
+
+  it("runs an installed bin with the arguments forwarded after --", async () => {
+    const seen: string[][] = [];
+    const runtime = fakeRuntime({
+      readDirNames: (path) => (path.endsWith("/node_modules") ? ["vite"] : []),
+      readFileText: (path) => {
+        if (path.endsWith("/package.json") && path.includes("/node_modules/vite")) {
+          return JSON.stringify({ name: "vite", bin: { vite: "bin/vite.js" } });
+        }
+        if (path.endsWith("/package.json")) return JSON.stringify({ scripts: { dev: "vite" } });
+        return null;
+      },
+      async run(entryPath, options) {
+        seen.push([entryPath, ...(options?.argv ?? [])]);
+        return { stdout: "ready\n", stderr: "", exitCode: 0 };
+      },
+    });
+
+    const result = await executor(runtime)(step("npm run dev -- --port 3000 --host 127.0.0.1"), 1);
+
+    expect(result.termination).toBe("ok");
+    expect(result.record?.exitCode).toBe(0);
+    expect(result.record?.stdout).toBe("ready\n");
+    expect(seen).toEqual([["/app/node_modules/vite/bin/vite.js", "node", "/app/node_modules/vite/bin/vite.js", "--port", "3000", "--host", "127.0.0.1"]]);
+  });
+
+  it("reports a command no installed package provides as command not found", async () => {
+    const runtime = fakeRuntime({
+      readDirNames: (path) => (path.endsWith("/node_modules") ? ["other"] : []),
+      readFileText: (path) =>
+        path.endsWith("/package.json") && path.includes("/node_modules/other")
+          ? JSON.stringify({ name: "other", bin: { other: "cli.js" } })
+          : null,
+    });
+    const result = await executor(runtime)(step("vite build"), 1);
+
+    expect(result.termination).toBe("ok");
+    expect(result.record?.exitCode).toBe(1);
+    expect(result.record?.stderr).toMatch(/command not found: vite/);
+  });
+
+  it("refuses a script that hides an install inside a run step", async () => {
+    const runtime = fakeRuntime({
+      readFileText: (path) =>
+        path.endsWith("/package.json") ? JSON.stringify({ scripts: { setup: "npm install" } }) : null,
+    });
+    const result = await executor(runtime)(step("npm run setup"), 1);
+
+    // The install budget and the run budget differ; folding one into the other would falsify both.
+    expect(result.termination).toBe("harness-fault");
+    expect(result.detail).toMatch(/must be its own install step/);
   });
 
   it("refuses shell syntax at execution time too, so a definition cannot smuggle one in", async () => {

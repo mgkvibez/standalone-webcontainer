@@ -95,6 +95,31 @@ export class InProcessRuntime implements Runtime {
     return this.#gateway;
   }
 
+  /**
+   * Read a text file from this runtime's VFS, or null when it is absent.
+   *
+   * Exists for tooling that has to inspect the project the runtime owns (npm scripts, `bin` entries, fixture files).
+   * Every failure is reported as "absent" on purpose: this is a probe, and its callers already have a designed answer
+   * for a missing file. Anything that needs to distinguish EACCES from ENOENT should use the VFS directly.
+   */
+  readFileText(path: string): string | null {
+    try {
+      const contents = this.#vfs.readFileSync(path, "utf8");
+      return typeof contents === "string" ? contents : new TextDecoder().decode(contents);
+    } catch {
+      return null;
+    }
+  }
+
+  /** List a directory in this runtime's VFS, or an empty list when it cannot be read. Same contract as above. */
+  readDirNames(path: string): readonly string[] {
+    try {
+      return this.#vfs.readdirSync(path);
+    } catch {
+      return [];
+    }
+  }
+
   /** The port namespace in use, for callers that need to inspect bindings. */
   get ports(): PortRegistry {
     return this.#registry;
