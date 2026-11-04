@@ -22,6 +22,7 @@
 
 import { CLASSIFICATIONS, type Classification, type Lane } from "./types.js";
 import { laneForId } from "./score.js";
+import { assertSafeProjectPath } from "./project.js";
 
 /** Charter §4.5. The three hard budgets, named so a step can cite one instead of a number. */
 export type TimeoutClass = "install" | "build" | "run";
@@ -83,6 +84,13 @@ export interface FixtureDefinition {
   readonly assertions: readonly FixtureAssertion[];
   /** The outcomes that would be legitimate here. At least one; PASS is not always among them. */
   readonly expected: readonly Classification[];
+  /**
+   * The project the steps run against, as relative path to text contents.
+   *
+   * Optional because a definition's steps may not need a project at all, but a fixture whose steps install or run
+   * something is meaningless without one: the commands would target files that no one created.
+   */
+  readonly files?: Readonly<Record<string, string>>;
   readonly knownLimits?: readonly string[];
 }
 
@@ -187,6 +195,29 @@ function parseAssertion(raw: unknown, index: number, what: string, stepCount: nu
  * Validate one definition. Every rejection here is a defect that would otherwise surface as a
  * mis-scored run much later, which is why parsing is strict rather than forgiving.
  */
+/**
+ * Project files are validated at parse time, not at write time.
+ *
+ * A definition that could only fail while writing would fail inside a run, halfway through a fixture, and be reported
+ * as the runtime's problem. Refusing it here means a corpus that loads is a corpus that can be staged.
+ */
+function parseProjectFiles(raw: unknown, origin: string): Readonly<Record<string, string>> | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(`${origin}.files must be an object mapping relative paths to file contents`);
+  }
+
+  const files: Record<string, string> = {};
+  for (const [projectPath, contents] of Object.entries(raw as Record<string, unknown>)) {
+    assertSafeProjectPath(projectPath);
+    if (typeof contents !== "string") {
+      throw new Error(`${origin}.files[${JSON.stringify(projectPath)}] must be a string`);
+    }
+    files[projectPath] = contents;
+  }
+  return files;
+}
+
 export function parseDefinition(raw: unknown, origin = "definition"): FixtureDefinition {
   const record = asRecord(raw, origin);
 
@@ -247,6 +278,8 @@ export function parseDefinition(raw: unknown, origin = "definition"): FixtureDef
     ? undefined
     : requireStringArray(record, "knownLimits", origin);
 
+  const files = parseProjectFiles(record["files"], origin);
+
   return {
     formatVersion: 1,
     id,
@@ -260,6 +293,7 @@ export function parseDefinition(raw: unknown, origin = "definition"): FixtureDef
     assertions,
     expected,
     ...(knownLimits === undefined ? {} : { knownLimits }),
+    ...(files === undefined ? {} : { files }),
   };
 }
 

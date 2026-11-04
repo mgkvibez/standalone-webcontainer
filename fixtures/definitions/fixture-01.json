@@ -35,6 +35,11 @@
       "contains": "<div id=\"root\">"
     }
   ],
+  "files": {
+    "package.json": "{\n  \"name\": \"fixture-01-vite\",\n  \"private\": true,\n  \"version\": \"0.0.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"dev\": \"vite\"\n  },\n  \"devDependencies\": {\n    \"vite\": \"^5.4.0\"\n  }\n}\n",
+    "index.html": "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\" />\n    <title>fixture-01</title>\n  </head>\n  <body>\n    <div id=\"root\"></div>\n    <script type=\"module\" src=\"/src/main.js\"></script>\n  </body>\n</html>\n",
+    "src/main.js": "// Runs in the previewing browser, not in our runtime: Vite serves it over http and the harness fetches it.\nconst root = document.querySelector(\"#root\");\nif (root !== null) root.textContent = \"fixture-01 served\";\n"
+  },
   "expected": [
     "PASS"
   ],
