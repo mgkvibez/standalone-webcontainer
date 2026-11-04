@@ -314,10 +314,18 @@ export class InProcessRuntime implements Runtime {
     // The timer queue runs to termination BEFORE the output is read, and before the continuation drain: a callback that
     // logs, and a `.then` inside that callback, must both be in the snapshot (ADR-0013 amendment 2).
     if (!timedOut) {
-      await scheduler.drain();
-      // Promise continuations get their turn before the output is read (ADR-0013). Without this, `console.log` inside a
-      // `.then` wrote into a sink nobody read yet, which is indistinguishable from the program printing nothing.
-      await drainAfterEvaluation();
+      try {
+        await scheduler.drain();
+        // Promise continuations get their turn before the output is read (ADR-0013). Without this, `console.log` inside a
+        // `.then` wrote into a sink nobody read yet, which is indistinguishable from the program printing nothing.
+        await drainAfterEvaluation();
+      } catch (error) {
+        // A throw from inside a callback or continuation belongs to THIS run. Letting it escape became an uncaught
+        // exception that killed the harness process, which would have taken every later fixture down with it.
+        const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+        stderr.write(`${message}\n`);
+        exitCode = 1;
+      }
     }
 
     return {

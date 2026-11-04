@@ -263,6 +263,42 @@ describe("10. budget exhaustion and deterministic termination", () => {
   });
 });
 
+describe("11. draining is quiescence, not one pass (R5)", () => {
+  it("runs a timer scheduled from inside a promise continuation", async () => {
+    // The exact fixture-4 failure: the queue was empty when draining began, the timer was scheduled from the pipeline
+    // callback a microtask later, and the single-pass drain returned before it existed.
+    const result = await runScript(`
+      Promise.resolve().then(() => {
+        setTimeout(() => console.log("scheduled from a continuation"), 10);
+      });
+      console.log("sync");
+    `);
+    expect(lines(result.stdout)).toEqual(["sync", "scheduled from a continuation"]);
+    expect(result.scheduler.callbacks).toBe(1);
+  });
+
+  it("runs a timer scheduled from a stream pipeline callback", async () => {
+    const result = await runScript(`
+      import { Readable, Transform, Writable, pipeline } from "node:stream";
+      const sink = new Writable({ write: (chunk, _encoding, callback) => callback() });
+      pipeline(Readable.from(["x"]), new Transform({ transform: (c, _e, cb) => cb(null, c) }), sink, () => {
+        setTimeout(() => console.log("after pipeline"), 15);
+      });
+    `);
+    expect(lines(result.stdout)).toEqual(["after pipeline"]);
+  });
+
+  it("keeps a synchronous throw from a timer callback inside the run, without killing the harness", async () => {
+    const result = await runScript(`
+      setTimeout(() => { throw new Error("thrown in a timer"); }, 5);
+      setTimeout(() => console.log("still running"), 10);
+    `);
+    // The scheduler catches it, reports it on stderr, and keeps draining: one bad callback is not the end of the run.
+    expect(result.stderr).toContain("thrown in a timer");
+    expect(lines(result.stdout)).toEqual(["still running"]);
+  });
+});
+
 describe("the queue itself", () => {
   it("counts down to termination without a runtime when asked directly", async () => {
     const scheduler = new Scheduler({ budgetMs: 100, maxCallbacks: 5, maxRealMs: 1_000 });

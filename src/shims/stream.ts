@@ -27,8 +27,8 @@ export interface StreamOptions {
   readonly objectMode?: boolean;
   readonly read?: () => void;
   readonly write?: (chunk: unknown, encoding: string, callback: (error?: Error) => void) => void;
-  readonly transform?: (chunk: unknown, encoding: string, callback: (error?: Error, output?: unknown) => void) => void;
-  readonly flush?: (callback: (error?: Error) => void) => void;
+  readonly transform?: (chunk: unknown, encoding: string, callback: (error?: Error | null, output?: unknown) => void) => void;
+  readonly flush?: (callback: (error?: Error | null) => void) => void;
   readonly destroy?: (error: Error | null, callback: (error?: Error | null) => void) => void;
 }
 
@@ -442,8 +442,12 @@ export class Duplex extends Readable {
 }
 
 export class Transform extends Duplex {
-  readonly #transformHook: (chunk: unknown, encoding: string, callback: (error?: Error, output?: unknown) => void) => void;
-  readonly #flushHook: ((callback: (error?: Error) => void) => void) | undefined;
+  readonly #transformHook: (
+    chunk: unknown,
+    encoding: string,
+    callback: (error?: Error | null, output?: unknown) => void,
+  ) => void;
+  readonly #flushHook: ((callback: (error?: Error | null) => void) => void) | undefined;
   #flushed = false;
 
   constructor(options: StreamOptions = {}) {
@@ -452,8 +456,10 @@ export class Transform extends Duplex {
       write: (chunk, _encoding, callback) => {
         try {
           this.#transformHook(chunk, "utf8", (error, output) => {
-            if (error !== undefined) {
-              callback(error);
+            // `callback(null, value)` is the canonical Node form, not `callback(undefined, value)`. Treating null as an
+            // error rejected the idiomatic call with "Error: null".
+            if (error !== undefined && error !== null) {
+              callback(asError(error));
               return;
             }
             if (output !== undefined) this.push(output);
@@ -474,7 +480,7 @@ export class Transform extends Duplex {
     this.on("finish", () => this.#flushOnce());
   }
 
-  _transform(chunk: unknown, encoding: string, callback: (error?: Error, output?: unknown) => void): void {
+  _transform(chunk: unknown, encoding: string, callback: (error?: Error | null, output?: unknown) => void): void {
     this.#transformHook(chunk, encoding, callback);
   }
 
@@ -486,8 +492,8 @@ export class Transform extends Duplex {
       return;
     }
     try {
-      this.#flushHook((error?: Error) => {
-        if (error !== undefined) this.failRead(error);
+      this.#flushHook((error?: Error | null) => {
+        if (error !== undefined && error !== null) this.failRead(asError(error));
         else this.endReadable();
       });
     } catch (error) {

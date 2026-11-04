@@ -88,6 +88,9 @@ export class Scheduler {
   #nextId = 1;
   #queue: Entry[] = [];
   #intervalsTruncated = 0;
+  /** Totals across every drain pass, so the callback guard bounds the WHOLE execution rather than one pass. */
+  #callbacks = 0;
+  #callbackErrors = 0;
   #evidence: SchedulerEvidence | null = null;
   readonly #onCallbackError: ((error: unknown) => void) | undefined;
 
@@ -158,8 +161,36 @@ export class Scheduler {
   async drain(): Promise<SchedulerEvidence> {
     if (this.#evidence !== null) return this.#evidence;
 
-    let callbacks = 0;
-    let callbackErrors = 0;
+    // Predicate and promise continuation order is not something a program controls, so a timer scheduled from inside a
+    // continuation can land AFTER the queue looked empty. A single pass therefore missed it: fixture 4 scheduled its timer
+    // from a `pipeline` callback, and `timer-ok` never printed. Draining means quiescence, not one pass.
+    let stop: SchedulerStop = "queue-empty";
+    for (;;) {
+      const pass = await this.#drainPass();
+      stop = pass;
+      if (pass !== "queue-empty") break;
+      // Let continuations run, then look again: they may have scheduled more work.
+      await drainContinuations();
+      if (this.#queue.length === 0) break;
+    }
+
+    this.#evidence = Object.freeze({
+      stop,
+      virtualElapsedMs: this.#virtual,
+      realElapsedMs: Date.now() - this.#realStart,
+      callbacks: this.#callbacks,
+      deferred: this.#queue.length,
+      intervalsTruncated: this.#intervalsTruncated,
+      callbackErrors: this.#callbackErrors,
+      // A truncated interval is also a guard: the program did not finish, our per-interval cap finished it. Leaving it out
+      // made a 0 ms interval storm report guarded=false, which reads as a clean run.
+      guarded: stop === "callback-limit" || stop === "real-time-limit" || this.#intervalsTruncated > 0,
+    });
+    return this.#evidence;
+  }
+
+  /** One pass over everything currently queued. */
+  async #drainPass(): Promise<SchedulerStop> {
     let stop: SchedulerStop = "queue-empty";
 
     while (true) {
@@ -174,7 +205,7 @@ export class Scheduler {
         stop = "budget-exhausted";
         break;
       }
-      if (callbacks >= this.#maxCallbacks) {
+      if (this.#callbacks >= this.#maxCallbacks) {
         stop = "callback-limit";
         break;
       }
@@ -202,32 +233,20 @@ export class Scheduler {
       // The clock sits AT the callback's due time while it runs, so Date.now() inside it is the virtual instant, not the
       // instant the scheduler happened to get to it.
       this.#virtual = Math.max(this.#virtual, fireAt);
-      callbacks += 1;
+      this.#callbacks += 1;
 
       try {
         next.fn(...(next.args as never[]));
       } catch (error) {
         // Node would kill the process here. Killing the run would make one bad callback look like a broken harness, so the
         // error is surfaced to stderr and counted; draining continues deterministically.
-        callbackErrors += 1;
+        this.#callbackErrors += 1;
         this.#onCallbackError?.(error);
       }
       await drainContinuations();
     }
 
-    this.#evidence = Object.freeze({
-      stop,
-      virtualElapsedMs: this.#virtual,
-      realElapsedMs: Date.now() - this.#realStart,
-      callbacks,
-      deferred: this.#queue.length,
-      intervalsTruncated: this.#intervalsTruncated,
-      callbackErrors,
-      // A truncated interval is also a guard: the program did not finish, our per-interval cap finished it. Leaving it out
-      // made a 0 ms interval storm report guarded=false, which reads as a clean run.
-      guarded: stop === "callback-limit" || stop === "real-time-limit" || this.#intervalsTruncated > 0,
-    });
-    return this.#evidence;
+    return stop;
   }
 
   /** Evidence after `drain`, or a zeroed record before it (a program that scheduled nothing still reports a stop). */

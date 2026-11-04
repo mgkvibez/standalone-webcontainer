@@ -206,6 +206,27 @@ describe("Transform and PassThrough", () => {
     expect(await collected).toEqual(["AB", "CD"]);
   });
 
+  it("accepts the canonical callback(null, value) form rather than reading null as an error", async () => {
+    // Found by fixture 4 in R5: the idiomatic Node call was rejected with "Error: null", because the guard tested
+    // `error !== undefined`. Node writes `callback(null, value)` far more often than `callback(undefined, value)`.
+    const upper = new Transform({
+      transform: (chunk, _encoding, callback) => callback(null, String(chunk).toUpperCase()),
+    });
+    const collected = collect(upper);
+    upper.write("ab");
+    upper.end();
+    expect(await collected).toEqual(["AB"]);
+  });
+
+  it("still surfaces a real error from a transform", async () => {
+    const failing = new Transform({
+      transform: (_chunk, _encoding, callback) => callback(new Error("real failure")),
+    });
+    const seen = new Promise<Error>((resolve) => failing.on("error", (...args: unknown[]) => resolve(args[0] as Error)));
+    failing.write("x");
+    expect((await seen).message).toBe("real failure");
+  });
+
   it("runs _flush once, after the last chunk", async () => {
     const order: string[] = [];
     const stream = new Transform({
