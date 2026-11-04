@@ -43,7 +43,7 @@ implementation decisions are recorded with an audit question each in
 ```
 npm install        # dev tooling only (typescript, vitest, @playwright/test, @types/node)
 npm run typecheck  # tsc --noEmit under strict tsconfig
-npm test           # vitest run (VFS, shims, harness, network and npm: 465 tests)
+npm test           # vitest run (VFS, shims, harness, network and npm: 467 tests)
 npm run fixtures:check   # verify frozen fixture pins (no writes); part of `verify`
 npm run verify     # typecheck + tests + fixture pins, what CI runs
 ```

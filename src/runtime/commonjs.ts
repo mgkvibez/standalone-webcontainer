@@ -205,6 +205,16 @@ export class CommonJsLoader {
     const cached = this.#cache.get(path);
     if (cached !== undefined) return cached;
 
+    // Refuse a native addon as a refusal, not as a parse error. Before this, `require("./x.node")` read the binary as
+    // JavaScript and failed with "binary is not defined", which reads as a bug in this loader rather than a capability
+    // the runtime does not have. The distinction matters to a fixture that is supposed to assert on the refusal.
+    if (path.endsWith(".node")) {
+      throw new Error(
+        `Cannot load native addon ${path}: native addons are not supported in this runtime. ` +
+          "A package that needs one must ship a WASM build or be replaced with a pure-JS alternative.",
+      );
+    }
+
     const record: ModuleRecord = { id: path, exports: {}, loaded: false };
     // Cache BEFORE evaluating so a circular require sees the partial exports Node
     // would give it, instead of recursing forever.

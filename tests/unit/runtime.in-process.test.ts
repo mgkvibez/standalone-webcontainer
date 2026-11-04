@@ -84,6 +84,36 @@ describe("InProcessRuntime", () => {
     expect(result.stdout).toBe("sync\nasync\n");
   });
 
+  it("refuses a native addon by name instead of failing to parse it as JavaScript", async () => {
+    const { vfs, root } = boot({
+      "/app/main.js": 'require("./addon.node");',
+      "/app/addon.node": "\u0000binary",
+    });
+    const result = await new InProcessRuntime(vfs).run(`${root}/main.js`);
+
+    // Fast and typed, which is what a refusal must be: an unstructured crash here would be a defect in its own right.
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("native addon");
+    expect(result.stderr).not.toContain("binary is not defined");
+  });
+
+  it("lets a program catch the refusal and carry on", async () => {
+    const { vfs, root } = boot({
+      "/app/main.js": [
+        "try {",
+        '  require("./addon.node");',
+        "} catch (error) {",
+        '  console.log("caught:", error.message.includes("native addon"));',
+        "}",
+      ].join("\n"),
+      "/app/addon.node": "\u0000binary",
+    });
+    const result = await new InProcessRuntime(vfs).run(`${root}/main.js`);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("caught: true\n");
+  });
+
   it("starts a script that begins with a shebang, as every installed bin does", async () => {
     const { vfs, root } = boot({
       "/app/bin/tool.js": "#!/usr/bin/env node\nconsole.log('tool ran');",
