@@ -27,3 +27,34 @@ jobs:
         run: npm ci && npx tsc --noEmit
       - name: Test
         run: npm test
+  # The browser lane is separate on purpose: it needs a real Chromium, which the toolchain job has no business
+  # downloading for every run. It builds the production bundle first, so a dev-server-only success cannot mask a bundle
+  # that never builds, and then drives the page with Playwright.
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Build the production bundle
+        run: npm run build:browser
+      - name: Check the bundle carries no Node-only module
+        run: |
+          if grep -E "node:fs|node:path|harness/evidence|fixtures/definitions" dist/browser/assets/*.js; then
+            echo "::error::the browser bundle references a Node-only module"
+            exit 1
+          fi
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Browser tests
+        run: npm run test:browser
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-output
+          path: test-results/
+          if-no-files-found: ignore

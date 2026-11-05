@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>standalone-webcontainer — P1a smoke</title>
+  </head>
+  <body>
+    <h1>standalone-webcontainer</h1>
+    <p>
+      P1a smoke test: the page owns the DOM, a dedicated Web Worker owns the runtime. This is
+      <strong>not</strong> a hardened security sandbox.
+    </p>
+
+    <p>
+      <label for="code">Source (<code>/app/index.js</code>)</label>
+    </p>
+    <textarea id="code" rows="14" cols="90" spellcheck="false"></textarea>
+
+    <p>
+      <button id="run" type="button">Run</button>
+      <button id="loop" type="button">Run infinite loop</button>
+      <button id="stop" type="button">Terminate worker</button>
+    </p>
+
+    <p>Status: <strong id="status">booting</strong></p>
+
+    <h2>stdout</h2>
+    <pre id="stdout"></pre>
+
+    <h2>stderr</h2>
+    <pre id="stderr"></pre>
+
+    <h2>result</h2>
+    <pre id="result"></pre>
+
+    <script type="module" src="/src/browser/main.ts"></script>
+  </body>
+</html>

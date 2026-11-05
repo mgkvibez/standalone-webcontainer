@@ -6,10 +6,15 @@ Node.js APIs executing on the browser's native V8 — built from scratch,
 MIT-licensed, and fully owned. It is not a wrapper around StackBlitz's
 WebContainers API, Nodebox, or any other third-party proprietary runtime.
 
-## Status: it serves HTTP, and little else yet
+## Status: the engine runs in a browser (P1a), and there is one screen
 
 A Node-shaped script can read and write files, `require("http")`, listen on a port, and answer a real
 browser request that arrives through the preview gateway. That path is covered end to end by tests.
+
+**P1a (Nov 5 2026):** `npm run dev:browser` opens a page that starts a dedicated Worker, boots the real
+`InProcessRuntime` inside it, runs JavaScript and shows real stdout, stderr and exit codes. Four Playwright tests cover
+it, including terminating a Worker stuck in a synchronous infinite loop. The runtime needs `unsafe-eval`; see
+`docs/p1/p1a.md` for the measured CSP behaviour. There is no editor, terminal, persistence or preview yet.
 
 What is still missing is everything around it: nothing registers a service worker yet, so no request
 reaches the runtime in a browser without a page-side responder wired up by hand; `npm install` exists as
