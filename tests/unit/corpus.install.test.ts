@@ -20,7 +20,6 @@ import {
   CorpusRegistryError,
   loadCorpusRegistry,
 } from "../../src/registry/corpus.js";
-import { verifyCorpus, type VerifiedCorpus } from "../../src/registry/corpus-manifest.js";
 import { FileSystem } from "../../src/vfs/index.js";
 import { makePackageTarball } from "../helpers/tarball.js";
 
@@ -44,17 +43,23 @@ function listFiles(directory: string): string[] {
 const manifestText = readFileSync(join(corpusRoot, "manifest.json"), "utf8");
 const readCorpus = (path: string): Uint8Array => new Uint8Array(readFileSync(join(corpusRoot, path)));
 
-const verified: VerifiedCorpus = await verifyCorpus({
-  root: CORPUS_ROOT,
-  manifestText,
-  read: (path) => readFileSync(join(root, path)),
-  listFiles: (path) => listFiles(join(root, path)),
-});
+/**
+ * Registries come from the sanctioned loader only: the constructor is private, so a test cannot build one over a corpus
+ * that skipped verification even if it wanted to.
+ */
+const loadRegistry = async (mode: "resolution" | "pinned"): Promise<CorpusRegistry> =>
+  (
+    await loadCorpusRegistry({
+      root: CORPUS_ROOT,
+      manifestText,
+      mode,
+      read: readCorpus,
+      listFiles: () => listFiles(corpusRoot),
+    })
+  ).registry;
 
-const resolutionRegistry = (): CorpusRegistry =>
-  new CorpusRegistry({ corpus: verified, read: readCorpus, mode: "resolution" });
-const pinnedRegistry = (): CorpusRegistry =>
-  new CorpusRegistry({ corpus: verified, read: readCorpus, mode: "pinned" });
+const resolutionRegistry = () => loadRegistry("resolution");
+const pinnedRegistry = () => loadRegistry("pinned");
 
 /** A project with a package.json, and optionally a lockfile already on disk. */
 function project(dependencies: Record<string, string>, lockfile?: string): FileSystem {
@@ -105,7 +110,7 @@ const install = (vfs: FileSystem, registry: RegistryClient) =>
 describe("lockfile-pinned installation", () => {
   it("installs from a lockfile with zero packument requests", async () => {
     const first = project({ "@corpus/deep": "^1.0.0" });
-    const resolved = await install(first, resolutionRegistry());
+    const resolved = await install(first, await resolutionRegistry());
     const lockfile = text(first, `${ROOT}/package-lock.json`);
     expect(resolved.packages.map((item) => `${item.name}@${item.version}`).sort()).toEqual([
       "@corpus/chain@1.0.0",
@@ -113,7 +118,7 @@ describe("lockfile-pinned installation", () => {
       "@corpus/leaf@1.0.0",
     ]);
 
-    const registry = pinnedRegistry();
+    const registry = await pinnedRegistry();
     const second = project({ "@corpus/deep": "^1.0.0" }, lockfile);
     const pinned = await install(second, registry);
 
@@ -128,13 +133,13 @@ describe("lockfile-pinned installation", () => {
 
   it("refuses a lockfile gap in pinned mode instead of resolving it silently", async () => {
     const first = project({ "@corpus/deep": "^1.0.0" });
-    await install(first, resolutionRegistry());
+    await install(first, await resolutionRegistry());
     const document = JSON.parse(text(first, `${ROOT}/package-lock.json`)) as { packages: Record<string, unknown> };
     // Remove the middle of the chain, so the lockfile covers deep and leaf but not chain.
     delete document.packages["node_modules/@corpus/chain"];
 
     const second = project({ "@corpus/deep": "^1.0.0" }, JSON.stringify(document, null, 2));
-    await expect(install(second, pinnedRegistry())).rejects.toMatchObject({
+    await expect(install(second, await pinnedRegistry())).rejects.toMatchObject({
       code: "PACKUMENT_FORBIDDEN_IN_PINNED_MODE",
     });
     expect(exists(second, `${ROOT}/node_modules/@corpus/chain`)).toBe(false);
@@ -144,7 +149,7 @@ describe("lockfile-pinned installation", () => {
 describe("corpus-based version resolution", () => {
   it("resolves a range against the published versions and picks the highest match", async () => {
     const vfs = project({ "@corpus/leaf": "^1.0.0" });
-    const registry = resolutionRegistry();
+    const registry = await resolutionRegistry();
     const report = await install(vfs, registry);
 
     expect(report.packages.map((item) => `${item.name}@${item.version}`)).toEqual(["@corpus/leaf@1.0.0"]);
@@ -154,7 +159,7 @@ describe("corpus-based version resolution", () => {
 
   it("does not substitute a version when nothing published satisfies the range", async () => {
     const vfs = project({ "@corpus/leaf": "^3.0.0" });
-    await expect(install(vfs, resolutionRegistry())).rejects.toMatchObject({ code: "NO_MATCHING_VERSION" });
+    await expect(install(vfs, await resolutionRegistry())).rejects.toMatchObject({ code: "NO_MATCHING_VERSION" });
     expect(exists(vfs, `${ROOT}/node_modules/@corpus/leaf`)).toBe(false);
   });
 });
@@ -162,7 +167,7 @@ describe("corpus-based version resolution", () => {
 describe("transitive dependency installation", () => {
   it("installs the whole chain flat when nothing conflicts", async () => {
     const vfs = project({ "@corpus/deep": "^1.0.0" });
-    const registry = resolutionRegistry();
+    const registry = await resolutionRegistry();
     const report = await install(vfs, registry);
 
     expect(report.packages.map((item) => `${item.name}@${item.version}`).sort()).toEqual([
@@ -182,7 +187,7 @@ describe("transitive dependency installation", () => {
 describe("nested version conflict", () => {
   it("keeps the root copy flat and nests the conflicting one under its dependent", async () => {
     const vfs = project({ "@corpus/leaf": "^1.0.0", "@corpus/version-conflict": "^2.0.0" });
-    const report = await install(vfs, resolutionRegistry());
+    const report = await install(vfs, await resolutionRegistry());
 
     expect(report.packages.map((item) => `${item.name}@${item.version}`).sort()).toEqual([
       "@corpus/leaf@1.0.0",
@@ -203,36 +208,47 @@ describe("nested version conflict", () => {
 describe("missing packages", () => {
   it("fails with PACKAGE_NOT_FOUND for a package the corpus does not publish", async () => {
     const vfs = project({ "@corpus/absent": "^1.0.0" });
-    const registry = resolutionRegistry();
+    const registry = await resolutionRegistry();
     await expect(install(vfs, registry)).rejects.toMatchObject({ code: "PACKAGE_NOT_FOUND" });
     expect(exists(vfs, `${ROOT}/node_modules/@corpus/absent`)).toBe(false);
     expect(registry.evidence().refusals).toEqual([{ code: "PACKAGE_NOT_FOUND", subject: "@corpus/absent" }]);
   });
 
   it("fails with PACKAGE_NOT_FOUND when a transitive edge is unavailable", async () => {
-    // A purpose-built corpus: one package whose dependency nobody publishes.
+    // A purpose-built corpus: one package whose dependency nobody publishes. It is verified like any other, because
+    // there is no path to a registry instance that avoids verification.
     const bytes = makePackageTarball(
       { "index.js": "module.exports = 1;\n" },
       { name: "@corpus/orphan", version: "1.0.0", main: "index.js", dependencies: { "@corpus/absent": "^1.0.0" } },
     );
     const integrity = await computeIntegrity(bytes);
     if (integrity === null) throw new Error("no crypto");
-    const entry = {
-      name: "@corpus/orphan",
-      version: "1.0.0",
-      tarball: "@corpus/orphan/1.0.0.tgz",
-      integrity,
-      negative: false,
-      contents: ["package.json", "index.js"],
-      dependencies: { "@corpus/absent": "^1.0.0" },
-      main: "index.js",
-    };
-    const corpus: VerifiedCorpus = {
-      manifest: { formatVersion: 1, packages: [entry] },
-      packages: [{ entry, byteLength: bytes.byteLength, integrity }],
-      unlisted: [],
-    };
-    const registry = new CorpusRegistry({ corpus, mode: "resolution", read: () => new Uint8Array(bytes) });
+    const files = new Map<string, Uint8Array>([["@corpus/orphan/1.0.0.tgz", new Uint8Array(bytes)]]);
+    const { registry } = await loadCorpusRegistry({
+      root: "corpus",
+      manifestText: JSON.stringify({
+        formatVersion: 1,
+        packages: [
+          {
+            name: "@corpus/orphan",
+            version: "1.0.0",
+            tarball: "@corpus/orphan/1.0.0.tgz",
+            integrity,
+            negative: false,
+            contents: ["package.json", "index.js"],
+            dependencies: { "@corpus/absent": "^1.0.0" },
+            main: "index.js",
+          },
+        ],
+      }),
+      mode: "resolution",
+      read: (path) => {
+        const entry = files.get(path);
+        if (entry === undefined) throw new Error(`ENOENT ${path}`);
+        return entry;
+      },
+      listFiles: () => [...files.keys()],
+    });
 
     const vfs = project({ "@corpus/orphan": "^1.0.0" });
     const error = await install(vfs, registry).catch((thrown: unknown) => thrown);
@@ -245,7 +261,7 @@ describe("missing packages", () => {
   it("cannot install a negative-namespace package even when it is asked for directly", async () => {
     for (const broken of ["@corpus-broken/missing-edge", "@corpus-broken/tar-hostile"]) {
       const vfs = project({ [broken]: "^1.0.0" });
-      const registry = resolutionRegistry();
+      const registry = await resolutionRegistry();
       const error = await install(vfs, registry).catch((thrown: unknown) => thrown);
       expect(error, broken).toBeInstanceOf(CorpusRegistryError);
       expect((error as CorpusRegistryError).code, broken).toBe("PACKAGE_NOT_FOUND");
@@ -257,13 +273,13 @@ describe("missing packages", () => {
 
   it("refuses an identity it cannot resolve rather than inventing one", async () => {
     const vfs = project({ "@corpus/leaf": "workspace:*" });
-    await expect(install(vfs, resolutionRegistry())).rejects.toMatchObject({ code: "UNSUPPORTED_SPEC" });
+    await expect(install(vfs, await resolutionRegistry())).rejects.toMatchObject({ code: "UNSUPPORTED_SPEC" });
   });
 });
 
 describe("integrity verification before extraction", () => {
   it("installs nothing when the packument advertises a digest the bytes do not have", async () => {
-    const honest = resolutionRegistry();
+    const honest = await resolutionRegistry();
     const lying: RegistryClient = {
       packument: async (name) => {
         const packument = await honest.packument(name);
@@ -297,7 +313,7 @@ describe("network fallback prevention", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     const vfs = project({ "@corpus/deep": "^1.0.0" });
-    const report = await install(vfs, resolutionRegistry());
+    const report = await install(vfs, await resolutionRegistry());
     expect(report.packages).toHaveLength(3);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -309,7 +325,7 @@ describe("network fallback prevention", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     const vfs = project({ "@corpus/absent": "^1.0.0" });
-    await expect(install(vfs, resolutionRegistry())).rejects.toMatchObject({ code: "PACKAGE_NOT_FOUND" });
+    await expect(install(vfs, await resolutionRegistry())).rejects.toMatchObject({ code: "PACKAGE_NOT_FOUND" });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
@@ -321,7 +337,7 @@ describe("repeated installation", () => {
 
     const run = async () => {
       const vfs = project({ "@corpus/leaf": "^1.0.0", "@corpus/version-conflict": "^2.0.0" });
-      await install(vfs, resolutionRegistry());
+      await install(vfs, await resolutionRegistry());
       return { tree: tree(vfs, `${ROOT}/node_modules`), lockfile: text(vfs, `${ROOT}/package-lock.json`) };
     };
 
@@ -338,7 +354,7 @@ describe("repeated installation", () => {
 
 describe("observable evidence", () => {
   it("keeps packuments, tarballs and integrity checks in separate buckets during an install", async () => {
-    const registry = resolutionRegistry();
+    const registry = await resolutionRegistry();
     const vfs = project({ "@corpus/chain": "^1.0.0" });
     await install(vfs, registry);
 

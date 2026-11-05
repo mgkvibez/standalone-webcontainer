@@ -21,6 +21,7 @@ import type { Packument, PackumentVersion, RegistryClient } from "../npm/install
 import { compareVersions } from "../npm/semver-range.js";
 import {
   installablePackages,
+  isVerifiedCorpus,
   verifyCorpus,
   type CorpusEntry,
   type VerifiedCorpus,
@@ -37,6 +38,7 @@ export type CorpusRegistryCode =
   | "TARBALL_NOT_FOUND"
   | "PACKUMENT_FORBIDDEN_IN_PINNED_MODE"
   | "INTEGRITY_MISMATCH"
+  | "UNVERIFIED_CORPUS"
   | "NO_CRYPTO";
 
 export class CorpusRegistryError extends Error {
@@ -71,7 +73,10 @@ export interface CorpusEvidence {
 }
 
 export interface CorpusRegistryOptions {
-  /** A corpus that has already been through `verifyCorpus`. Nothing here re-validates identity or layout. */
+  /**
+   * A corpus that has already been through `verifyCorpus`. Nothing here re-reads identity or layout, so the brand that
+   * `verifyCorpus` mints is checked instead: an object literal with the right shape is not a verified corpus.
+   */
   readonly corpus: VerifiedCorpus;
   /** Reads a tarball by its corpus-relative path. Injected so this module owns no I/O. */
   readonly read: (tarballPath: string) => string | Uint8Array;
@@ -102,7 +107,20 @@ export class CorpusRegistry implements RegistryClient {
   readonly #integrityChecks: { name: string; version: string; ok: boolean }[] = [];
   readonly #refusals: { code: CorpusRegistryCode; subject: string }[] = [];
 
-  constructor(options: CorpusRegistryOptions) {
+  /**
+   * Private, and checked at runtime as well.
+   *
+   * `private` is a compile-time gesture that `as any` erases, so the constructor refuses an unbranded corpus outright.
+   * Every path to an instance therefore runs through `verifyCorpus` first, which is the property we actually want and the
+   * one a test can observe.
+   */
+  private constructor(options: CorpusRegistryOptions) {
+    if (!isVerifiedCorpus(options.corpus)) {
+      throw new CorpusRegistryError(
+        "UNVERIFIED_CORPUS",
+        "this corpus has not been through verifyCorpus; load it with loadCorpusRegistry() instead",
+      );
+    }
     this.#read = options.read;
     this.#mode = options.mode;
     this.#allowNegative = options.allowNegative === true;
@@ -117,6 +135,17 @@ export class CorpusRegistry implements RegistryClient {
       else list.push(entry);
       this.#byUrl.set(corpusTarballUrl(entry.name, entry.version), entry);
     }
+  }
+
+  /**
+   * The one reachable way to an instance.
+   *
+   * Not a test seam: it demands the brand `verifyCorpus` mints, so a fabricated corpus is refused here exactly as it is
+   * refused by the constructor. Tests that need a purpose-built corpus go through `loadCorpusRegistry` with bytes in
+   * memory, which verifies them for real rather than skipping the check that gives the type its meaning.
+   */
+  static fromVerifiedCorpus(options: CorpusRegistryOptions): CorpusRegistry {
+    return new CorpusRegistry(options);
   }
 
   get mode(): CorpusMode {
@@ -248,7 +277,7 @@ export async function loadCorpusRegistry(options: {
   });
   return {
     corpus,
-    registry: new CorpusRegistry({
+    registry: CorpusRegistry.fromVerifiedCorpus({
       corpus,
       read: options.read,
       mode: options.mode,

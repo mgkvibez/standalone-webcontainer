@@ -236,6 +236,30 @@ export function parseCorpusManifest(text: string): CorpusManifest {
   return { formatVersion: version, packages };
 }
 
+/**
+ * Proof that a corpus came out of `verifyCorpus`.
+ *
+ * A brand rather than a boolean field on purpose. `VerifiedCorpus` is a structural interface, so any object literal with
+ * the right shape satisfies it, and a consumer that trusted the type would be trusting a claim nobody checked. The symbol
+ * stays private to this module, so the only way to obtain a branded corpus is to run the verification that mints it.
+ * It is non-enumerable so nothing that serialises a corpus carries the brand along to be forged from JSON.
+ */
+const VERIFIED_BRAND: unique symbol = Symbol("corpus.verified");
+
+function brand(corpus: VerifiedCorpus): VerifiedCorpus {
+  Object.defineProperty(corpus, VERIFIED_BRAND, { value: true, enumerable: false, configurable: false });
+  return corpus;
+}
+
+/** Whether this corpus was produced by `verifyCorpus`, as opposed to merely declared to look like one. */
+export function isVerifiedCorpus(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<symbol, unknown>)[VERIFIED_BRAND] === true
+  );
+}
+
 export interface VerifiedPackage {
   readonly entry: CorpusEntry;
   readonly byteLength: number;
@@ -327,7 +351,7 @@ export async function verifyCorpus(options: {
     throw new CorpusError("UNEXPECTED_FILE", `corpus holds tarballs the manifest does not list: ${unlisted.join(", ")}`);
   }
 
-  return { manifest, packages: verified, unlisted };
+  return brand({ manifest, packages: verified, unlisted });
 }
 
 /** The entries a fixture is allowed to reach. Negative packages are excluded structurally, not by convention. */
