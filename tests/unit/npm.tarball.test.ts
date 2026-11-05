@@ -90,6 +90,14 @@ describe("parseTar", () => {
     expect(() => parseTar(makeTar([{ path: "package/link", type: "symlink" }]))).toThrow(/UNSUPPORTED_ENTRY/);
   });
 
+  it("refuses hard links, device nodes and fifos, not only symlinks", () => {
+    // One branch in the reader refuses every non-file, non-directory entry. Only the symlink case was covered, so
+    // three of the four entry types the comment names could have regressed unnoticed.
+    for (const type of ["hardlink", "device", "fifo"] as const) {
+      expect(() => parseTar(makeTar([{ path: "package/entry", type }])), type).toThrow(/UNSUPPORTED_ENTRY/);
+    }
+  });
+
   it("refuses more entries than the limit allows", () => {
     const tar = makeTar([
       { path: "package/a", data: "1" },

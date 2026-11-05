@@ -12,7 +12,7 @@ const encoder = new TextEncoder();
 export interface WriteEntry {
   path: string;
   data?: string | Uint8Array;
-  type?: "file" | "directory" | "symlink" | "pax" | "gnu-longname";
+  type?: "file" | "directory" | "symlink" | "hardlink" | "device" | "fifo" | "pax" | "gnu-longname";
   /** Only for gnu-longname entries: the payload text. */
   payload?: string;
   /** Only for pax: the path that the payload announces. */
@@ -78,6 +78,13 @@ export function makeTar(entries: readonly WriteEntry[]): Uint8Array {
     }
     if (type === "symlink") {
       blocks.push(header(entry.path, 0, "2"));
+      continue;
+    }
+    // The other entries a hostile archive can carry. The reader refuses all of them, so a test needs to be able to
+    // produce them: without these the "hard links, devices and fifos are refused" claim is only exercised for symlinks.
+    if (type === "hardlink" || type === "device" || type === "fifo") {
+      const flag = type === "hardlink" ? "1" : type === "device" ? "3" : "6";
+      blocks.push(header(entry.path, 0, flag));
       continue;
     }
     const data =

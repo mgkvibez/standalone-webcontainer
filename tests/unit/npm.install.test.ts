@@ -317,6 +317,63 @@ describe("installDependencies", () => {
   });
 });
 
+describe("installation failure", () => {
+  /*
+   * The contract is silent on what happens to packages extracted before the one that fails: the loop extracts as it
+   * goes and nothing rolls back. These tests therefore pin the behaviour that exists rather than asserting a policy
+   * nobody wrote down, and the ambiguity is reported in the R6c findings instead of being decided here.
+   */
+
+  it("leaves the packages it already extracted, and writes no lockfile, when a later package fails", async () => {
+    const registry = await fakeRegistry({
+      packages: {
+        a: [{ version: "1.0.0", files: { "index.js": "exports.a = 1;" } }],
+        b: [{ version: "1.0.0", integrity: await sha512Integrity(new TextEncoder().encode("not the served bytes")) }],
+      },
+    });
+    const { vfs, root } = boot();
+
+    await expect(
+      installDependencies({ dependencies: { a: "^1.0.0", b: "^1.0.0" } }, { registry, vfs, root }),
+    ).rejects.toThrow(/INTEGRITY_MISMATCH/);
+
+    // Extracted before the failure, and still on disk: this is the observable cost of incremental extraction.
+    expect(exists(vfs, "/app/node_modules/a/index.js")).toBe(true);
+    // The failing package itself leaves nothing, and no lockfile claims the install succeeded.
+    expect(exists(vfs, "/app/node_modules/b")).toBe(false);
+    expect(exists(vfs, "/app/package-lock.json")).toBe(false);
+  });
+
+  it("refuses a corrupted gzip payload at the install level and writes nothing", async () => {
+    // Valid magic bytes, then garbage: rejected by decompression, so nothing reaches the file system at all.
+    const corrupted = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xff, 0xff, 0x01, 0x02]);
+    const registry = await fakeRegistry({ packages: { a: [{ version: "1.0.0", rawTarball: corrupted }] } });
+    const { vfs, root } = boot();
+
+    await expect(installDependencies({ dependencies: { a: "^1.0.0" } }, { registry, vfs, root })).rejects.toThrow(
+      /DECOMPRESSION_FAILED/,
+    );
+    expect(exists(vfs, "/app/node_modules/a")).toBe(false);
+    expect(exists(vfs, "/app/package-lock.json")).toBe(false);
+  });
+
+  it("refuses a truncated archive at the install level rather than writing a partial package", async () => {
+    const whole = makeTar([{ path: "package/index.js", data: "exports.a = 1;" }]);
+    // One full header plus a few bytes: the entry declares more content than the archive contains.
+    const registry = await fakeRegistry({
+      packages: { a: [{ version: "1.0.0", rawTarball: new Uint8Array(gzipSync(whole.subarray(0, 512 + 8))) }] },
+    });
+    const { vfs, root } = boot();
+
+    await expect(installDependencies({ dependencies: { a: "^1.0.0" } }, { registry, vfs, root })).rejects.toThrow(
+      /TRUNCATED_ARCHIVE/,
+    );
+    // The failure happens while reading the archive, which is before any of its files are written.
+    expect(exists(vfs, "/app/node_modules/a/index.js")).toBe(false);
+    expect(exists(vfs, "/app/package-lock.json")).toBe(false);
+  });
+});
+
 describe("createHttpRegistryClient", () => {
   it("escapes a scoped name onto the registry path", async () => {
     const seen: string[] = [];
