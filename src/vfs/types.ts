@@ -10,6 +10,8 @@
  */
 export interface FileNode {
   kind: "file";
+  /** Only explicitly regenerable files may be reclaimed by whole-VFS LRU pressure. */
+  evictable: boolean;
   /** File contents, chunked at CHUNK_SIZE; concatenation is the file body. */
   chunks: Uint8Array[];
   size: number;

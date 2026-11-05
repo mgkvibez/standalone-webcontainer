@@ -8,15 +8,16 @@ WebContainers API, Nodebox, or any other third-party proprietary runtime.
 
 ## Status: the engine runs in a browser, in a workspace
 
-`npm run dev:browser` opens the environment: a project explorer, a CodeMirror editor, and a terminal that executes real
-commands through the runtime inside a Worker, with a process table and `localStorage` persistence. `npm run test:browser`
-drives it with Playwright (17 tests). The engine itself is unchanged in behaviour; the one additive option is
-`RunOptions.onOutput`, which lets output stream to the terminal as a program writes it.
+`npm run dev:browser` opens the environment: a project explorer, a CodeMirror editor, and a terminal that executes
+commands through the runtime inside a Worker, with a process table and `localStorage` persistence. The terminal supports
+`npm install` and `npm ci` against the bundled, integrity-verified synthetic `@corpus/*` package set only. Installed
+`node_modules` live in a volatile memory overlay; `package-lock.json` is saved with the project and can rebuild the
+overlay after reload. This does not fetch from npm or prove compatibility with the public npm ecosystem. Dev-server
+preview and service-worker port forwarding are still not wired into the page.
 
 Still true and worth saying before any compatibility claim: `crypto`, `child_process`, `net` and `worker_threads` are
-absent, executions are serialised (one run at a time, no preemption), termination kills the Worker rather than signalling a
-process, `npm` is not wired into the terminal, and nothing registers a service worker, so no browser request reaches the
-runtime's HTTP gateway yet. The twenty fixtures are defined (`fixtures/definitions/`) and none are frozen, so the gate is
+absent, executions are serialised (one run at a time, no preemption), and termination kills the Worker rather than
+signalling a process. The twenty fixtures are defined (`fixtures/definitions/`) and none are frozen, so the gate is
 unearnable: fixtures 4 and 7 pass, the rest are untouched.
 
 ## Local commands

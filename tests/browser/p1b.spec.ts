@@ -22,9 +22,7 @@ const runLine = async (page: Page, line: string): Promise<void> => {
 
 /** Replace the open file's contents through the editor, the way a person would. */
 const setEditorText = async (page: Page, text: string): Promise<void> => {
-  await page.locator(".cm-content").click();
-  await page.keyboard.press("ControlOrMeta+a");
-  await page.keyboard.type(text);
+  await page.locator(".cm-content").fill(text);
   // The save is debounced; the status line is the observable signal that it landed.
   await expect(page.locator("#save-state")).toHaveText("saved", { timeout: 5_000 });
 };
@@ -107,6 +105,27 @@ test("runs a file through the runtime from the terminal and shows its output", a
   await expect(page.locator("#scrollback")).toContainText("tick 2");
   await expect(page.locator("#scrollback")).toContainText("[1] exited with code 0");
   await expect(page.locator(".process-chip[data-pid='1']")).toHaveAttribute("data-state", "exited");
+});
+
+test("installs only bundled corpus packages and rebuilds the volatile overlay from the lockfile", async ({ page }) => {
+  await boot(page);
+  await openFile(page, "/package.json");
+  await setEditorText(page, JSON.stringify({ name: "playground", version: "1.0.0", dependencies: { "@corpus/leaf": "^1.0.0" } }, null, 2));
+  await runLine(page, "npm install");
+  await expect(page.locator("#scrollback")).toContainText("added 1 package(s) from the offline corpus");
+  await expect(page.locator("#tree li[data-path='/package-lock.json']")).toBeVisible();
+
+  await openFile(page, "/index.js");
+  await setEditorText(page, 'console.log(require("@corpus/leaf").version);\n');
+  await runLine(page, "node index.js");
+  await expect(page.locator("#scrollback .line[data-stream='stdout']").last()).toHaveText("1.0.0");
+
+  await page.reload();
+  await boot(page);
+  await runLine(page, "npm ci");
+  await expect(page.locator("#scrollback")).toContainText("added 1 package(s) from the offline corpus");
+  await runLine(page, "node index.js");
+  await expect(page.locator("#scrollback .line[data-stream='stdout']").last()).toHaveText("1.0.0");
 });
 
 test("keeps stdout and stderr in separate streams", async ({ page }) => {
@@ -209,17 +228,17 @@ test("keeps project filesystems separate", async ({ page }) => {
   await expect(page.locator("#scrollback .line[data-stream='stdout']").last()).toContainText("only-in-playground.txt");
 });
 
-test("refuses unsupported commands honestly instead of pretending", async ({ page }) => {
+test("installs from the offline corpus and refuses commands outside the finite command set", async ({ page }) => {
   await boot(page);
   await runLine(page, "npm install");
-  await expect(page.locator("#scrollback")).toContainText("npm: npm is not wired into the terminal yet");
+  await expect(page.locator("#scrollback")).toContainText("added 0 package(s) from the offline corpus");
 
   await runLine(page, "cargo build");
   await expect(page.locator("#scrollback")).toContainText("cargo: not a supported command");
 
   await runLine(page, "help");
   await expect(page.locator("#scrollback")).toContainText("Supported commands");
-  // A refused command must not fabricate a process.
+  // An install or refused command must not fabricate a runtime process.
   await expect(page.locator(".process-chip")).toHaveCount(0);
 });
 

@@ -255,7 +255,9 @@ export class ProjectStore {
 
   /** The `ProjectFiles` view the container's file commands use. Same data, no second filesystem. */
   filesFor(): ProjectFiles {
+    const thisStore = this;
     return {
+      get projectId() { return thisStore.activeId(); },
       list: () => this.listFiles(),
       listDirs: () => this.listDirs(),
       read: (path) => this.readFile(path),

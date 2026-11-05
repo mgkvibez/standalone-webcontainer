@@ -266,6 +266,17 @@ describe("installDependencies", () => {
     );
   });
 
+  it("strict ci mode refuses an unpinned dependency without consulting the registry", async () => {
+    const registry = await fakeRegistry({ packages: { a: [{ version: "1.0.0" }] } });
+    const { vfs, root } = boot();
+    await expect(installDependencies(
+      { dependencies: { a: "^1.0.0" } },
+      { registry, vfs, root, lockfile: { lockfileVersion: 3, packages: { "": {} } }, requireLockfile: true },
+    )).rejects.toThrow(/LOCKFILE_MISMATCH.*a@\^1\.0\.0/);
+    expect(registry.fetched).toEqual([]);
+    expect(exists(vfs, "/app/node_modules/a/index.js")).toBe(false);
+  });
+
   it("stops at the package limit rather than filling the tab", async () => {
     const registry = await fakeRegistry({
       packages: {

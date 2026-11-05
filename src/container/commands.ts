@@ -30,7 +30,6 @@ export const PROCESS_COMMANDS = ["node"] as const;
 
 /** Recognised, deliberately refused, with the reason a user needs. */
 export const REFUSED_COMMANDS: Readonly<Record<string, string>> = {
-  npm: "npm is not wired into the terminal yet (P1b). Use the runtime's install through the API; the CLI arrives in a later milestone.",
   npx: "npx is not available in the terminal yet (P1b).",
   pnpm: "pnpm is not available in the terminal yet (P1b).",
   yarn: "yarn is not available in the terminal yet (P1b).",
@@ -40,6 +39,7 @@ export const REFUSED_COMMANDS: Readonly<Record<string, string>> = {
 };
 
 export type Command =
+  | { readonly kind: "install"; readonly args: readonly string[] }
   | { readonly kind: "builtin"; readonly name: (typeof BUILTIN_COMMANDS)[number]; readonly args: readonly string[] }
   | { readonly kind: "process"; readonly name: (typeof PROCESS_COMMANDS)[number]; readonly args: readonly string[] }
   | { readonly kind: "refused"; readonly name: string; readonly reason: string }
@@ -94,6 +94,7 @@ export function parseCommand(line: string): Command {
   if ((PROCESS_COMMANDS as readonly string[]).includes(head)) {
     return { kind: "process", name: head as (typeof PROCESS_COMMANDS)[number], args: rest };
   }
+  if (head === "npm") return { kind: "install", args: rest };
   const refusal = REFUSED_COMMANDS[head];
   if (refusal !== undefined && refusal !== "") return { kind: "refused", name: head, reason: refusal };
 

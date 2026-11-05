@@ -11,10 +11,12 @@ import { Container } from "../container/container.js";
 import { ProjectStore } from "./projects.js";
 import { WorkerRuntimeClient } from "./worker-client.js";
 import { createWorkspace } from "./workspace.js";
+import { loadOfflineRegistry } from "./offline-registry.js";
 
 const store = ProjectStore.load(window.localStorage);
 const runtime = new WorkerRuntimeClient();
-const container = new Container({ runtime, files: store.filesFor() });
+const registry = await loadOfflineRegistry();
+const container = new Container({ runtime, files: store.filesFor(), registry });
 const session = container.createSession("main");
 
 const workspace = createWorkspace({

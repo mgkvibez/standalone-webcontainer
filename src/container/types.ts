@@ -72,6 +72,8 @@ export interface RuntimeRunOutcome {
 
 /** The project files the container's file commands operate on. Implemented by the page's project store. */
 export interface ProjectFiles {
+  /** Stable identity for volatile runtime data such as installed dependencies. */
+  readonly projectId?: string;
   /** Every file path, absolute, e.g. `/index.js`. */
   list(): readonly string[];
   /** Every directory path, including ones derived from file paths. */

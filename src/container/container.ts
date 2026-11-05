@@ -30,10 +30,14 @@ import type {
   RuntimeRunOutcome,
   Session,
 } from "./types.js";
+import { installDependencies, loadLockfile, readPackageManifest, type RegistryClient } from "../npm/install.js";
+import { VFSNotFoundError } from "../vfs/errors.js";
 
 export interface ContainerOptions {
   readonly runtime: RuntimeClient;
   readonly files: ProjectFiles;
+  /** Bundled, integrity-verified offline package corpus. */
+  readonly registry?: RegistryClient;
   /** Real-time budget for a process. Defaults to 5 s; the runtime's own timeout only bounds async gaps. */
   readonly timeoutMs?: number;
   readonly now?: () => number;
@@ -44,6 +48,9 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 export class Container {
   readonly #runtime: RuntimeClient;
   readonly #files: ProjectFiles;
+  readonly #registry: RegistryClient | undefined;
+  readonly #dependencies = new Map<string, string>();
+  #dependencyProjectId: string | undefined;
   readonly #timeoutMs: number;
   readonly #now: () => number;
   readonly #sessions: Session[] = [];
@@ -58,6 +65,7 @@ export class Container {
   constructor(options: ContainerOptions) {
     this.#runtime = options.runtime;
     this.#files = options.files;
+    this.#registry = options.registry;
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#now = options.now ?? (() => Date.now());
   }
@@ -104,7 +112,8 @@ export class Container {
       "  node <file> [args...]   run a file through the runtime",
       `  ${BUILTIN_COMMANDS.join("  ")}`,
       "",
-      "Not supported (refused by name): npm, npx, pnpm, yarn, sh, bash, zsh.",
+      "Supported package commands: npm install, npm ci (bundled offline corpus only).",
+      "Not supported: npx, pnpm, yarn, sh, bash, zsh.",
       "No pipes, globbing, redirection, environment assignment or job control.",
     ].join("\n");
   }
@@ -129,6 +138,9 @@ export class Container {
         this.#line(session, "stderr", `${command.name}: not a supported command in this terminal. Type \`help\`.`);
         this.#notify();
         return;
+      case "install":
+        await this.#install(session, command.args);
+        return;
       case "builtin":
         this.#builtin(session, command.name, command.args);
         this.#notify();
@@ -137,6 +149,71 @@ export class Container {
         await this.#startProcess(session, line, command.args);
         return;
     }
+  }
+
+  async #install(session: Session, args: readonly string[]): Promise<void> {
+    if (this.#registry === undefined) {
+      this.#line(session, "stderr", "npm: offline package corpus is unavailable");
+      this.#notify();
+      return;
+    }
+    const [subcommand, ...flags] = args;
+    if (subcommand !== "install" && subcommand !== "i" && subcommand !== "ci") {
+      this.#line(session, "stderr", `npm: unsupported command${subcommand === undefined ? "" : ` ${subcommand}`}`);
+      this.#notify();
+      return;
+    }
+    if (flags.some((flag) => !["--omit=dev", "--production"].includes(flag))) {
+      this.#line(session, "stderr", "npm: only npm install/npm ci and --omit=dev are supported; package arguments and other flags are refused");
+      this.#notify();
+      return;
+    }
+    const projectId = this.#files.projectId ?? "default";
+    if (this.#dependencyProjectId !== projectId) {
+      this.#dependencies.clear();
+      this.#dependencyProjectId = projectId;
+    }
+    const root = "/";
+    try {
+      const manifest = readPackageManifest({ readFileSync: (path) => {
+        const contents = this.#files.read(path);
+        if (contents === null) throw new VFSNotFoundError(path);
+        return contents;
+      } }, root);
+      const lockfile = loadLockfile({ readFileSync: (path) => {
+        const contents = this.#files.read(path);
+        if (contents === null) throw new VFSNotFoundError(path);
+        return contents;
+      } }, root);
+      if (subcommand === "ci" && lockfile === null) throw new Error("npm ci requires package-lock.json");
+      const staged = new Map<string, string>();
+      const report = await installDependencies(manifest, {
+        registry: this.#registry,
+        root,
+        lockfile,
+        requireLockfile: subcommand === "ci",
+        includeDev: !flags.includes("--omit=dev") && !flags.includes("--production"),
+        writeLockfile: subcommand !== "ci",
+        vfs: {
+          mkdirSync: () => undefined,
+          writeFileSync: (path, data) => staged.set(path, typeof data === "string" ? data : new TextDecoder().decode(data)),
+        },
+      });
+      if (subcommand === "ci" && !report.usedLockfile) throw new Error("npm ci requires a lockfile that pins the installed versions");
+      if ((this.#files.projectId ?? "default") !== projectId) {
+        throw new Error("active project changed while npm was installing; staged files were discarded");
+      }
+      const lockText = staged.get(`${root}package-lock.json`);
+      if (lockText !== undefined) this.#files.write(`${root}package-lock.json`, lockText);
+      this.#dependencies.clear();
+      for (const [path, contents] of staged) if (path.includes("/node_modules/")) this.#dependencies.set(path, contents);
+      this.#line(session, "stdout", `added ${report.packages.length} package(s) from the offline corpus`);
+      for (const warning of report.warnings) this.#line(session, "stderr", `npm warning: ${warning}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.#line(session, "stderr", `npm error: ${message}`);
+    }
+    this.#notify();
   }
 
   /** Hard-stop a process. Returns false when the pid is unknown or already finished. */
@@ -393,7 +470,12 @@ export class Container {
   // ---------------------------------------------------------------- plumbing
 
   #snapshotFiles(): Record<string, string> {
-    const snapshot: Record<string, string> = {};
+    const projectId = this.#files.projectId ?? "default";
+    if (this.#dependencyProjectId !== projectId) {
+      this.#dependencies.clear();
+      this.#dependencyProjectId = projectId;
+    }
+    const snapshot: Record<string, string> = { ...Object.fromEntries(this.#dependencies) };
     for (const path of this.#files.list()) {
       const contents = this.#files.read(path);
       if (contents !== null) snapshot[path] = contents;

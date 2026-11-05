@@ -32,6 +32,7 @@ const ERRNO: Readonly<Record<string, number>> = {
   ENOTEMPTY: -39,
   EINVAL: -22,
   ENOSPC: -28,
+  EFBIG: -27,
   EPERM: -1,
 };
 
@@ -44,6 +45,8 @@ const CODE_MAP: Readonly<Record<string, string>> = {
   EINVAL: "EINVAL",
   EQUOTA: "ENOSPC",
   EENCODING: "EINVAL",
+  EFBIG: "EFBIG",
+  ENOSPC: "ENOSPC",
 };
 
 const toNodeError = (error: unknown, syscall: string, path: string): NodeFsError => {

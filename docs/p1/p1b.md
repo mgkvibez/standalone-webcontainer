@@ -1,5 +1,8 @@
 # P1b — the first assembled environment
 
+This report records the P1b baseline. P1c later adds the offline corpus install path documented in [p1c.md](p1c.md);
+the P1b command inventory and limitation list below describe the earlier milestone state.
+
 Baseline `3de6b06` (P1a). P1b turns the browser smoke test into a workspace: projects, an explorer, an editor, a terminal
 that executes real commands, a process table, and persistence.
 

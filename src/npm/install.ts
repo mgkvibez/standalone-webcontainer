@@ -87,6 +87,8 @@ export interface InstallOptions {
    * which means "resolve normally" rather than being an error.
    */
   readonly lockfile?: Lockfile | null;
+  /** Refuse any resolution not pinned by this lockfile (the `npm ci` contract). */
+  readonly requireLockfile?: boolean;
   /** Write `package-lock.json` into `root` after a successful install. Defaults to true. */
   readonly writeLockfile?: boolean;
 }
@@ -357,6 +359,7 @@ export async function installDependencies(
   const verify = options.verifyIntegrity ?? true;
   const writeLockfile = options.writeLockfile ?? true;
   const locked = options.lockfile ?? null;
+  const requireLockfile = options.requireLockfile ?? false;
 
   const warnings: string[] = [];
   const packuments = new Map<string, Packument>();
@@ -469,6 +472,12 @@ export async function installDependencies(
       const fromLock = chosen !== null;
 
       if (chosen === null) {
+        if (requireLockfile) {
+          throw new InstallError(
+            "LOCKFILE_MISMATCH",
+            `${request.name}@${request.range} is not pinned to a satisfying version at ${key}`,
+          );
+        }
         // Only checked when a registry resolve is actually about to happen: a lockfile pin already carries a concrete
         // tarball URL, so a project pinned from a local install still installs.
         const unsupported = unsupportedSpecReason(request.range);

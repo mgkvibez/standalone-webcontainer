@@ -10,8 +10,10 @@ import { describe, expect, it } from "vitest";
 import { Container } from "../../src/container/container.js";
 import { parseCommand, resolvePath, tokenize } from "../../src/container/commands.js";
 import type { ProcessRecord, ProjectFiles, RuntimeClient, RuntimeRunOutcome, RuntimeRunRequest } from "../../src/container/types.js";
+import { createFakeRegistry } from "../helpers/registry.js";
 
 class FakeProject implements ProjectFiles {
+  readonly projectId = "test-project";
   readonly files = new Map<string, string>();
 
   constructor(initial: Record<string, string> = {}) {
@@ -127,7 +129,7 @@ describe("command parsing", () => {
   it("classifies the finite command set", () => {
     expect(parseCommand("node index.js")).toEqual({ kind: "process", name: "node", args: ["index.js"] });
     expect(parseCommand("pwd")).toEqual({ kind: "builtin", name: "pwd", args: [] });
-    expect(parseCommand("npm install")).toMatchObject({ kind: "refused", name: "npm" });
+    expect(parseCommand("npm install")).toMatchObject({ kind: "install", args: ["install"] });
     expect(parseCommand("cargo build")).toEqual({ kind: "unsupported", name: "cargo" });
     expect(parseCommand("   ")).toEqual({ kind: "empty" });
   });
@@ -332,13 +334,38 @@ describe("processes", () => {
 });
 
 describe("honest refusal", () => {
-  it("refuses npm by name with a reason", async () => {
+  it("installs from the injected offline registry into a volatile overlay", async () => {
+    const project = new FakeProject({
+      "/package.json": JSON.stringify({ dependencies: { "@corpus/hello": "^1.0.0" } }),
+      "/index.js": 'console.log(require("@corpus/hello"));',
+    });
+    const runtime = new FakeRuntime();
+    const registry = await createFakeRegistry({
+      packages: { "@corpus/hello": [{ version: "1.0.0", files: { "index.js": 'module.exports = "installed";' } }] },
+    });
+    const container = new Container({ runtime, files: project, registry });
+    const session = container.createSession();
+    await container.execute(session.id, "npm install");
+    const lockfile = project.read("/package-lock.json");
+    expect(lockfile).not.toBeNull();
+    expect(project.list().some((path) => path.includes("node_modules"))).toBe(false);
+    await container.execute(session.id, "node index.js");
+    expect(runtime.requests.at(-1)?.files["/node_modules/@corpus/hello/index.js"]).toContain("installed");
+    expect(output(container, session.id)).toContain("stdout:added 1 package(s) from the offline corpus");
+    await container.execute(session.id, "npm ci");
+    expect(project.read("/package-lock.json")).toBe(lockfile);
+    await container.execute(session.id, "npm install left-pad");
+    expect(registry.fetched).toEqual(["@corpus/hello"]);
+    expect(output(container, session.id).some((line) => line.includes("package arguments and other flags are refused"))).toBe(true);
+  });
+
+  it("does not accept package arguments or make registry installs without an injected corpus", async () => {
     const { container } = containerWith();
     const session = container.createSession();
     await container.execute(session.id, "npm install");
-    const lines = output(container, session.id);
-    expect(lines.some((line) => line.startsWith("system:npm:"))).toBe(true);
-    expect(lines.some((line) => line.includes("not wired into the terminal"))).toBe(true);
+    expect(output(container, session.id).some((line) => line.includes("offline package corpus is unavailable"))).toBe(true);
+    await container.execute(session.id, "npm install left-pad");
+    expect(output(container, session.id).some((line) => line.includes("offline package corpus is unavailable"))).toBe(true);
   });
 
   it("refuses an unknown command and points at help", async () => {
