@@ -147,6 +147,18 @@ export class PreviewGateway {
     return this.#requests.closeAll(new Error("preview gateway closed"));
   }
 
+  /** Stop selected in-memory servers, or all of them during a project/Worker reset. */
+  closeServers(ports: readonly number[] = [...this.#servers.keys()]): readonly number[] {
+    const closed: number[] = [];
+    for (const port of ports) {
+      const server = this.#servers.get(port);
+      if (server === undefined) continue;
+      server.close();
+      closed.push(port);
+    }
+    return closed;
+  }
+
   /**
    * Server lookup goes through the port registry, which stores bindings rather than servers, so the
    * gateway keeps its own map from port to handler. The registry stays the single source of truth for

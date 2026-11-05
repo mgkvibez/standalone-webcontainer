@@ -27,4 +27,9 @@ const workspace = createWorkspace({
 });
 
 // Exposed for the browser tests and for anyone debugging in devtools. Not a public API.
-Object.assign(window as unknown as Record<string, unknown>, { __workspace: workspace, __store: store, __container: container });
+Object.assign(window as unknown as Record<string, unknown>, {
+  __workspace: workspace,
+  __store: store,
+  __container: container,
+  __runtime: runtime,
+});

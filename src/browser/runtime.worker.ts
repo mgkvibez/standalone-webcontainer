@@ -9,9 +9,8 @@
  * a thread boundary, NOT a sandbox.
  */
 
-import { InProcessRuntime } from "../runtime/in-process.js";
-import { FileSystem } from "../vfs/index.js";
-import type { ClientMessage, RunRequest, ServerMessage } from "./protocol.js";
+import { RuntimeSupervisor } from "./runtime-supervisor.js";
+import type { ClientMessage, RunRequest, ServerMessage, TransportMessage } from "./protocol.js";
 
 interface WorkerScope {
   onmessage: ((event: MessageEvent<ClientMessage>) => void) | null;
@@ -24,25 +23,14 @@ const post = (message: ServerMessage): void => {
   scope.postMessage(message);
 };
 
-/** Materialise the project into a brand-new VFS. Parents are created first, so nesting depth does not matter. */
-function seedVfs(files: Readonly<Record<string, string>>): FileSystem {
-  const vfs = new FileSystem();
-  const paths = Object.keys(files).sort();
-  for (const path of paths) {
-    const contents = files[path];
-    if (contents === undefined) continue;
-    const parent = path.slice(0, Math.max(0, path.lastIndexOf("/")));
-    if (parent !== "") vfs.mkdirSync(parent, { recursive: true });
-    vfs.writeFileSync(path, contents);
-  }
-  return vfs;
-}
+const supervisor = new RuntimeSupervisor();
 
 async function handleRun(request: RunRequest): Promise<void> {
   try {
-    const vfs = seedVfs(request.files);
-    const runtime = new InProcessRuntime(vfs);
-    const result = await runtime.run(request.entry, {
+    const result = await supervisor.run({
+      projectId: request.projectId,
+      files: request.files,
+      entry: request.entry,
       argv: [...request.argv],
       cwd: request.cwd,
       env: { ...request.env },
@@ -60,6 +48,7 @@ async function handleRun(request: RunRequest): Promise<void> {
       durationMs: result.durationMs,
       timedOut: result.timedOut,
       scheduler: result.scheduler,
+      ...(result.previewPorts === undefined ? {} : { previewPorts: result.previewPorts }),
     });
   } catch (error) {
     post({
@@ -72,6 +61,52 @@ async function handleRun(request: RunRequest): Promise<void> {
   }
 }
 
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) &&
+    Object.values(value).every((entry) => typeof entry === "string");
+}
+
+function attachTransport(port: MessagePort): void {
+  port.onmessage = (event: MessageEvent<unknown>): void => {
+    const message = event.data as Partial<TransportMessage> | null;
+    if (
+      message === null ||
+      message.type !== "request" ||
+      typeof message.id !== "string" ||
+      typeof message.method !== "string" ||
+      typeof message.url !== "string" ||
+      !isStringRecord(message.headers) ||
+      !(message.body instanceof Uint8Array)
+    ) {
+      port.postMessage({ type: "error", id: typeof message?.id === "string" ? message.id : "", message: "Invalid transport request." });
+      return;
+    }
+    void supervisor.handleTransport({
+      method: message.method,
+      url: message.url,
+      headers: { ...message.headers },
+      body: message.body,
+    }).then((response) => {
+      const body = response.body.slice();
+      port.postMessage({
+        type: "response",
+        id: message.id,
+        statusCode: response.statusCode,
+        statusMessage: response.statusMessage,
+        headers: response.headers,
+        body,
+      }, [body.buffer]);
+    }).catch((error: unknown) => {
+      port.postMessage({
+        type: "error",
+        id: message.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+  };
+  port.start();
+}
+
 scope.onmessage = (event: MessageEvent<ClientMessage>): void => {
   const message = event.data;
   switch (message.type) {
@@ -80,6 +115,12 @@ scope.onmessage = (event: MessageEvent<ClientMessage>): void => {
       return;
     case "run":
       void handleRun(message);
+      return;
+    case "connect-transport":
+      attachTransport(message.port);
+      return;
+    case "stop-servers":
+      post({ type: "servers-stopped", id: message.id, ports: supervisor.stopServers(message.ports) });
       return;
   }
 };
