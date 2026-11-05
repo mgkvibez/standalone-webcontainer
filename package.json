@@ -14,12 +14,32 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "verify": "npm run typecheck && npm test && npm run fixtures:check && npm run corpus:check",
+    "fixtures:freeze": "vite-node tools/freeze-fixtures.ts",
+    "fixtures:check": "vite-node tools/freeze-fixtures.ts --check",
+    "corpus:build": "vite-node tools/build-corpus.ts --write",
+    "corpus:check": "vite-node tools/build-corpus.ts --check",
+    "dev:browser": "vite",
+    "build:browser": "vite build",
+    "preview:browser": "vite preview",
+    "test:browser": "playwright test"
   },
   "devDependencies": {
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/theme-one-dark": "^6.1.3",
     "@playwright/test": "^1.48.0",
     "@types/node": "^22.0.0",
+    "@types/semver": "^7.8.0",
+    "codemirror": "^6.0.2",
+    "semver": "^7.8.6",
     "typescript": "^5.6.0",
+    "vite": "^7.3.7",
     "vitest": "^2.1.0"
+  },
+  "dependencies": {
+    "acorn": "^8.19.0",
+    "buffer": "^6.0.3",
+    "pathe": "^2.0.3"
   }
 }

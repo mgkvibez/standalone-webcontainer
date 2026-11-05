@@ -1,0 +1,126 @@
+{
+  "status": "numbering and lanes from README \u00a75; content defined from published evidence, status=proposed pending owner sign-off",
+  "note": "Each definitionPath points at fixtures/definitions/fixture-NN.json. A definition with status=proposed is not scoreable: the gate may only count frozen definitions, because charter \u00a74.9 forbids redefining the gate after results exist. frozenHash is the SHA-256 of the definition's canonical content with the status field excluded; it is written by `npm run fixtures:freeze` once the owner marks a definition frozen, and verified by `npm run fixtures:check`, which fails on drift (ADR-0007).",
+  "fixtures": [
+    {
+      "id": 1,
+      "slug": "fixture-01",
+      "lane": "front-end-only",
+      "definitionPath": "fixtures/definitions/fixture-01.json"
+    },
+    {
+      "id": 2,
+      "slug": "fixture-02",
+      "lane": "front-end-only",
+      "definitionPath": "fixtures/definitions/fixture-02.json"
+    },
+    {
+      "id": 3,
+      "slug": "fixture-03",
+      "lane": "front-end-only",
+      "definitionPath": "fixtures/definitions/fixture-03.json"
+    },
+    {
+      "id": 4,
+      "slug": "fixture-04",
+      "lane": "front-end-only",
+      "definitionPath": "fixtures/definitions/fixture-04.json"
+    },
+    {
+      "id": 5,
+      "slug": "fixture-05",
+      "lane": "boundary",
+      "definitionPath": "fixtures/definitions/fixture-05.json"
+    },
+    {
+      "id": 6,
+      "slug": "fixture-06",
+      "lane": "boundary",
+      "definitionPath": "fixtures/definitions/fixture-06.json"
+    },
+    {
+      "id": 7,
+      "slug": "fixture-07",
+      "lane": "front-end-only",
+      "definitionPath": "fixtures/definitions/fixture-07.json"
+    },
+    {
+      "id": 8,
+      "slug": "fixture-08",
+      "lane": "front-end-only",
+      "definitionPath": "fixtures/definitions/fixture-08.json"
+    },
+    {
+      "id": 9,
+      "slug": "fixture-09",
+      "lane": "front-end-only",
+      "definitionPath": "fixtures/definitions/fixture-09.json"
+    },
+    {
+      "id": 10,
+      "slug": "fixture-10",
+      "lane": "front-end-only",
+      "definitionPath": "fixtures/definitions/fixture-10.json"
+    },
+    {
+      "id": 11,
+      "slug": "fixture-11",
+      "lane": "front-end-only",
+      "definitionPath": "fixtures/definitions/fixture-11.json"
+    },
+    {
+      "id": 12,
+      "slug": "fixture-12",
+      "lane": "front-end-only",
+      "definitionPath": "fixtures/definitions/fixture-12.json"
+    },
+    {
+      "id": 13,
+      "slug": "fixture-13",
+      "lane": "front-end-only",
+      "definitionPath": "fixtures/definitions/fixture-13.json"
+    },
+    {
+      "id": 14,
+      "slug": "fixture-14",
+      "lane": "front-end-only",
+      "definitionPath": "fixtures/definitions/fixture-14.json"
+    },
+    {
+      "id": 15,
+      "slug": "fixture-15",
+      "lane": "boundary",
+      "definitionPath": "fixtures/definitions/fixture-15.json"
+    },
+    {
+      "id": 16,
+      "slug": "fixture-16",
+      "lane": "boundary",
+      "definitionPath": "fixtures/definitions/fixture-16.json"
+    },
+    {
+      "id": 17,
+      "slug": "fixture-17",
+      "lane": "boundary",
+      "definitionPath": "fixtures/definitions/fixture-17.json"
+    },
+    {
+      "id": 18,
+      "slug": "fixture-18",
+      "lane": "front-end-only",
+      "definitionPath": "fixtures/definitions/fixture-18.json"
+    },
+    {
+      "id": 19,
+      "slug": "fixture-19",
+      "lane": "front-end-only",
+      "definitionPath": "fixtures/definitions/fixture-19.json"
+    },
+    {
+      "id": 20,
+      "slug": "fixture-20",
+      "lane": "front-end-only",
+      "definitionPath": "fixtures/definitions/fixture-20.json"
+    }
+  ]
+}

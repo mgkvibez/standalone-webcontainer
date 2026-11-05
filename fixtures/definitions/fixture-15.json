@@ -1,0 +1,42 @@
+{
+  "formatVersion": 1,
+  "id": 15,
+  "slug": "fixture-15",
+  "lane": "boundary",
+  "title": "A native addon is refused cleanly, on purpose",
+  "intent": "The only fixture that must NOT pass cleanly. Native addons cannot run in the browser lane, so the correct behaviour is a typed, immediate refusal. This proves the runtime can say no, which is what separates a limitation from a defect.",
+  "source": "our own scenario, informed by the incumbent's documented --no-addons policy",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install sharp",
+      "timeoutClass": "install",
+      "purpose": "Install a package whose main path is a native addon"
+    },
+    {
+      "kind": "run",
+      "command": "node require-native.mjs",
+      "timeoutClass": "run",
+      "purpose": "Require it and expect refusal"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 1
+    },
+    {
+      "kind": "stderr-contains",
+      "step": 1,
+      "contains": "native addon"
+    }
+  ],
+  "expected": [
+    "UNSUPPORTED_BY_DESIGN"
+  ],
+  "knownLimits": [
+    "A PASS here would mean the runtime claimed to load a native addon and would be a false positive. A TIMEOUT or an unstructured crash is still a defect: refusal must be fast and typed."
+  ]
+}

@@ -2,10 +2,9 @@
  * Toolchain smoke test — NOT a product test.
  *
  * Sole purpose: prove that `npm test` (vitest + tsconfig strict mode)
- * executes in this repository. There is deliberately no product assertion
- * here: nothing is implemented yet, and the VFS design is not approved
- * (see docs/decisions/ADR-0001.md, open questions). Product tests land
- * with their implementations.
+ * executes in this repository. Product behavior is covered by the focused
+ * VFS, runtime, npm, container, and browser suites; this test only checks the
+ * runner itself.
  */
 import { describe, expect, it } from "vitest";
 

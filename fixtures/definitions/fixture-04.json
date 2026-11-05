@@ -1,0 +1,66 @@
+{
+  "formatVersion": 1,
+  "id": 4,
+  "slug": "fixture-04",
+  "lane": "front-end-only",
+  "title": "Node core surface in one script: fs, http, streams, timers, EventEmitter",
+  "intent": "The densest fidelity check in the front-end lane. Five core APIs must behave together in one process, which is what an ordinary Node program does before any framework is involved.",
+  "source": "stackblitz-conformance: NodeJS core (multiple processes, fs operations, http server, streams, timers, EventEmitter) (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install",
+      "timeoutClass": "install",
+      "purpose": "Prove the install path runs even with no dependencies to fetch"
+    },
+    {
+      "kind": "run",
+      "command": "node core.mjs",
+      "timeoutClass": "run",
+      "purpose": "Execute the combined core-API scenario"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 0
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "fs-ok"
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "http-ok"
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "stream-ok"
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "timer-ok"
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "events-ok"
+    }
+  ],
+  "files": {
+    "package.json": "{\n  \"name\": \"fixture-04-node-core\",\n  \"private\": true,\n  \"version\": \"0.0.0\",\n  \"type\": \"module\"\n}\n",
+    "core.mjs": "// Fixture 4: five Node core APIs behaving together in one process.\n//\n// Each marker is printed only after the API has actually DONE something: a file is written, read back and removed; a\n// server binds a port and emits its lifecycle events; two chunks travel through a real Transform into a real Writable;\n// a timer fires and its elapsed time is measured against the virtual clock; an emitter runs a listener, a once-only\n// listener, and then proves removeListener worked. Nothing here prints a marker on the strength of an import alone,\n// because an import that succeeds and an API that behaves are exactly the two things this fixture exists to separate.\n//\n// The chain is sequential and event-driven rather than a promise chain: a marker that never appears then means the\n// previous step hung or threw, which is the liveness reading the fixture's knownLimits describes.\n\nimport fs from \"node:fs\";\nimport http from \"node:http\";\nimport { EventEmitter } from \"node:events\";\nimport { Readable, Transform, Writable, pipeline } from \"node:stream\";\n\n/** Reports a failed check and stops the chain, so later markers are absent rather than falsely printed. */\nfunction fail(name, detail) {\n  console.error(\"core-check failed: \" + name + \": \" + detail);\n}\n\nfunction report(marker) {\n  console.log(marker);\n}\n\n// ---------------------------------------------------------------- filesystem\nfunction checkFilesystem(next) {\n  try {\n    const file = \"core-note.txt\";\n    const dir = \"core-dir\";\n\n    fs.writeFileSync(file, \"hello node core\\n\");\n    const contents = fs.readFileSync(file, \"utf8\");\n    if (contents !== \"hello node core\\n\") throw new Error(\"read back \" + JSON.stringify(contents));\n\n    const size = fs.statSync(file).size;\n    if (size !== \"hello node core\\n\".length) throw new Error(\"stat size \" + size);\n\n    fs.mkdirSync(dir);\n    fs.renameSync(file, dir + \"/note.txt\");\n    const entries = fs.readdirSync(dir);\n    if (entries.indexOf(\"note.txt\") === -1) throw new Error(\"rename did not land: \" + entries.join(\",\"));\n\n    fs.unlinkSync(dir + \"/note.txt\");\n    fs.rmdirSync(dir);\n    if (fs.existsSync(file) || fs.existsSync(dir)) throw new Error(\"cleanup left something behind\");\n\n    report(\"fs-ok\");\n    next();\n  } catch (error) {\n    fail(\"filesystem\", error && error.message ? error.message : String(error));\n  }\n}\n\n// ---------------------------------------------------------------------- http\nfunction checkHttp(next) {\n  const port = 4123;\n  const server = http.createServer(function (request, response) {\n    // Registered to prove the handler is wired to this server; the fixture has no client, so it is not invoked here.\n    response.writeHead(200, { \"content-type\": \"text/plain\" });\n    response.end(\"pong\");\n  });\n\n  let listeningSeen = false;\n  server.once(\"listening\", function () {\n    listeningSeen = true;\n  });\n\n  try {\n    server.listen(port);\n  } catch (error) {\n    fail(\"http\", (error && error.message) || String(error));\n    return;\n  }\n\n  // Node binds synchronously and emits `listening` on a later tick; both halves are checked here.\n  if (server.listening !== true) {\n    fail(\"http\", \"server did not report listening after listen()\");\n    return;\n  }\n  const address = server.address();\n  if (address === null || address.port !== port) {\n    fail(\"http\", \"address() was \" + JSON.stringify(address));\n    return;\n  }\n\n  server.close(function () {\n    // `close` fires on a later tick too, so this callback also proves the asynchronous lifecycle is intact.\n    if (listeningSeen !== true) {\n      fail(\"http\", \"the listening event never fired\");\n      return;\n    }\n    if (server.listening !== false) {\n      fail(\"http\", \"server still listening after close()\");\n      return;\n    }\n    report(\"http-ok\");\n    next();\n  });\n}\n\n// ------------------------------------------------------------------- streams\nfunction checkStreams(next) {\n  const collected = [];\n  const upper = new Transform({\n    transform: function (chunk, encoding, callback) {\n      callback(null, String(chunk).toUpperCase());\n    },\n  });\n  const sink = new Writable({\n    write: function (chunk, encoding, callback) {\n      collected.push(String(chunk));\n      callback();\n    },\n  });\n\n  pipeline(Readable.from([\"node \", \"core\"]), upper, sink, function (error) {\n    if (error) {\n      fail(\"streams\", (error && error.message) || String(error));\n      return;\n    }\n    const text = collected.join(\"\");\n    if (text !== \"NODE CORE\") {\n      fail(\"streams\", 'collected ' + JSON.stringify(text));\n      return;\n    }\n    report(\"stream-ok\");\n    next();\n  });\n}\n\n// -------------------------------------------------------------------- timers\nfunction checkTimers(next) {\n  const startedAt = Date.now();\n  const perfStartedAt = performance.now();\n\n  setTimeout(function () {\n    const elapsed = Date.now() - startedAt;\n    if (elapsed !== 25) {\n      fail(\"timers\", \"first timer measured \" + elapsed + \" ms of virtual time, expected 25\");\n      return;\n    }\n\n    // A chained timer: the total is the sum of both delays, which only holds if the clock advances properly between them.\n    setTimeout(function () {\n      const total = Date.now() - startedAt;\n      const perfElapsed = performance.now() - perfStartedAt;\n      if (total !== 40) {\n        fail(\"timers\", \"chained timer measured \" + total + \" ms in total, expected 40\");\n        return;\n      }\n      if (perfElapsed < 40) {\n        fail(\"timers\", \"performance.now() advanced only \" + perfElapsed + \" ms\");\n        return;\n      }\n      report(\"timer-ok\");\n      next();\n    }, 15);\n  }, 25);\n}\n\n// -------------------------------------------------------------------- events\nfunction checkEvents(next) {\n  try {\n    const emitter = new EventEmitter();\n    const seen = [];\n\n    const onFirst = function (value) {\n      seen.push(\"first:\" + value);\n    };\n    const onSecond = function (value) {\n      seen.push(\"second:\" + value);\n    };\n\n    emitter.on(\"tick\", onFirst);\n    emitter.on(\"tick\", onSecond);\n    emitter.once(\"tick\", function (value) {\n      seen.push(\"once:\" + value);\n    });\n\n    // Two listeners fire in registration order, then the once-only listener fires exactly once.\n    if (emitter.emit(\"tick\", 1) !== true) throw new Error(\"emit reported no listeners\");\n\n    emitter.removeListener(\"tick\", onFirst);\n    const remaining = emitter.listenerCount(\"tick\");\n    if (remaining !== 1) throw new Error(\"listenerCount after removeListener was \" + remaining);\n\n    // The removed listener stays silent and the once-only listener does not fire again.\n    emitter.emit(\"tick\", 2);\n\n    const expected = \"first:1,second:1,once:1,second:2\";\n    const observed = seen.join(\",\");\n    if (observed !== expected) throw new Error(\"listeners saw \" + observed + \", expected \" + expected);\n\n    report(\"events-ok\");\n    next();\n  } catch (error) {\n    fail(\"events\", error && error.message ? error.message : String(error));\n  }\n}\n\nconst checks = [checkFilesystem, checkHttp, checkStreams, checkTimers, checkEvents];\n\nfunction run(index) {\n  if (index >= checks.length) return;\n  checks[index](function () {\n    run(index + 1);\n  });\n}\n\nrun(0);\n"
+  },
+  "expected": [
+    "PASS"
+  ],
+  "knownLimits": [
+    "Each marker is separate so a failure names the API instead of the script. Absence of later markers means execution stopped, which is a liveness finding."
+  ]
+}

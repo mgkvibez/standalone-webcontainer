@@ -1,0 +1,43 @@
+{
+  "formatVersion": 1,
+  "id": 20,
+  "slug": "fixture-20",
+  "lane": "front-end-only",
+  "title": "Drizzle ORM schema and migration",
+  "intent": "The layer above the driver: an ORM with its own code generation and migration tooling. Passing the driver and failing the ORM is a common and specific pattern worth naming.",
+  "source": "stackblitz-conformance: Drizzle ORM (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install drizzle-orm drizzle-kit",
+      "timeoutClass": "install",
+      "purpose": "Install ORM and toolkit"
+    },
+    {
+      "kind": "run",
+      "command": "node drizzle.mjs",
+      "timeoutClass": "run",
+      "purpose": "Apply the schema and query through the ORM"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 0
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "migrated"
+    }
+  ],
+  "expected": [
+    "PASS",
+    "RUNTIME_INCOMPATIBILITY"
+  ],
+  "knownLimits": [
+    "Depends on fixture 19's driver path; if 19 is incompatible, this fixture reports the same cause rather than a second independent failure."
+  ]
+}

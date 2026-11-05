@@ -1,0 +1,42 @@
+{
+  "formatVersion": 1,
+  "id": 3,
+  "slug": "fixture-03",
+  "lane": "front-end-only",
+  "title": "shadcn-ui CLI writes a component into the source tree",
+  "intent": "Exercises a real installer CLI that fetches, transforms and writes files inside the VFS. This is the first fixture that depends on writes working under a tool, not under our own test code.",
+  "source": "stackblitz-conformance: shadcn-ui (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install",
+      "timeoutClass": "install",
+      "purpose": "Install project dependencies"
+    },
+    {
+      "kind": "run",
+      "command": "npx --yes shadcn@latest add button",
+      "timeoutClass": "run",
+      "purpose": "Run the component installer non-interactively"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 0
+    },
+    {
+      "kind": "file-exists",
+      "step": 1,
+      "target": "src/components/ui/button.tsx"
+    }
+  ],
+  "expected": [
+    "PASS"
+  ],
+  "knownLimits": [
+    "The CLI prompts unless flags suppress it; a prompted run must be answered by configuration, never by waiting for a timeout."
+  ]
+}

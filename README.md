@@ -6,30 +6,28 @@ Node.js APIs executing on the browser's native V8 — built from scratch,
 MIT-licensed, and fully owned. It is not a wrapper around StackBlitz's
 WebContainers API, Nodebox, or any other third-party proprietary runtime.
 
-## Status: NOTHING is implemented yet
+## Status: the engine runs in a browser, in a workspace
 
-This repository is a pre-implementation scaffold. No product code exists.
-The charter's architecture is ratified (see
-[ADR-0001](docs/decisions/ADR-0001.md)); every remaining design decision is
-explicitly reserved for the human expert and listed there as OPEN.
+`npm run dev:browser` opens the environment: a project explorer, a CodeMirror editor, and a terminal that executes
+commands through the runtime inside a Worker, with a process table and `localStorage` persistence. The terminal supports
+`npm install` and `npm ci` against the bundled, integrity-verified synthetic `@corpus/*` package set only. Installed
+`node_modules` live in a volatile memory overlay; `package-lock.json` is saved with the project and can rebuild the
+overlay after reload. This does not fetch from npm or prove compatibility with the public npm ecosystem. Dev-server
+preview and service-worker port forwarding are still not wired into the page.
 
-| Lane | Status |
-|---|---|
-| VFS (in-memory POSIX) | Scaffold — Not started |
-| Node.js shims (fs, path, crypto, ...) | Scaffold — Not started |
-| Runtime (unified interface, hybrid lanes) | Scaffold — Not started |
-| Network (service-worker proxy) | Scaffold — Not started |
-| Terminal (xterm.js + PTY bridge) | Scaffold — Not started |
-| Persistence (session continuity) | Not started — mechanism UNDECIDED |
-| npm install flow | Not started |
-| Hybrid routing (browser vs server sandbox) | Not started |
+Still true and worth saying before any compatibility claim: `crypto`, `child_process`, `net` and `worker_threads` are
+absent, executions are serialised (one run at a time, no preemption), and termination kills the Worker rather than
+signalling a process. The twenty fixtures are defined (`fixtures/definitions/`) and none are frozen, so the gate is
+unearnable: fixtures 4 and 7 pass, the rest are untouched.
 
 ## Local commands
 
 ```
 npm install        # dev tooling only (typescript, vitest, @playwright/test, @types/node)
 npm run typecheck  # tsc --noEmit under strict tsconfig
-npm test           # vitest run (toolchain smoke test only, for now)
+npm test           # vitest run (VFS, shims, harness, network and npm: 467 tests)
+npm run fixtures:check   # verify frozen fixture pins (no writes); part of `verify`
+npm run verify     # typecheck + tests + fixture pins, what CI runs
 ```
 
 ## Reviewers start here

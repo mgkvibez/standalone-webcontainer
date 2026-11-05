@@ -1,0 +1,42 @@
+{
+  "formatVersion": 1,
+  "id": 12,
+  "slug": "fixture-12",
+  "lane": "front-end-only",
+  "title": "TypeScript compile",
+  "intent": "Compilation is a CPU-bound, filesystem-heavy workload with no server involved, so it isolates compute and module resolution from every networking question.",
+  "source": "stackblitz-conformance: TypeScript toolchain (compiler as Node program) (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install",
+      "timeoutClass": "install",
+      "purpose": "Install TypeScript and types"
+    },
+    {
+      "kind": "build",
+      "command": "npx tsc -p tsconfig.json",
+      "timeoutClass": "build",
+      "purpose": "Emit compiled output"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 0
+    },
+    {
+      "kind": "file-exists",
+      "step": 1,
+      "target": "dist/index.js"
+    }
+  ],
+  "expected": [
+    "PASS"
+  ],
+  "knownLimits": [
+    "Type errors are a fixture defect, not a runtime finding; the fixture ships compiling sources."
+  ]
+}

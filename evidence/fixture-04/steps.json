@@ -1,0 +1,32 @@
+[
+  {
+    "index": 0,
+    "kind": "install",
+    "command": "npm install",
+    "state": "ran",
+    "termination": "ok",
+    "detail": "installed 0 package(s)",
+    "elapsedMs": 1,
+    "record": {
+      "index": 0,
+      "exitCode": 0,
+      "stdout": "installed 0 package(s)\n",
+      "stderr": ""
+    }
+  },
+  {
+    "index": 1,
+    "kind": "run",
+    "command": "node core.mjs",
+    "state": "ran",
+    "termination": "ok",
+    "detail": "node core.mjs exited 0",
+    "elapsedMs": 16,
+    "record": {
+      "index": 1,
+      "exitCode": 0,
+      "stdout": "fs-ok\nhttp-ok\nstream-ok\ntimer-ok\nevents-ok\n",
+      "stderr": ""
+    }
+  }
+]

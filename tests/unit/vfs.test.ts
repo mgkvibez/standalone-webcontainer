@@ -9,6 +9,7 @@ import {
   VFSNotEmptyError,
   VFSNotFoundError,
   VFSNotADirectoryError,
+  VFSNoSpaceError,
   VFSPathExistsError,
   VFSQuotaExceededError,
 } from "../../src/vfs/index.js";
@@ -360,8 +361,8 @@ describe("quota and LRU eviction (ADR-0002 #4)", () => {
 
   it("evicts least-recently-used files to satisfy the whole-VFS cap", async () => {
     const fs = new FileSystem({ maxFileSize: 500, maxTotalBytes: 1000 });
-    await fs.writeFile("/a.txt", "A".repeat(400)); // counter 1
-    await fs.writeFile("/b.txt", "B".repeat(400)); // counter 2; total 800
+    await fs.writeFile("/a.txt", "A".repeat(400), { evictable: true }); // counter 1
+    await fs.writeFile("/b.txt", "B".repeat(400), { evictable: true }); // counter 2; total 800
     await fs.readFile("/a.txt", "utf8"); // touch a: counter 3
     await fs.writeFile("/c.txt", "C".repeat(400)); // needs 400: total 1200 > 1000
     // LRU order is now b (2) before a (3): b is evicted, total 400+400=800.
@@ -370,11 +371,57 @@ describe("quota and LRU eviction (ADR-0002 #4)", () => {
     await expect(fs.readFile("/c.txt", "utf8")).resolves.toBe("C".repeat(400));
   });
 
-  it("evicts every candidate before an oversized write still fails per-file", async () => {
+  it("removes derived directory entries when their last evictable file is reclaimed", async () => {
+    const fs = new FileSystem({ maxFileSize: 4, maxTotalBytes: 4 });
+    await fs.writeFile("/node_modules/a/index.js", "AAAA", { evictable: true });
+    await fs.writeFile("/project/source.js", "PPPP");
+
+    await expect(fs.stat("/node_modules/a")).rejects.toThrow(VFSNotFoundError);
+    await expect(fs.stat("/node_modules")).rejects.toThrow(VFSNotFoundError);
+    expect(await fs.readdir("/project")).toEqual(["source.js"]);
+  });
+
+  it("protects user files when no evictable data can make room", async () => {
     const fs = new FileSystem({ maxFileSize: 500, maxTotalBytes: 1000 });
-    await fs.writeFile("/a.txt", "A".repeat(500));
-    await fs.writeFile("/b.txt", "B".repeat(500)); // evicts a; total 500
-    await expect(fs.writeFile("/c.txt", "C".repeat(501))).rejects.toThrow(VFSQuotaExceededError);
+    await fs.writeFile("/proj/package.json", "P".repeat(400));
+    await fs.writeFile("/proj/src.js", "S".repeat(400));
+
+    await expect(fs.writeFile("/proj/node_modules/new.js", "N".repeat(400), { evictable: true })).rejects.toThrow(
+      VFSNoSpaceError,
+    );
+    await expect(fs.readFile("/proj/package.json", "utf8")).resolves.toBe("P".repeat(400));
+    await expect(fs.readFile("/proj/src.js", "utf8")).resolves.toBe("S".repeat(400));
+  });
+
+  it("preflights eviction so a failed write never partially deletes regenerable files", async () => {
+    const fs = new FileSystem({ maxFileSize: 1000, maxTotalBytes: 1000 });
+    await fs.writeFile("/node_modules/a/index.js", "A".repeat(350), { evictable: true });
+    await fs.writeFile("/node_modules/b/index.js", "B".repeat(350), { evictable: true });
+    await fs.writeFile("/project/source.js", "S".repeat(200));
+
+    await expect(fs.writeFile("/project/large.js", "L".repeat(900))).rejects.toThrow(VFSNoSpaceError);
+    await expect(fs.readFile("/node_modules/a/index.js", "utf8")).resolves.toBe("A".repeat(350));
+    await expect(fs.readFile("/node_modules/b/index.js", "utf8")).resolves.toBe("B".repeat(350));
+    await expect(fs.readFile("/project/source.js", "utf8")).resolves.toBe("S".repeat(200));
+  });
+
+  it("maintains the derived-directory index across subtree moves and removals", async () => {
+    const fs = new FileSystem();
+    await fs.writeFile("/old/nested/a.txt", "a");
+    await fs.writeFile("/old/nested/b.txt", "b");
+    await fs.rename("/old", "/moved");
+
+    expect(await fs.readdir("/moved/nested")).toEqual(["a.txt", "b.txt"]);
+    await fs.unlink("/moved/nested/a.txt");
+    await fs.unlink("/moved/nested/b.txt");
+    await expect(fs.stat("/old")).rejects.toThrow(VFSNotFoundError);
+    await expect(fs.stat("/moved")).rejects.toThrow(VFSNotFoundError);
+
+    await fs.mkdir("/explicit/child", { recursive: true });
+    await fs.rmdir("/explicit/child");
+    expect((await fs.stat("/explicit")).kind).toBe("dir");
+    await fs.rmdir("/explicit");
+    await expect(fs.stat("/explicit")).rejects.toThrow(VFSNotFoundError);
   });
 
   it("rejects invalid capacity configurations", () => {
