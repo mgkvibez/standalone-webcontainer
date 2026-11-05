@@ -24,7 +24,10 @@
     "build:browser": "vite build",
     "build:browser:preview": "vite build --mode preview",
     "preview:browser": "vite preview",
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "deploy:plan": "vite-node tools/deploy/vercel.ts",
+    "deploy:apply": "vite-node tools/deploy/vercel.ts --apply",
+    "verify:deployment": "vite-node tools/verify/deployment.ts"
   },
   "devDependencies": {
     "@codemirror/lang-javascript": "^6.2.5",
