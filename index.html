@@ -3,36 +3,58 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>standalone-webcontainer — P1a smoke</title>
+    <title>standalone-webcontainer</title>
   </head>
   <body>
-    <h1>standalone-webcontainer</h1>
-    <p>
-      P1a smoke test: the page owns the DOM, a dedicated Web Worker owns the runtime. This is
-      <strong>not</strong> a hardened security sandbox.
-    </p>
+    <div id="app">
+      <header id="topbar">
+        <span class="brand">standalone-webcontainer</span>
+        <select id="project-select" aria-label="Project"></select>
+        <button id="new-project" type="button">New project</button>
+        <button id="rename-project" type="button">Rename</button>
+        <span class="spacer"></span>
+        <span id="save-state" class="muted">saved</span>
+        <button id="run-file" type="button" class="primary">Run file</button>
+      </header>
 
-    <p>
-      <label for="code">Source (<code>/app/index.js</code>)</label>
-    </p>
-    <textarea id="code" rows="14" cols="90" spellcheck="false"></textarea>
+      <div id="body">
+        <aside id="explorer">
+          <div class="panel-head">
+            <span>Explorer</span>
+            <span id="project-name" class="muted"></span>
+          </div>
+          <div class="explorer-actions">
+            <button id="new-file" type="button">New file</button>
+            <button id="new-dir" type="button">New dir</button>
+            <button id="rename-entry" type="button">Rename</button>
+            <button id="delete-entry" type="button">Delete</button>
+          </div>
+          <ul id="tree"></ul>
+        </aside>
 
-    <p>
-      <button id="run" type="button">Run</button>
-      <button id="loop" type="button">Run infinite loop</button>
-      <button id="stop" type="button">Terminate worker</button>
-    </p>
+        <main id="editor-pane">
+          <div id="tabbar"><span id="open-file">no file open</span></div>
+          <div id="editor"></div>
+        </main>
+      </div>
 
-    <p>Status: <strong id="status">booting</strong></p>
-
-    <h2>stdout</h2>
-    <pre id="stdout"></pre>
-
-    <h2>stderr</h2>
-    <pre id="stderr"></pre>
-
-    <h2>result</h2>
-    <pre id="result"></pre>
+      <section id="bottom">
+        <div id="terminal-head">
+          <div id="session-tabs"></div>
+          <button id="new-session" type="button">+ session</button>
+          <span class="spacer"></span>
+          <span id="process-summary" class="muted">no processes</span>
+        </div>
+        <div id="terminal-body">
+          <div id="scrollback" aria-live="polite"></div>
+          <form id="prompt">
+            <span id="prompt-label">/ $</span>
+            <input id="command" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Command" />
+          </form>
+        </div>
+        <div id="processes"></div>
+      </section>
+    </div>
 
     <script type="module" src="/src/browser/main.ts"></script>
   </body>

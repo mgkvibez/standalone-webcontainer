@@ -43,11 +43,20 @@ export interface ProcessShim {
   readonly on: (event: string, listener: () => void) => ProcessShim;
 }
 
-export const createSink = (): WritableSink => {
+/**
+ * `onChunk` is how a live terminal sees output while the program is still running. Without it a sink is a buffer that is
+ * only read after the run, which is all the fixture harness ever needed and not enough for a process table.
+ *
+ * The listener is called BEFORE the buffer grows by the same text, so a stream consumer sees exactly what the final
+ * snapshot will contain, in the same order, and no framing is invented (no line splitting, no prefixes).
+ */
+export const createSink = (onChunk?: (text: string) => void): WritableSink => {
   let buffer = "";
   return {
     write(chunk) {
-      buffer += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+      const text = typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+      buffer += text;
+      onChunk?.(text);
       return true;
     },
     get text() {

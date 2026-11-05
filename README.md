@@ -6,42 +6,18 @@ Node.js APIs executing on the browser's native V8 — built from scratch,
 MIT-licensed, and fully owned. It is not a wrapper around StackBlitz's
 WebContainers API, Nodebox, or any other third-party proprietary runtime.
 
-## Status: the engine runs in a browser (P1a), and there is one screen
+## Status: the engine runs in a browser, in a workspace
 
-A Node-shaped script can read and write files, `require("http")`, listen on a port, and answer a real
-browser request that arrives through the preview gateway. That path is covered end to end by tests.
+`npm run dev:browser` opens the environment: a project explorer, a CodeMirror editor, and a terminal that executes real
+commands through the runtime inside a Worker, with a process table and `localStorage` persistence. `npm run test:browser`
+drives it with Playwright (17 tests). The engine itself is unchanged in behaviour; the one additive option is
+`RunOptions.onOutput`, which lets output stream to the terminal as a program writes it.
 
-**P1a (Nov 5 2026):** `npm run dev:browser` opens a page that starts a dedicated Worker, boots the real
-`InProcessRuntime` inside it, runs JavaScript and shows real stdout, stderr and exit codes. Four Playwright tests cover
-it, including terminating a Worker stuck in a synchronous infinite loop. The runtime needs `unsafe-eval`; see
-`docs/p1/p1a.md` for the measured CSP behaviour. There is no editor, terminal, persistence or preview yet.
-
-What is still missing is everything around it: nothing registers a service worker yet, so no request
-reaches the runtime in a browser without a page-side responder wired up by hand; `npm install` exists as
-`runtime.install()`, which reads `<root>/package.json` and any existing `package-lock.json`, installs into the
-runtime's own VFS and rewrites the lockfile, but has no CLI and is never invoked automatically, so `node_modules` is
-populated by a call rather than by a command a user can type; `crypto`, the
-worker lane, the terminal, persistence and the server-sandbox lane are all unstarted. The twenty
-fixtures are defined (`fixtures/definitions/`) but not frozen, and the gate only counts frozen
-definitions.
-
-The charter's architecture is ratified (see [ADR-0001](docs/decisions/ADR-0001.md)); provisional
-implementation decisions are recorded with an audit question each in
-[ADR-0004](docs/decisions/ADR-0004.md), [ADR-0005](docs/decisions/ADR-0005.md) and
-[ADR-0006](docs/decisions/ADR-0006.md).
-
-| Lane | Status |
-|---|---|
-| VFS (in-memory POSIX) | Implemented — `src/vfs/` |
-| Node.js shims | `fs`, `path`, `process`, `buffer`, `events`, `http` — `src/shims/` (crypto deferred, ADR-0003) |
-| Test harness (fixtures, timeouts, scoring) | Implemented — `src/harness/`: scoring, freeze pins (ADR-0007), runner (ADR-0008), command interpreter for `npm install` / `node` / `npm run <script>` / `.bin` (ADR-0009, ADR-0010), ES modules via an acorn transform (ADR-0012). No `pre`/`post` scripts, no live bindings, no top-level await |
-| Fixture corpus | 20 definitions written, `status: proposed`; fixtures 1 and 7 ship their project files (ADR-0011). Fixture 7 PASSES end to end; the other eighteen are not staged — `fixtures/definitions/`. Freezing is the owner's act; `npm run fixtures:freeze` records the pins, `npm run fixtures:check` (part of `verify`) fails on drift (ADR-0007) |
-| Runtime (unified interface, hybrid lanes) | In-process CommonJS lane implemented — `src/runtime/` (worker lane not started) |
-| Network (service-worker proxy) | Gateway, fetch handler and worker bridge implemented — `src/network/`; registration wiring not started |
-| Terminal (xterm.js + PTY bridge) | Scaffold — Not started |
-| Persistence (session continuity) | Not started — mechanism UNDECIDED |
-| npm install flow | Resolver, tarball reader, integrity checks and npm-compatible `package-lock.json` read/write — `src/npm/`; `runtime.install()` reads/writes it; no CLI (ADR-0006) |
-| Hybrid routing (browser vs server sandbox) | Not started |
+Still true and worth saying before any compatibility claim: `crypto`, `child_process`, `net` and `worker_threads` are
+absent, executions are serialised (one run at a time, no preemption), termination kills the Worker rather than signalling a
+process, `npm` is not wired into the terminal, and nothing registers a service worker, so no browser request reaches the
+runtime's HTTP gateway yet. The twenty fixtures are defined (`fixtures/definitions/`) and none are frozen, so the gate is
+unearnable: fixtures 4 and 7 pass, the rest are untouched.
 
 ## Local commands
 

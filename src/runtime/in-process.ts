@@ -41,6 +41,11 @@ export interface RunOptions {
   /** Bounds awaits only; synchronous loops cannot be interrupted in-process. */
   readonly timeoutMs?: number;
   /**
+   * Called with each chunk as the program writes it. Additive: when absent, behaviour is byte-identical to before.
+   * Used by the container layer to feed a live terminal instead of waiting for the run to finish.
+   */
+  readonly onOutput?: (stream: "stdout" | "stderr", text: string) => void;
+  /**
    * Working directory for the program, which is what a relative `fs` path resolves against and what `process.cwd()`
    * reports. Node takes it from the shell; a fixture step takes it from the project root it runs in.
    */
@@ -189,8 +194,9 @@ export class InProcessRuntime implements Runtime {
 
   async run(entryPath: string, options: RunOptions = {}): Promise<ExecutionResult> {
     const started = Date.now();
-    const stdout = createSink();
-    const stderr = createSink();
+    const onOutput = options.onOutput;
+    const stdout = createSink(onOutput === undefined ? undefined : (text) => onOutput("stdout", text));
+    const stderr = createSink(onOutput === undefined ? undefined : (text) => onOutput("stderr", text));
     const cwd = options.cwd ?? "/";
     const processShim: ProcessShim = createProcessShim({
       argv: options.argv !== undefined ? [...options.argv] : ["node", entryPath],
