@@ -30,8 +30,19 @@ export interface PingRequest {
 
 export interface ConnectTransportMessage {
   readonly type: "connect-transport";
+  readonly id: number;
   /** A generic request/reply channel. The supervisor does not interpret origins or URL hosts. */
   readonly port: MessagePort;
+}
+
+export interface DisconnectTransportMessage {
+  readonly type: "disconnect-transport";
+  readonly id: number;
+}
+
+export interface TransportDisconnectedMessage {
+  readonly type: "transport-disconnected";
+  readonly id: number;
 }
 
 export interface StopServersRequest {
@@ -40,7 +51,7 @@ export interface StopServersRequest {
   readonly ports: readonly number[];
 }
 
-export type ClientMessage = RunRequest | PingRequest | ConnectTransportMessage | StopServersRequest;
+export type ClientMessage = RunRequest | PingRequest | ConnectTransportMessage | DisconnectTransportMessage | StopServersRequest;
 
 export interface TransportRequest {
   readonly type: "request";
@@ -109,4 +120,4 @@ export interface ServersStoppedMessage {
   readonly ports: readonly number[];
 }
 
-export type ServerMessage = OutputChunk | RunResultMessage | FailureMessage | PongMessage | ServersStoppedMessage;
+export type ServerMessage = OutputChunk | RunResultMessage | FailureMessage | PongMessage | ServersStoppedMessage | TransportDisconnectedMessage;

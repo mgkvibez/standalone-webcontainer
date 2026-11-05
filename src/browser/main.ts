@@ -15,6 +15,7 @@ import { loadOfflineRegistry } from "./offline-registry.js";
 
 const store = ProjectStore.load(window.localStorage);
 const runtime = new WorkerRuntimeClient();
+window.addEventListener("beforeunload", () => runtime.dispose(), { once: true });
 const registry = await loadOfflineRegistry();
 const container = new Container({ runtime, files: store.filesFor(), registry });
 const session = container.createSession("main");

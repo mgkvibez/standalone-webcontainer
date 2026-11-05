@@ -24,6 +24,10 @@ const post = (message: ServerMessage): void => {
 };
 
 const supervisor = new RuntimeSupervisor();
+const transportPorts = new Map<number, MessagePort>();
+const MAX_TRANSPORT_BODY_BYTES = 16 * 1024 * 1024;
+const MAX_TRANSPORT_HEADER_COUNT = 128;
+const MAX_TRANSPORT_HEADER_BYTES = 32 * 1024;
 
 async function handleRun(request: RunRequest): Promise<void> {
   try {
@@ -62,21 +66,31 @@ async function handleRun(request: RunRequest): Promise<void> {
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {
-  return typeof value === "object" && value !== null && !Array.isArray(value) &&
-    Object.values(value).every((entry) => typeof entry === "string");
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const entries = Object.entries(value);
+  return entries.length <= MAX_TRANSPORT_HEADER_COUNT &&
+    entries.every(([name, entry]) => typeof entry === "string" && name.length <= 256 && entry.length <= MAX_TRANSPORT_HEADER_BYTES) &&
+    entries.reduce((size, [name, entry]) => size + name.length + entry.length, 0) <= MAX_TRANSPORT_HEADER_BYTES;
 }
 
-function attachTransport(port: MessagePort): void {
+function attachTransport(id: number, port: MessagePort): void {
+  transportPorts.set(id, port);
+  const detach = (): void => {
+    if (transportPorts.get(id) !== port) return;
+    transportPorts.delete(id);
+    port.close();
+  };
   port.onmessage = (event: MessageEvent<unknown>): void => {
     const message = event.data as Partial<TransportMessage> | null;
     if (
       message === null ||
       message.type !== "request" ||
       typeof message.id !== "string" ||
-      typeof message.method !== "string" ||
-      typeof message.url !== "string" ||
+      message.id.length > 256 ||
+      typeof message.method !== "string" || !/^[A-Z]{1,16}$/.test(message.method) ||
+      typeof message.url !== "string" || message.url.length > 8192 ||
       !isStringRecord(message.headers) ||
-      !(message.body instanceof Uint8Array)
+      !(message.body instanceof Uint8Array) || message.body.byteLength > MAX_TRANSPORT_BODY_BYTES
     ) {
       port.postMessage({ type: "error", id: typeof message?.id === "string" ? message.id : "", message: "Invalid transport request." });
       return;
@@ -87,6 +101,10 @@ function attachTransport(port: MessagePort): void {
       headers: { ...message.headers },
       body: message.body,
     }).then((response) => {
+      if (response.body.byteLength > MAX_TRANSPORT_BODY_BYTES || !isStringRecord(response.headers)) {
+        port.postMessage({ type: "error", id: message.id, message: "Preview response exceeds transport limits." });
+        return;
+      }
       const body = response.body.slice();
       port.postMessage({
         type: "response",
@@ -104,6 +122,8 @@ function attachTransport(port: MessagePort): void {
       });
     });
   };
+  port.onmessageerror = detach;
+  port.addEventListener("close", detach, { once: true });
   port.start();
 }
 
@@ -117,8 +137,17 @@ scope.onmessage = (event: MessageEvent<ClientMessage>): void => {
       void handleRun(message);
       return;
     case "connect-transport":
-      attachTransport(message.port);
+      attachTransport(message.id, message.port);
       return;
+    case "disconnect-transport": {
+      const port = transportPorts.get(message.id);
+      if (port !== undefined) {
+        transportPorts.delete(message.id);
+        port.close();
+      }
+      post({ type: "transport-disconnected", id: message.id });
+      return;
+    }
     case "stop-servers":
       post({ type: "servers-stopped", id: message.id, ports: supervisor.stopServers(message.ports) });
       return;

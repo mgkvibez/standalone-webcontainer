@@ -13,6 +13,8 @@ import type { ProjectFiles } from "../container/types.js";
 
 export interface Project {
   readonly id: string;
+  /** Opaque, stable DNS label for the future project-isolated preview origin. */
+  readonly previewId: string;
   name: string;
   files: Record<string, string>;
   /** Explicitly created directories, including empty ones. Directories implied by file paths are derived. */
@@ -52,8 +54,17 @@ console.log("this line runs before the timer queue drains");
 
 const SEED_MANIFEST = `${JSON.stringify({ name: "playground", version: "1.0.0", private: true }, null, 2)}\n`;
 
+function newPreviewId(used = new Set<string>()): string {
+  let id: string;
+  do {
+    id = globalThis.crypto.randomUUID().replaceAll("-", "").toLowerCase();
+  } while (used.has(id));
+  return id;
+}
+
 const seedProject = (): Project => ({
   id: "project-1",
+  previewId: newPreviewId(),
   name: "playground",
   files: { "/index.js": SEED_INDEX, "/package.json": SEED_MANIFEST },
   dirs: [],
@@ -88,7 +99,20 @@ export class ProjectStore {
       const activeId = parsed.projects.some((project) => project.id === parsed.activeId)
         ? parsed.activeId
         : (parsed.projects[0]?.id ?? "project-1");
-      return new ProjectStore(storage, [...parsed.projects], activeId);
+      const usedPreviewIds = new Set<string>();
+      let migrated = false;
+      const projects = parsed.projects.map((project) => {
+        const previewId = typeof project.previewId === "string" && /^[a-f0-9]{32}$/.test(project.previewId) &&
+            !usedPreviewIds.has(project.previewId)
+          ? project.previewId
+          : newPreviewId(usedPreviewIds);
+        if (previewId !== project.previewId) migrated = true;
+        usedPreviewIds.add(previewId);
+        return { ...project, previewId };
+      });
+      const store = new ProjectStore(storage, projects, activeId);
+      if (migrated) store.persist();
+      return store;
     } catch {
       // Corrupt storage must not brick the app: start fresh and say so.
       const project = seedProject();
@@ -128,6 +152,7 @@ export class ProjectStore {
     const id = `project-${this.#nextId++}`;
     const project: Project = {
       id,
+      previewId: newPreviewId(new Set(this.#projects.map((project) => project.previewId))),
       name: name.trim() === "" ? `project ${this.#nextId - 1}` : name.trim(),
       files: { "/index.js": 'console.log("hello from a new project");\n' },
       dirs: [],

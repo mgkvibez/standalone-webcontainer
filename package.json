@@ -22,6 +22,7 @@
     "corpus:check": "vite-node tools/build-corpus.ts --check",
     "dev:browser": "vite",
     "build:browser": "vite build",
+    "build:browser:preview": "vite build --mode preview",
     "preview:browser": "vite preview",
     "test:browser": "playwright test"
   },
