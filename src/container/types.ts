@@ -32,6 +32,8 @@ export interface ProcessRecord {
   exitCode?: number;
   stdout: string;
   stderr: string;
+  /** Ports owned by a process that has started an in-memory server. */
+  previewPorts?: readonly number[];
 }
 
 export interface Session {
@@ -48,9 +50,14 @@ export interface RuntimeClient {
   run(request: RuntimeRunRequest): Promise<RuntimeRunOutcome>;
   /** Hard stop. The only cancellation primitive the runtime offers, because a running script cannot be interrupted. */
   reset(): void;
+  /** Stop the servers owned by a completed bootstrap process without discarding the project runtime. */
+  stopServers?(ports: readonly number[]): void;
 }
 
 export interface RuntimeRunRequest {
+  readonly projectId?: string;
+  /** Container process id for supervisor-side lifecycle tracking. */
+  readonly processId?: number;
   readonly files: Readonly<Record<string, string>>;
   readonly entry: string;
   readonly argv: readonly string[];
@@ -68,6 +75,10 @@ export interface RuntimeRunOutcome {
   readonly timedOut: boolean;
   /** True when the host was hard-stopped, so the outcome is a termination rather than the program's own exit. */
   readonly killed: boolean;
+  /** Newly listening in-memory server ports created by this invocation, if any. */
+  readonly previewPorts?: readonly number[];
+  /** Scheduler evidence, when the runtime has a virtual timer queue. */
+  readonly scheduler?: unknown;
 }
 
 /** The project files the container's file commands operate on. Implemented by the page's project store. */

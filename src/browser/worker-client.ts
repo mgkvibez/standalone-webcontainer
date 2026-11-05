@@ -65,6 +65,8 @@ export class WorkerRuntimeClient implements RuntimeClient {
     const message: RunRequest = {
       type: "run",
       id,
+      projectId: request.projectId ?? "default",
+      processId: request.processId ?? id,
       files: request.files,
       entry: request.entry,
       argv: [...request.argv],
@@ -100,8 +102,21 @@ export class WorkerRuntimeClient implements RuntimeClient {
     this.reset();
   }
 
+  /** Attach an origin-neutral request/reply channel to the active supervisor. The caller must attach a new port after a Worker reset. */
+  connectTransport(port: MessagePort): void {
+    const worker = this.#ensureWorker();
+    worker.postMessage({ type: "connect-transport", port }, [port]);
+  }
+
+  /** Stop in-memory servers without discarding the project's VFS or supervisor. */
+  stopServers(ports: readonly number[]): void {
+    if (ports.length === 0 || this.#worker === null) return;
+    const id = this.#nextId++;
+    this.#worker.postMessage({ type: "stop-servers", id, ports: [...ports] });
+  }
+
   #receive(message: ServerMessage): void {
-    if (message.type === "pong") return;
+    if (message.type === "pong" || message.type === "servers-stopped") return;
     const pending = this.#pending.get(message.id);
     if (pending === undefined) return; // Late output from a killed run: dropped, never rendered.
 
@@ -120,6 +135,7 @@ export class WorkerRuntimeClient implements RuntimeClient {
           durationMs: message.durationMs,
           timedOut: message.timedOut,
           killed: false,
+          ...(message.previewPorts === undefined ? {} : { previewPorts: message.previewPorts }),
         });
         return;
       case "error":

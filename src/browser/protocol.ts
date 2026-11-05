@@ -12,6 +12,8 @@
 export interface RunRequest {
   readonly type: "run";
   readonly id: number;
+  readonly projectId: string;
+  readonly processId: number;
   /** Absolute path → contents. The host rebuilds its VFS from this on every run, so projects cannot leak into each other. */
   readonly files: Readonly<Record<string, string>>;
   readonly entry: string;
@@ -26,7 +28,46 @@ export interface PingRequest {
   readonly id: number;
 }
 
-export type ClientMessage = RunRequest | PingRequest;
+export interface ConnectTransportMessage {
+  readonly type: "connect-transport";
+  /** A generic request/reply channel. The supervisor does not interpret origins or URL hosts. */
+  readonly port: MessagePort;
+}
+
+export interface StopServersRequest {
+  readonly type: "stop-servers";
+  readonly id: number;
+  readonly ports: readonly number[];
+}
+
+export type ClientMessage = RunRequest | PingRequest | ConnectTransportMessage | StopServersRequest;
+
+export interface TransportRequest {
+  readonly type: "request";
+  readonly id: string;
+  readonly method: string;
+  readonly url: string;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly body: Uint8Array;
+}
+
+export interface TransportResponse {
+  readonly type: "response";
+  readonly id: string;
+  readonly statusCode: number;
+  readonly statusMessage: string;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly body: Uint8Array;
+}
+
+export interface TransportError {
+  readonly type: "error";
+  readonly id: string;
+  readonly message: string;
+}
+
+export type TransportMessage = TransportRequest;
+export type TransportReply = TransportResponse | TransportError;
 
 export interface OutputChunk {
   readonly type: "chunk";
@@ -45,6 +86,8 @@ export interface RunResultMessage {
   readonly timedOut: boolean;
   /** Timer-queue evidence from the runtime (ADR-0013), passed through unchanged. */
   readonly scheduler: unknown;
+  /** Servers started by this entrypoint remain owned by the runtime after bootstrap returns. */
+  readonly previewPorts?: readonly number[];
 }
 
 export interface FailureMessage {
@@ -60,4 +103,10 @@ export interface PongMessage {
   readonly id: number;
 }
 
-export type ServerMessage = OutputChunk | RunResultMessage | FailureMessage | PongMessage;
+export interface ServersStoppedMessage {
+  readonly type: "servers-stopped";
+  readonly id: number;
+  readonly ports: readonly number[];
+}
+
+export type ServerMessage = OutputChunk | RunResultMessage | FailureMessage | PongMessage | ServersStoppedMessage;

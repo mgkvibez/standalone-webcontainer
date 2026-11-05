@@ -51,6 +51,7 @@ export class Container {
   readonly #registry: RegistryClient | undefined;
   readonly #dependencies = new Map<string, string>();
   #dependencyProjectId: string | undefined;
+  #runtimeProjectId: string | null = null;
   readonly #timeoutMs: number;
   readonly #now: () => number;
   readonly #sessions: Session[] = [];
@@ -169,6 +170,7 @@ export class Container {
       return;
     }
     const projectId = this.#files.projectId ?? "default";
+    this.#activateProject(projectId);
     if (this.#dependencyProjectId !== projectId) {
       this.#dependencies.clear();
       this.#dependencyProjectId = projectId;
@@ -228,10 +230,24 @@ export class Container {
     }
     if (process.state !== "running") return false;
 
+    if (process.previewPorts !== undefined && process.previewPorts.length > 0) {
+      this.#runtime.stopServers?.(process.previewPorts);
+      process.state = "killed";
+      process.endedAt = this.#now();
+      this.#line(this.findSession(process.sessionId) ?? this.#sessions[0]!, "system", `[${process.pid}] server stopped`);
+      this.#notify();
+      return true;
+    }
+
     // The only real cancellation we have: throw away the host that is stuck inside the script.
     this.#runtime.reset();
-    process.state = "killed";
-    process.endedAt = this.#now();
+    for (const running of this.#processes.values()) {
+      if (running.state !== "running") continue;
+      running.state = "killed";
+      running.endedAt = this.#now();
+      const owner = this.findSession(running.sessionId);
+      if (owner !== undefined) this.#line(owner, "system", `[${running.pid}] terminated with runtime reset`);
+    }
     this.#notify();
     return true;
   }
@@ -262,6 +278,8 @@ export class Container {
       this.#notify();
       return;
     }
+
+    this.#activateProject(this.#files.projectId ?? "default");
 
     const pid = this.#nextPid++;
     const process: ProcessRecord = {
@@ -300,6 +318,8 @@ export class Container {
     let outcome: RuntimeRunOutcome;
     try {
       outcome = await this.#runtime.run({
+        projectId: this.#files.projectId ?? "default",
+        processId: process.pid,
         files: this.#snapshotFiles(),
         entry: process.argv[1] ?? "/index.js",
         argv: process.argv,
@@ -334,6 +354,14 @@ export class Container {
       return;
     }
 
+    if (!outcome.timedOut && outcome.exitCode === 0 && (outcome.previewPorts?.length ?? 0) > 0) {
+      process.previewPorts = [...(outcome.previewPorts ?? [])];
+      process.state = "running";
+      this.#line(session, "system", `[${process.pid}] server listening on port(s) ${process.previewPorts.join(", ")}`);
+      this.#notify();
+      return;
+    }
+    if ((outcome.previewPorts?.length ?? 0) > 0) this.#runtime.stopServers?.(outcome.previewPorts ?? []);
     process.state = outcome.timedOut ? "failed" : "exited";
     process.exitCode = outcome.exitCode;
     process.endedAt = this.#now();
@@ -481,6 +509,20 @@ export class Container {
       if (contents !== null) snapshot[path] = contents;
     }
     return snapshot;
+  }
+
+  #activateProject(projectId: string): void {
+    if (this.#runtimeProjectId !== null && this.#runtimeProjectId !== projectId) {
+      this.#runtime.reset();
+      for (const process of this.#processes.values()) {
+        if (process.state !== "running") continue;
+        process.state = "killed";
+        process.endedAt = this.#now();
+        const owner = this.findSession(process.sessionId);
+        if (owner !== undefined) this.#line(owner, "system", `[${process.pid}] stopped because the active project changed`);
+      }
+    }
+    this.#runtimeProjectId = projectId;
   }
 
   #line(session: Session, stream: LogLine["stream"], text: string): void {

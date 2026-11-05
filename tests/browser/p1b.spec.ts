@@ -128,6 +128,53 @@ test("installs only bundled corpus packages and rebuilds the volatile overlay fr
   await expect(page.locator("#scrollback .line[data-stream='stdout']").last()).toHaveText("1.0.0");
 });
 
+test("keeps a server alive in the project supervisor and serves over a transferable MessagePort", async ({ page }) => {
+  await boot(page);
+  acceptDialog(page, "/server.js");
+  await page.click("#new-file");
+  await setEditorText(page, [
+    'const http = require("http");',
+    'http.createServer((request, response) => response.end("supervised:" + request.url)).listen(3210);',
+    'console.log("server booted");',
+  ].join("\n"));
+
+  await runLine(page, "node server.js");
+  const server = page.locator(".process-chip[data-pid='1']");
+  await expect(server).toHaveAttribute("data-state", "running");
+  await expect(page.locator("#scrollback")).toContainText("server listening on port(s) 3210");
+
+  const reply = await page.evaluate(async () => {
+    const runtime = (window as unknown as { __runtime: { connectTransport(port: MessagePort): void } }).__runtime;
+    const channel = new MessageChannel();
+    const received = new Promise<{ type: string; statusCode?: number; body?: string }>((resolve) => {
+      channel.port2.onmessage = (event: MessageEvent<{ type: string; statusCode?: number; body?: Uint8Array }>) => {
+        resolve({
+          type: event.data.type,
+          ...(event.data.statusCode === undefined ? {} : { statusCode: event.data.statusCode }),
+          ...(event.data.body === undefined ? {} : { body: new TextDecoder().decode(event.data.body) }),
+        });
+      };
+      channel.port2.start();
+    });
+    runtime.connectTransport(channel.port1);
+    channel.port2.postMessage({
+      type: "request",
+      id: "browser-smoke-1",
+      method: "GET",
+      url: "/preview/3210/hello?from=port",
+      headers: {},
+      body: new Uint8Array(),
+    });
+    return received;
+  });
+  expect(reply).toEqual({ type: "response", statusCode: 200, body: "supervised:/hello?from=port" });
+
+  await server.locator("button[data-action='stop']").click();
+  await expect(server).toHaveAttribute("data-state", "killed");
+  await runLine(page, "node index.js");
+  await expect(page.locator("#scrollback")).toContainText("read back: written by the runtime");
+});
+
 test("keeps stdout and stderr in separate streams", async ({ page }) => {
   await boot(page);
   await openFile(page, "/index.js");
