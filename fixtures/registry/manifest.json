@@ -1,0 +1,143 @@
+{
+  "formatVersion": 1,
+  "generatedBy": "tools/build-corpus.ts",
+  "note": "Synthetic dependency corpus. `@corpus/*` is normal-test only; `@corpus-broken/*` is negative-test only and may not be referenced by any fixture. Integrity values are sha512 of the committed tarball bytes, and the bytes are the artifact: regenerating them is a separate, reviewable change.",
+  "packages": [
+    {
+      "name": "@corpus-broken/missing-edge",
+      "version": "1.0.0",
+      "tarball": "@corpus-broken/missing-edge/1.0.0.tgz",
+      "integrity": "sha512-4MTkPcBXzF9VMIOkh+DMg5acpJ16XURevQE40h7KcZKmoLu4N2ZEzcs3+trizyWbn7SHs5Egesr7f/dSdl6yvg==",
+      "negative": true,
+      "contents": [
+        "package.json",
+        "index.js"
+      ],
+      "dependencies": {
+        "@corpus/absent": "^1.0.0"
+      },
+      "main": "index.js"
+    },
+    {
+      "name": "@corpus-broken/tar-hostile",
+      "version": "1.0.0",
+      "tarball": "@corpus-broken/tar-hostile/1.0.0.tgz",
+      "integrity": "sha512-P1gkhROg32r1kxAmrsLiqyCE8AZF3Er8igEnsJ2l6ShrWYbPrwf9e5WTG7SOxCHCG+c+Ju2dVueqOhUpPAAaEg==",
+      "negative": true,
+      "main": "index.js"
+    },
+    {
+      "name": "@corpus/bin",
+      "version": "1.0.0",
+      "tarball": "@corpus/bin/1.0.0.tgz",
+      "integrity": "sha512-ePzbLlQPEMufkqgiy0EGdbthO+u9wT74liZkveVmjgYRm0RQEXDSXoz4F1abQwwL9B+L/y8uVmrRKCWdK/IA3g==",
+      "negative": false,
+      "contents": [
+        "package.json",
+        "cli.js",
+        "index.js"
+      ],
+      "main": "index.js",
+      "bin": {
+        "corpus-bin": "./cli.js"
+      }
+    },
+    {
+      "name": "@corpus/chain",
+      "version": "1.0.0",
+      "tarball": "@corpus/chain/1.0.0.tgz",
+      "integrity": "sha512-dImkWn4vDN9pfoHji0c71BMHO+KdAvAMOz7ffhc3p3dJDERw3cRGUXsuK4P/svlqcIafE+wNHjC1pklTRLXkAA==",
+      "negative": false,
+      "contents": [
+        "package.json",
+        "index.js"
+      ],
+      "dependencies": {
+        "@corpus/leaf": "^1.0.0"
+      },
+      "main": "index.js"
+    },
+    {
+      "name": "@corpus/deep",
+      "version": "1.0.0",
+      "tarball": "@corpus/deep/1.0.0.tgz",
+      "integrity": "sha512-t4IsgANo2Pz9i/brppHZ2SxzMtBDVKN93XblfBOrNnsmnutZlgL7czpZBseyuyNe8BwN5SOt0OMt4g6ov74SDQ==",
+      "negative": false,
+      "contents": [
+        "package.json",
+        "index.js"
+      ],
+      "dependencies": {
+        "@corpus/chain": "^1.0.0"
+      },
+      "main": "index.js"
+    },
+    {
+      "name": "@corpus/esm",
+      "version": "1.0.0",
+      "tarball": "@corpus/esm/1.0.0.tgz",
+      "integrity": "sha512-dW2BuRh9nIQK82Q/rSjdzG51OG+LfcBrR9Y8Vv+o7pJwJwXpCIoA3Cn29tS9MVEdR9unMJXG2zhR7ID9Gr0MAg==",
+      "negative": false,
+      "contents": [
+        "package.json",
+        "index.js"
+      ],
+      "main": "./index.js",
+      "type": "module"
+    },
+    {
+      "name": "@corpus/exports-map",
+      "version": "1.0.0",
+      "tarball": "@corpus/exports-map/1.0.0.tgz",
+      "integrity": "sha512-fSSU0wYW/9JahB8bW+s53cMx5eF6Yf0GyMuswP/2BBLuqbBBIXQWWcng//my6Ca6/LvOKII2tIvkC0UNgfYljw==",
+      "negative": false,
+      "contents": [
+        "package.json",
+        "lib/real.js",
+        "index.js"
+      ],
+      "exports": {
+        ".": "./lib/real.js"
+      }
+    },
+    {
+      "name": "@corpus/leaf",
+      "version": "1.0.0",
+      "tarball": "@corpus/leaf/1.0.0.tgz",
+      "integrity": "sha512-TME2gazIwptkeyDQInZeaqPo+nBX/3pqtamr6Fm8O1mdHKjrZQlK7Z/6S4nhPaN7INvaNbIlVTQRcNgvwijZXA==",
+      "negative": false,
+      "contents": [
+        "package.json",
+        "index.js"
+      ],
+      "main": "index.js"
+    },
+    {
+      "name": "@corpus/leaf",
+      "version": "2.0.0",
+      "tarball": "@corpus/leaf/2.0.0.tgz",
+      "integrity": "sha512-pQT97wzv+LF5aKRfSEZevtYlrny6UM7hIckxZawXojpOu5RPvh4QMFlIbF9Mp6r+AsqdxyTfkJrsXfROk7K+gw==",
+      "negative": false,
+      "contents": [
+        "package.json",
+        "index.js"
+      ],
+      "main": "index.js"
+    },
+    {
+      "name": "@corpus/version-conflict",
+      "version": "2.0.0",
+      "tarball": "@corpus/version-conflict/2.0.0.tgz",
+      "integrity": "sha512-IfVH5nWThFo2PUHIGMyBmTmVyTg5YvcOmGAkkn1bqEHjclxedur3w0UqKZcwJE6xgImZdBeb2SwxMI4KxVxAcA==",
+      "negative": false,
+      "contents": [
+        "package.json",
+        "index.js"
+      ],
+      "dependencies": {
+        "@corpus/leaf": "^2.0.0"
+      },
+      "main": "index.js"
+    }
+  ]
+}

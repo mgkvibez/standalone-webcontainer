@@ -16,6 +16,6 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src/**/*", "tests/**/*"],
+  "include": ["src/**/*", "tests/**/*", "tools/**/*"],
   "exclude": ["node_modules", "dist", "artifacts", "test-harness"]
 }

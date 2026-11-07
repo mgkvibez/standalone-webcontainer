@@ -1,0 +1,58 @@
+{
+  "formatVersion": 1,
+  "id": 7,
+  "slug": "fixture-07",
+  "lane": "front-end-only",
+  "title": "CLI tool honours argv and its documented exit codes",
+  "intent": "Exit codes are a contract, not a side effect. A runtime that runs code but loses the exit code cannot host CI tooling, so this fixture asserts both success and a deliberate failure path.",
+  "source": "stackblitz-conformance: Command line (CLI) (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install",
+      "timeoutClass": "install",
+      "purpose": "Install the CLI's dependencies"
+    },
+    {
+      "kind": "run",
+      "command": "node cli.mjs --input sample.txt --upper",
+      "timeoutClass": "run",
+      "purpose": "Successful invocation"
+    },
+    {
+      "kind": "run",
+      "command": "node cli.mjs --definitely-not-a-flag",
+      "timeoutClass": "run",
+      "purpose": "Invocation that must fail with the documented usage code"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 0
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "HELLO"
+    },
+    {
+      "kind": "exit-code",
+      "step": 2,
+      "equals": 2
+    }
+  ],
+  "files": {
+    "package.json": "{\n  \"name\": \"fixture-07-cli\",\n  \"private\": true,\n  \"version\": \"0.0.0\",\n  \"type\": \"module\"\n}\n",
+    "sample.txt": "hello world\n",
+    "cli.mjs": "#!/usr/bin/env node\n// A deliberately ordinary CLI: one flag that takes a value, one boolean flag, and a documented exit code of 2 for\n// anything it does not understand. The fixture asserts on argv parsing and on the exit code, not on output prettiness.\nimport fs from \"node:fs\";\n\nconst argv = process.argv.slice(2);\nlet input = null;\nlet upper = false;\n\nfor (let i = 0; i < argv.length; i += 1) {\n  const arg = argv[i];\n  if (arg === \"--input\") {\n    input = typeof argv[i + 1] === \"string\" ? argv[i + 1] : null;\n    i += 1;\n  } else if (arg === \"--upper\") {\n    upper = true;\n  } else {\n    console.error(\"unknown flag: \" + arg);\n    process.exit(2);\n  }\n}\n\nif (input === null) {\n  console.error(\"usage: cli.mjs --input <file> [--upper]\");\n  process.exit(2);\n}\n\nconst text = fs.readFileSync(input, \"utf8\").trim();\nconsole.log(upper ? text.toUpperCase() : text);\n"
+  },
+  "expected": [
+    "PASS"
+  ],
+  "knownLimits": [
+    "A CLI that prints the right output but exits 0 on bad input fails this fixture; that is the point of the second step."
+  ]
+}

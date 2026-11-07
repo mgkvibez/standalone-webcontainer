@@ -1,0 +1,43 @@
+{
+  "formatVersion": 1,
+  "id": 9,
+  "slug": "fixture-09",
+  "lane": "front-end-only",
+  "title": "npm install of a pure-JS dependency, then require it",
+  "intent": "Isolates dependency resolution from the toolchain: one small pure-JS package, installed and required. This is where a loader without exports-map support first shows its limits.",
+  "source": "stackblitz-conformance: Package managers (npm) (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install is-odd@3.0.1",
+      "timeoutClass": "install",
+      "purpose": "Fetch and unpack one pure-JS package"
+    },
+    {
+      "kind": "run",
+      "command": "node check.mjs",
+      "timeoutClass": "run",
+      "purpose": "Require it and use it"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 0
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "true"
+    }
+  ],
+  "expected": [
+    "PASS",
+    "NETWORK"
+  ],
+  "knownLimits": [
+    "A registry failure is NETWORK, never RUNTIME_INCOMPATIBILITY. Conflating the two would blame the runtime for the weather."
+  ]
+}

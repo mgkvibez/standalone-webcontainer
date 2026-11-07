@@ -1,0 +1,43 @@
+{
+  "formatVersion": 1,
+  "id": 19,
+  "slug": "fixture-19",
+  "lane": "front-end-only",
+  "title": "LibSQL query through an in-process WASM database",
+  "intent": "Databases are normally the boundary of a browser runtime, but an in-process WASM engine is the one shape that fits the browser lane. This fixture finds out where that stops working.",
+  "source": "stackblitz-conformance: LibSQL (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install @libsql/client",
+      "timeoutClass": "install",
+      "purpose": "Install the client"
+    },
+    {
+      "kind": "run",
+      "command": "node libsql.mjs",
+      "timeoutClass": "run",
+      "purpose": "Create a table, insert a row, read it back"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 0
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "row-count:1"
+    }
+  ],
+  "expected": [
+    "PASS",
+    "RUNTIME_INCOMPATIBILITY"
+  ],
+  "knownLimits": [
+    "Remote database connections belong to the server lane; only the in-process WASM path is in scope here."
+  ]
+}

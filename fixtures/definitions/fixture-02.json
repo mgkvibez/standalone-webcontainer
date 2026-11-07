@@ -1,0 +1,50 @@
+{
+  "formatVersion": 1,
+  "id": 2,
+  "slug": "fixture-02",
+  "lane": "front-end-only",
+  "title": "React Router app renders and deep links resolve",
+  "intent": "Tests client-side routing plus the dev server's history fallback, which together are what every single-page app depends on.",
+  "source": "stackblitz-conformance: React Router (public 'Runtime Test Cases for AI Agents' suite, adapted into our own scenario)",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install",
+      "timeoutClass": "install",
+      "purpose": "Install router and build tooling"
+    },
+    {
+      "kind": "run",
+      "command": "npm run dev -- --port 3001 --host 127.0.0.1",
+      "timeoutClass": "run",
+      "purpose": "Serve the app"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "http-status",
+      "step": 1,
+      "target": "http://localhost:3001/",
+      "equals": 200
+    },
+    {
+      "kind": "http-status",
+      "step": 1,
+      "target": "http://localhost:3001/products",
+      "equals": 200
+    },
+    {
+      "kind": "http-body-contains",
+      "step": 1,
+      "target": "http://localhost:3001/products",
+      "contains": "<div id=\"root\">"
+    }
+  ],
+  "expected": [
+    "PASS"
+  ],
+  "knownLimits": [
+    "A deep link that 404s is a routing-layer finding; the SPA fallback is served by the dev server, not by our runtime."
+  ]
+}

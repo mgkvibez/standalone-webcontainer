@@ -6,6 +6,7 @@ import {
   VFSNotEmptyError,
   VFSNotFoundError,
   VFSNotADirectoryError,
+  VFSNoSpaceError,
   VFSPathExistsError,
   VFSQuotaExceededError,
 } from "./errors.js";
@@ -19,6 +20,7 @@ export {
   VFSNotEmptyError,
   VFSNotFoundError,
   VFSNotADirectoryError,
+  VFSNoSpaceError,
   VFSPathExistsError,
   VFSQuotaExceededError,
   VFSError,
@@ -56,6 +58,11 @@ export interface FileSystemOptions {
   readonly maxTotalBytes?: number;
 }
 
+export interface WriteFileOptions {
+  /** Mark generated data as safe to remove under capacity pressure. Defaults to false. */
+  readonly evictable?: boolean;
+}
+
 function isFileNode(node: Node | undefined): node is FileNode {
   return node?.kind === "file";
 }
@@ -73,14 +80,16 @@ function parentOf(p: string): string | undefined {
  * In-memory POSIX-style file system, implemented strictly per ADR-0002.
  *
  * - Flat `Map<string, Node>` keyed by normalized absolute path; directories
- *   are derived on demand from the keys below them (#1).
- * - Async-first: every public method is `async` and yields once on entry.
- *   The body after the yield runs atomically, so concurrent calls interleave
- *   only at entry and the internal size/LRU bookkeeping never sees torn
- *   state (#2). Blocking-style work in a worker freezes only the worker.
+ *   are derived on demand from the keys below them (#1). A descendant-count
+ *   index keeps directory-existence checks constant-time without changing
+ *   the storage model.
+ * - Async methods yield once on entry and use the same synchronous core as
+ *   the worker-only sync methods. The core runs atomically, so async calls
+ *   interleave only at entry and bookkeeping never sees torn state (#2).
+ *   Blocking-style work in a worker freezes only the worker.
  * - In-memory only: no persistence in Phase 1 (#3).
- * - Chunked `Uint8Array` storage, per-file cap, whole-VFS cap with LRU
- *   eviction, typed quota error (#4).
+ * - Chunked `Uint8Array` storage, per-file cap, whole-VFS cap, and LRU
+ *   eviction restricted to explicitly regenerable files (#4).
  * - Zero DOM references: instantiable and runnable inside the Dedicated Web
  *   Worker that solely owns it (#2, #6). The main thread never holds it.
  */
@@ -89,6 +98,8 @@ export class FileSystem {
   readonly maxTotalBytes: number;
 
   readonly #nodes = new Map<string, Node>();
+  /** Number of stored nodes beneath each path; keeps derived-directory checks O(1). */
+  readonly #descendantCounts = new Map<string, number>();
   #totalBytes = 0;
   #accessCounter = 0;
 
@@ -98,26 +109,34 @@ export class FileSystem {
     if (this.maxFileSize <= 0 || this.maxTotalBytes <= 0) {
       throw new RangeError("maxFileSize and maxTotalBytes must be positive");
     }
-    // WHY: if one file could exceed the whole-VFS cap, eviction could never
-    // free enough space and the "evict, then write" guarantee would be
-    // unsound. Rejecting the configuration keeps the invariant checkable.
+    // WHY: a legal single file must fit in an empty VFS. The write may still
+    // fail when protected files occupy the remaining capacity.
     if (this.maxFileSize > this.maxTotalBytes) {
       throw new RangeError("maxFileSize must not exceed maxTotalBytes");
     }
   }
 
   /** Write `data` to `path`, creating the file and derived parents. */
-  async writeFile(path: string, data: string | Uint8Array): Promise<void> {
+  async writeFile(path: string, data: string | Uint8Array, options: WriteFileOptions = {}): Promise<void> {
     await Promise.resolve(); // async-first contract (ADR-0002 #2)
+    this.writeFileSync(path, data, options);
+  }
+
+  /**
+   * Synchronous write. ADR-0002 #2 states that sync APIs block ONLY the worker
+   * thread, which presupposes a sync path exists inside the worker; ADR-0002 #7
+   * makes `fs` the first shim, and Node's `fs.writeFileSync` has no async
+   * equivalent that CommonJS `require()` can await. The body is the same code the
+   * async method runs after its yield, so the two cannot diverge.
+   */
+  writeFileSync(path: string, data: string | Uint8Array, options: WriteFileOptions = {}): void {
     const p = normalizeVfsPath(path);
     // CRITICAL integrity guard (expert review of PR #2): derived directories
     // have NO Map entry, so the old `existing?.kind === "dir"` check missed
     // them — writing a file onto one would orphan its children and corrupt
     // stat/readdir. `#existsAsDir` covers the root, explicit entries, and
-    // derived entries in one check, so the two previous narrower branches
-    // (p === "/", explicit dir node) are removed rather than left as dead,
-    // untestable code paths. O(n) prefix scan is inherent to the flat-map
-    // model (ADR-0002 #1); optimizing it is the expert's call, not made here.
+    // derived entries using the descendant index, so package installs do not
+    // scan the whole VFS once per file.
     if (this.#existsAsDir(p)) {
       throw new VFSIsADirectoryError(p);
     }
@@ -147,6 +166,7 @@ export class FileSystem {
     const now = Date.now();
     this.#nodes.set(p, {
       kind: "file",
+      evictable: options.evictable === true,
       chunks,
       size: bytes.byteLength,
       // Birth time survives overwrites, like Node's stat.birthtime.
@@ -154,12 +174,18 @@ export class FileSystem {
       modifiedAt: now,
       lastAccessCounter: ++this.#accessCounter,
     });
+    if (existing === undefined) this.#changeAncestorCounts(p, 1);
     this.#totalBytes += bytes.byteLength;
   }
 
   /** Read `path`. Returns `Uint8Array`, or `string` when encoding is "utf8". */
   async readFile(path: string, encoding?: "utf8"): Promise<Uint8Array | string> {
     await Promise.resolve();
+    return this.readFileSync(path, encoding);
+  }
+
+  /** Synchronous read. Same rationale as `writeFileSync`. */
+  readFileSync(path: string, encoding?: "utf8"): Uint8Array | string {
     const p = normalizeVfsPath(path);
     if (encoding !== undefined && encoding !== "utf8") {
       // Runtime guard: JS callers bypassing the TS types must not reach
@@ -181,6 +207,11 @@ export class FileSystem {
   /** Create a directory. Node semantics: `recursive` is `mkdir -p`. */
   async mkdir(path: string, options: { readonly recursive?: boolean } = {}): Promise<void> {
     await Promise.resolve();
+    this.mkdirSync(path, options);
+  }
+
+  /** Synchronous mkdir. Same rationale as `writeFileSync` (ADR-0002 #2, #7). */
+  mkdirSync(path: string, options: { readonly recursive?: boolean } = {}): void {
     const p = normalizeVfsPath(path);
     const recursive = options.recursive === true;
     this.#assertNoFileAncestors(p);
@@ -211,16 +242,23 @@ export class FileSystem {
         cur = `${cur}/${segment}`;
         if (!this.#nodes.has(cur)) {
           this.#nodes.set(cur, { kind: "dir", createdAt: now, modifiedAt: now });
+          this.#changeAncestorCounts(cur, 1);
         }
       }
     }
     const now = Date.now();
     this.#nodes.set(p, { kind: "dir", createdAt: now, modifiedAt: now } satisfies DirNode);
+    this.#changeAncestorCounts(p, 1);
   }
 
   /** List direct child names of the directory at `path`, sorted. */
   async readdir(path: string): Promise<string[]> {
     await Promise.resolve();
+    return this.readdirSync(path);
+  }
+
+  /** Synchronous readdir. Same rationale as `writeFileSync` (ADR-0002 #2, #7). */
+  readdirSync(path: string): string[] {
     const p = normalizeVfsPath(path);
     this.#assertNoFileAncestors(p);
     const node = this.#nodes.get(p);
@@ -250,6 +288,11 @@ export class FileSystem {
   /** Stat the file or directory at `path`. */
   async stat(path: string): Promise<Stats> {
     await Promise.resolve();
+    return this.statSync(path);
+  }
+
+  /** Synchronous stat. Same rationale as `writeFileSync` (ADR-0002 #2, #7). */
+  statSync(path: string): Stats {
     const p = normalizeVfsPath(path);
     this.#assertNoFileAncestors(p);
     const node = this.#nodes.get(p);
@@ -271,6 +314,11 @@ export class FileSystem {
   /** Remove the file at `path`. Directories are never removable (POSIX). */
   async unlink(path: string): Promise<void> {
     await Promise.resolve();
+    this.unlinkSync(path);
+  }
+
+  /** Synchronous unlink. Same rationale as `writeFileSync` (ADR-0002 #2, #7). */
+  unlinkSync(path: string): void {
     const p = normalizeVfsPath(path);
     this.#assertNoFileAncestors(p);
     const node = this.#nodes.get(p);
@@ -286,6 +334,7 @@ export class FileSystem {
       throw new VFSIsADirectoryError(p);
     }
     this.#nodes.delete(p);
+    this.#changeAncestorCounts(p, -1);
     this.#totalBytes -= node.size;
   }
 
@@ -300,6 +349,11 @@ export class FileSystem {
    */
   async rmdir(path: string): Promise<void> {
     await Promise.resolve();
+    this.rmdirSync(path);
+  }
+
+  /** Synchronous rmdir. Same rationale as `writeFileSync` (ADR-0002 #2, #7). */
+  rmdirSync(path: string): void {
     const p = normalizeVfsPath(path);
     if (p === "/") {
       // The root is always in use; POSIX reports EBUSY, Node surfaces
@@ -324,6 +378,7 @@ export class FileSystem {
       throw new VFSNotEmptyError(p);
     }
     this.#nodes.delete(p);
+    this.#changeAncestorCounts(p, -1);
   }
 
   /**
@@ -334,6 +389,11 @@ export class FileSystem {
    */
   async rename(from: string, to: string): Promise<void> {
     await Promise.resolve();
+    this.renameSync(from, to);
+  }
+
+  /** Synchronous rename. Same rationale as `writeFileSync` (ADR-0002 #2, #7). */
+  renameSync(from: string, to: string): void {
     const src = normalizeVfsPath(from);
     const dst = normalizeVfsPath(to);
     if (src === "/" || dst === "/") {
@@ -365,12 +425,14 @@ export class FileSystem {
         throw new VFSNotEmptyError(dst);
       }
       this.#nodes.delete(dst);
+      if (dstNode !== undefined) this.#changeAncestorCounts(dst, -1);
     } else if (isFileNode(dstNode)) {
       // POSIX: a directory cannot replace a file.
       if (srcIsDir) {
         throw new VFSNotADirectoryError(dst);
       }
       this.#nodes.delete(dst);
+      this.#changeAncestorCounts(dst, -1);
       this.#totalBytes -= dstNode.size;
     }
     // Prefix scan (ADR-0002 #1): move the root and every descendant key.
@@ -378,7 +440,10 @@ export class FileSystem {
     const moved = [...this.#nodes.entries()].filter(([key]) => key === src || key.startsWith(prefix));
     for (const [key, node] of moved) {
       this.#nodes.delete(key);
-      this.#nodes.set(dst + key.slice(src.length), node);
+      const movedPath = dst + key.slice(src.length);
+      this.#changeAncestorCounts(key, -1);
+      this.#changeAncestorCounts(movedPath, 1);
+      this.#nodes.set(movedPath, node);
     }
   }
 
@@ -411,23 +476,23 @@ export class FileSystem {
     if (this.#nodes.get(p)?.kind === "dir") {
       return true;
     }
-    const prefix = this.#prefixOf(p);
-    for (const key of this.#nodes.keys()) {
-      if (key.startsWith(prefix)) {
-        return true;
-      }
-    }
-    return false;
+    return (this.#descendantCounts.get(p) ?? 0) > 0;
   }
 
   #hasChildren(p: string): boolean {
-    const prefix = this.#prefixOf(p);
-    for (const key of this.#nodes.keys()) {
-      if (key.startsWith(prefix)) {
-        return true;
-      }
+    return (this.#descendantCounts.get(p) ?? 0) > 0;
+  }
+
+  /** Adjust counts for every ancestor because `path` itself is a stored node. */
+  #changeAncestorCounts(path: string, delta: 1 | -1): void {
+    let ancestor = parentOf(path);
+    while (ancestor !== undefined) {
+      const next = (this.#descendantCounts.get(ancestor) ?? 0) + delta;
+      if (next < 0) throw new Error(`VFS descendant-count invariant violated at '${ancestor}'`);
+      if (next === 0) this.#descendantCounts.delete(ancestor);
+      else this.#descendantCounts.set(ancestor, next);
+      ancestor = parentOf(ancestor);
     }
-    return false;
   }
 
   /** Resolve `p` to a FileNode, throwing ENOTDIR/ENOENT/EISDIR and touching LRU. */
@@ -450,10 +515,9 @@ export class FileSystem {
   }
 
   /**
-   * Reclaim space via LRU eviction until `bytesNeeded` fits (ADR-0002 #4).
-   * The file being written (`excludePath`) is never evicted. The
-   * constructor's `maxFileSize <= maxTotalBytes` invariant guarantees this
-   * loop terminates with room for any legal write.
+   * Reclaim space only from explicitly regenerable files. Preflight the
+   * eligible bytes first so a failed write never leaves a partially evicted
+   * VFS. User files are protected by default.
    */
   #evictFor(bytesNeeded: number, excludePath: string): void {
     if (this.#totalBytes + bytesNeeded <= this.maxTotalBytes) {
@@ -461,16 +525,21 @@ export class FileSystem {
     }
     const evictable: Array<[string, FileNode]> = [];
     for (const [key, node] of this.#nodes) {
-      if (node.kind === "file" && key !== excludePath) {
+      if (node.kind === "file" && node.evictable && key !== excludePath) {
         evictable.push([key, node]);
       }
     }
     evictable.sort((a, b) => a[1].lastAccessCounter - b[1].lastAccessCounter);
+    const reclaimable = evictable.reduce((total, [, node]) => total + node.size, 0);
+    if (this.#totalBytes + bytesNeeded - reclaimable > this.maxTotalBytes) {
+      throw new VFSNoSpaceError(excludePath, bytesNeeded, this.maxTotalBytes);
+    }
     for (const [key, node] of evictable) {
       if (this.#totalBytes + bytesNeeded <= this.maxTotalBytes) {
         break;
       }
       this.#nodes.delete(key);
+      this.#changeAncestorCounts(key, -1);
       this.#totalBytes -= node.size;
     }
   }

@@ -13,6 +13,7 @@ export type VfsErrorCode =
   | "EISDIR"
   | "ENOTDIR"
   | "ENOTEMPTY"
+  | "ENOSPC"
   | "EFBIG";
 
 export class VFSError extends Error {
@@ -89,6 +90,22 @@ export class VFSQuotaExceededError extends VFSError {
       "EFBIG",
       path,
       `EFBIG: file too large: ${attemptedBytes} bytes exceeds the ${limit}-byte per-file limit: '${path}'`,
+    );
+    this.attemptedBytes = attemptedBytes;
+    this.limit = limit;
+  }
+}
+
+/** ENOSPC — the VFS cap cannot be met without deleting protected files. */
+export class VFSNoSpaceError extends VFSError {
+  readonly attemptedBytes: number;
+  readonly limit: number;
+
+  constructor(path: string, attemptedBytes: number, limit: number) {
+    super(
+      "ENOSPC",
+      path,
+      `ENOSPC: VFS capacity exhausted: ${attemptedBytes} additional bytes exceed the ${limit}-byte total limit`,
     );
     this.attemptedBytes = attemptedBytes;
     this.limit = limit;

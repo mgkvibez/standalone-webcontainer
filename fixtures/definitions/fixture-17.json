@@ -1,0 +1,39 @@
+{
+  "formatVersion": 1,
+  "id": 17,
+  "slug": "fixture-17",
+  "lane": "boundary",
+  "title": "Large bundle build at the memory ceiling",
+  "intent": "Boundary fixture: memory pressure is the incumbent's own open issue, so this fixture is informative rather than pass/fail. It exists to find the ceiling deliberately instead of discovering it in production.",
+  "source": "our own scenario, informed by the incumbent's open memory issue",
+  "status": "proposed",
+  "steps": [
+    {
+      "kind": "install",
+      "command": "npm install",
+      "timeoutClass": "install",
+      "purpose": "Install the build toolchain"
+    },
+    {
+      "kind": "build",
+      "command": "npm run build",
+      "timeoutClass": "build",
+      "purpose": "Build a deliberately large bundle"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "file-exists",
+      "step": 1,
+      "target": "dist/bundle.js"
+    }
+  ],
+  "expected": [
+    "PASS",
+    "TIMEOUT",
+    "RUNTIME_INCOMPATIBILITY"
+  ],
+  "knownLimits": [
+    "A TIMEOUT is a legitimate result and must be recorded, never retried until it passes. Charter \u00a74.5 fixes the budget at 240s for builds."
+  ]
+}
