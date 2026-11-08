@@ -32,7 +32,8 @@
     "tests:count": "vite-node tools/report/test-count.ts --write",
     "tests:count:check": "vite-node tools/report/test-count.ts --check",
     "guard:identifiers": "vite-node tools/checks/forbidden-identifiers.ts",
-    "guard:licences": "vite-node tools/checks/licences.ts"
+    "guard:licences": "vite-node tools/checks/licences.ts",
+    "diff:event-loop": "vite-node tools/differential/event-loop.ts"
   },
   "devDependencies": {
     "@codemirror/lang-javascript": "^6.2.5",

@@ -84,8 +84,8 @@ These are non-negotiable. If any commit violates these, stop and fix it before p
 
 ### Architecture (already decided — do not reinvent)
 - Runtime: JavaScript-shimmed Node.js APIs running on the browser's native V8 engine. NOT a WASI-compiled Node.js binary. The browser's engine is faster and more memory-efficient than a WASM-compiled JS engine.
-- VFS: In-memory POSIX-compliant file system with IndexedDB persistence for session continuity.
-- Networking: Service worker that intercepts fetch requests and routes them to the in-browser Node.js server.
+- VFS: In-memory POSIX-compliant file system. Project persistence today is `localStorage` (`src/browser/projects.ts`), not IndexedDB; IndexedDB or OPFS is future work (Phase 8).
+- Networking: Service worker that intercepts fetch requests and routes them to the in-browser Node.js server. The handler and bridge exist and are tested; the browser registration lands with the origin-separated preview (ADR-0017/ADR-0019), which needs a wildcard domain.
 - Threading: Requires COOP/COEP headers for SharedArrayBuffer.
 - Terminal: xterm.js with a PTY bridge to the runtime's stdin/stdout/stderr.
 - Hybrid runtime: Browser lane for zero-compute-cost previews; server sandbox fallback for native modules, Python, and heavy builds. Both behind a unified `Runtime` interface.
