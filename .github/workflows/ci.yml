@@ -10,7 +10,7 @@ name: CI
 
 on:
   push:
-    branches: [main, "integration/**"]
+    branches: [main, "integration/**", "docs/**", "feat/**"]
   pull_request:
     branches: [main]
 
@@ -23,10 +23,20 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - name: Install and typecheck
-        run: npm ci && npx tsc --noEmit
+      - name: Install and typecheck (three lanes)
+        run: npm ci && npm run typecheck
+      - name: Guards (forbidden identifiers, licences)
+        run: npm run guard:identifiers && npm run guard:licences
       - name: Test
-        run: npm test
+        run: npm run test:report
+      - name: Test count matches the README
+        run: npm run tests:count:check
+      - name: Publish the count
+        if: always()
+        run: |
+          if [ -f artifacts/test-report.json ]; then
+            node -e "const r=require('./artifacts/test-report.json');const f=(r.testResults||[]).length;console.log('## Tests\n\n'+r.numTotalTests+' tests in '+f+' files, '+r.numFailedTests+' failed.')" >> "$GITHUB_STEP_SUMMARY"
+          fi
   # The browser lane is separate on purpose: it needs a real Chromium, which the toolchain job has no business
   # downloading for every run. It builds the production bundle first, so a dev-server-only success cannot mask a bundle
   # that never builds, and then drives the page with Playwright.

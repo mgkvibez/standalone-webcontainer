@@ -144,7 +144,7 @@ test("keeps a server alive in the project supervisor and serves over a transfera
   await expect(page.locator("#scrollback")).toContainText("server listening on port(s) 3210");
 
   const reply = await page.evaluate(async () => {
-    const runtime = (window as unknown as { __runtime: { connectTransport(port: MessagePort): void } }).__runtime;
+    const runtime = (window as unknown as { __runtime: { connectTransport(port: MessagePort): number; disconnectTransport(id: number): void } }).__runtime;
     const channel = new MessageChannel();
     const received = new Promise<{ type: string; statusCode?: number; body?: string }>((resolve) => {
       channel.port2.onmessage = (event: MessageEvent<{ type: string; statusCode?: number; body?: Uint8Array }>) => {
@@ -156,7 +156,7 @@ test("keeps a server alive in the project supervisor and serves over a transfera
       };
       channel.port2.start();
     });
-    runtime.connectTransport(channel.port1);
+    const transportId = runtime.connectTransport(channel.port1);
     channel.port2.postMessage({
       type: "request",
       id: "browser-smoke-1",
@@ -165,7 +165,9 @@ test("keeps a server alive in the project supervisor and serves over a transfera
       headers: {},
       body: new Uint8Array(),
     });
-    return received;
+    const reply = await received;
+    runtime.disconnectTransport(transportId);
+    return reply;
   });
   expect(reply).toEqual({ type: "response", statusCode: 200, body: "supervised:/hello?from=port" });
 
@@ -173,6 +175,40 @@ test("keeps a server alive in the project supervisor and serves over a transfera
   await expect(server).toHaveAttribute("data-state", "killed");
   await runLine(page, "node index.js");
   await expect(page.locator("#scrollback")).toContainText("read back: written by the runtime");
+});
+
+test("serves a running project through its origin-separated preview shell", async ({ page }) => {
+  await boot(page);
+  acceptDialog(page, "/server.js");
+  await page.click("#new-file");
+  await setEditorText(page, [
+    'const http = require("http");',
+    'http.createServer((_request, response) => { response.setHeader("content-type", "text/html"); response.end("<main>isolated preview works</main>"); }).listen(3211);',
+  ].join("\n"));
+  await runLine(page, "node server.js");
+  const server = page.locator(".process-chip[data-pid='1']");
+  await expect(server).toHaveAttribute("data-state", "running");
+
+  await server.getByRole("button", { name: "preview 3211" }).click();
+  await expect(page.locator("#preview-frame")).toHaveAttribute("src", /\.preview\.localhost:\d+\//);
+  await expect(page.frameLocator("#preview-frame").locator("#preview-status")).toContainText("Preview server on port 3211");
+  const content = page.frameLocator("#preview-frame").frameLocator("iframe[title='Project preview on port 3211']");
+  await expect(content.locator("body")).toContainText("isolated preview works", { timeout: 15_000 });
+
+  const origins = await page.evaluate(() => {
+    const preview = document.querySelector<HTMLIFrameElement>("#preview-frame");
+    return { host: location.origin, preview: preview?.src === undefined ? "" : new URL(preview.src).origin };
+  });
+  expect(origins.preview).not.toBe(origins.host);
+
+  const previewDocument = page.frames().find((frame) => frame.url().includes("/preview/3211/"));
+  expect(previewDocument).toBeDefined();
+  await previewDocument!.evaluate(async () => {
+    await Promise.all((await navigator.serviceWorker.getRegistrations()).map((registration) => registration.unregister()));
+  });
+  await page.click("#close-preview");
+  await server.locator("button[data-action='stop']").click();
+  await expect(server).toHaveAttribute("data-state", "killed");
 });
 
 test("keeps stdout and stderr in separate streams", async ({ page }) => {

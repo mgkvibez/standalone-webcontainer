@@ -19,6 +19,8 @@ import { basename, dirname } from "../container/commands.js";
 import type { ProcessRecord, Session } from "../container/types.js";
 import type { ProjectStore } from "./projects.js";
 import type { WorkerRuntimeClient } from "./worker-client.js";
+import { resolvePreviewOrigin } from "./preview-origin.js";
+import { connectPreviewFrame } from "./preview-handshake.js";
 
 export interface WorkspaceOptions {
   readonly store: ProjectStore;
@@ -55,12 +57,64 @@ export function createWorkspace(options: WorkspaceOptions): Workspace {
   const processList = element<HTMLDivElement>("processes");
   const processSummary = element<HTMLSpanElement>("process-summary");
   const saveState = element<HTMLSpanElement>("save-state");
+  const previewOverlay = element<HTMLElement>("preview-overlay");
+  const previewFrame = element<HTMLIFrameElement>("preview-frame");
+  const previewTitle = element<HTMLSpanElement>("preview-overlay-title");
 
   let activeSessionId = options.initialSessionId;
   let openPath: string | null = null;
   let selectedPath: string | null = null;
   let historyIndex = 0;
   let saveTimer: number | null = null;
+  let previewCleanup: (() => void) | null = null;
+  let previewAbort: AbortController | null = null;
+  let activePreview: { readonly pid: number; readonly port: number } | null = null;
+  let previewGeneration = 0;
+
+  const closePreview = (): void => {
+    previewGeneration += 1;
+    previewAbort?.abort();
+    previewAbort = null;
+    previewCleanup?.();
+    previewCleanup = null;
+    activePreview = null;
+    previewFrame.src = "about:blank";
+    previewOverlay.hidden = true;
+  };
+
+  const openPreview = async (pid: number, port: number): Promise<void> => {
+    closePreview();
+    const generation = previewGeneration;
+    let baseDomain = document.querySelector<HTMLMetaElement>('meta[name="preview-base-domain"]')?.content.trim();
+    if (baseDomain === undefined || baseDomain === "") {
+      window.alert("Preview hosting is not configured. Set the preview-base-domain meta value.");
+      return;
+    }
+    if (baseDomain === "preview.localhost" && window.location.port !== "") baseDomain += `:${window.location.port}`;
+    let origin: string;
+    try {
+      origin = resolvePreviewOrigin(store.active().previewId, { baseDomain, hostOrigin: window.location.origin });
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    const abort = new AbortController();
+    previewAbort = abort;
+    activePreview = { pid, port };
+    previewTitle.textContent = `Process ${pid} · ${origin}`;
+    previewOverlay.hidden = false;
+    try {
+      const cleanup = await connectPreviewFrame(previewFrame, options.runtime, origin, port, 10_000, abort.signal);
+      if (generation !== previewGeneration) cleanup();
+      else previewCleanup = cleanup;
+    } catch (error) {
+      if (generation !== previewGeneration) return;
+      closePreview();
+      window.alert(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (previewAbort === abort) previewAbort = null;
+    }
+  };
 
   const session = (): Session => {
     const found = container.findSession(activeSessionId);
@@ -215,6 +269,16 @@ export function createWorkspace(options: WorkspaceOptions): Workspace {
         });
         chip.append(kill);
       }
+      if (process.state === "running" && process.previewPorts !== undefined) {
+        for (const port of process.previewPorts) {
+          const preview = document.createElement("button");
+          preview.type = "button";
+          preview.textContent = `preview ${port}`;
+          preview.dataset["action"] = "preview";
+          preview.addEventListener("click", () => void openPreview(process.pid, port));
+          chip.append(preview);
+        }
+      }
       processList.append(chip);
     }
 
@@ -270,6 +334,10 @@ export function createWorkspace(options: WorkspaceOptions): Workspace {
   });
 
   container.onChange(() => {
+    if (activePreview !== null) {
+      const previewProcess = container.processes().find((process) => process.pid === activePreview?.pid);
+      if (previewProcess?.state !== "running" || !previewProcess.previewPorts?.includes(activePreview.port)) closePreview();
+    }
     renderScrollback();
     renderProcesses();
     renderSessions();
@@ -313,6 +381,7 @@ export function createWorkspace(options: WorkspaceOptions): Workspace {
   });
 
   projectSelect.addEventListener("change", () => {
+    closePreview();
     store.switchTo(projectSelect.value);
     openPath = null;
     openFileLabel.textContent = "no file open";
@@ -373,6 +442,8 @@ export function createWorkspace(options: WorkspaceOptions): Workspace {
     selectedPath = null;
     refresh();
   });
+
+  element<HTMLButtonElement>("close-preview").addEventListener("click", closePreview);
 
   window.addEventListener("beforeunload", () => {
     if (openPath !== null) store.writeFile(openPath, view.state.doc.toString());

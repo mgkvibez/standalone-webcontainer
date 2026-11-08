@@ -9,7 +9,7 @@
  * that model are worth stating plainly because they are consequences, not choices made here:
  *
  * - **User code shares the host origin.** The preview is a path on the app's own origin, so a handler
- *   cannot reach anything the app itself could not. This is recorded as risk R-1 in
+ *   cannot reach anything the app itself could not. This is recorded as risk P0-1 in
  *   docs/references/discovery-stackblitz-public.md; the incumbent puts user code on a separate origin and
  *   pays for it in documentation pain. Changing this is an architectural decision, not a gateway change.
  * - **The path is rewritten before the handler sees it.** A handler mounted at `listen(3000)` expects

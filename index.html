@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="preview-base-domain" content="" />
     <title>standalone-webcontainer</title>
   </head>
   <body>
@@ -56,6 +57,13 @@
       </section>
     </div>
 
-    <script type="module" src="/src/browser/main.ts"></script>
+    <main id="preview-shell" hidden>
+      <div id="preview-status">Starting preview…</div>
+    </main>
+    <section id="preview-overlay" hidden aria-label="Project preview">
+      <header><span id="preview-overlay-title">Preview</span><button id="close-preview" type="button">Close</button></header>
+      <iframe id="preview-frame" title="Project preview" sandbox="allow-scripts allow-forms allow-same-origin"></iframe>
+    </section>
+    <script type="module" src="/src/browser/entry.ts"></script>
   </body>
 </html>
