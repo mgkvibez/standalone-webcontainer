@@ -3,7 +3,7 @@
 export type { Classification, FixtureOutcome, FixtureSlot, Lane } from "./types.js";
 export type { NormalizeOptions } from "./normalize.js";
 export type { TimeoutResult, TimeoutSuccess, TimeoutFailure } from "./timeout.js";
-export type { EvidenceBundle } from "./evidence.js";
+export type { EvidenceBundle } from "./evidence-bundle.js";
 export type { GateReport, LaneScore } from "./score.js";
 export type { ManifestEntry } from "./manifest.js";
 export type { FreezeCheck, FreezeState, VerifiedScoring } from "./freeze.js";

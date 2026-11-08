@@ -9,12 +9,9 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 
-const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+import type { EvidenceBundle } from "./evidence-bundle.js";
 
-export interface EvidenceBundle {
-  readonly dir: string;
-  readonly files: readonly string[];
-}
+const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export function assertSafeSlug(slug: string): void {
   if (!SLUG.test(slug)) {

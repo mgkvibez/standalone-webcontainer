@@ -13,5 +13,10 @@ export default defineConfig({
     include: ["tests/unit/**/*.test.ts"],
     exclude: ["node_modules/**", "dist/**"],
     environment: "node",
+    // The charter requires hard timeouts. Without these, a hung test is a hung CI job.
+    testTimeout: 15_000,
+    hookTimeout: 10_000,
+    // Fail loudly instead of running a half-collected suite.
+    passWithNoTests: false,
   },
 });
