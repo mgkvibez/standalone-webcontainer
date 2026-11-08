@@ -27,7 +27,7 @@ The audit's substantive point still stands and is not softened here: a preview d
 `VITE_PREVIEW_BASE_DOMAIN` is set, that build is the only one that enables previews, and **no production preview has ever
 been served** because the account has no custom domain and the wildcard this needs does not exist. `preview-gateway.ts` and
 `service-worker.ts` remain routing logic that tests call directly; browser tests passing says nothing about a deployed
-service-worker preview. Risk R-1 (previews on the host origin) is exactly what ADR-0019 now covers, pending a ruling.
+service-worker preview. Risk P0-1 (previews on the host origin) is exactly what ADR-0019 now covers, pending a ruling.
 
 **3. "The event-loop output is not proof of a real loop." ACCEPTED, and now measured.**
 `src/runtime/scheduler.ts` is a virtual-clock scheduler with an explicit `budgetMs` and a `budget-exhausted` stop reason.
@@ -55,14 +55,14 @@ is why Phase 2 is held behind ADR-0019 rather than sequenced later.
 
 | Audit gap | Where it is already recorded | State |
 | --- | --- | --- |
-| ESM via acorn→CJS, no live bindings, no TLA, no destructured exports | ADR-0012, `P0-rulings.md` R-4 | supersession proposed, ruling pending |
-| User code runs with `new Function` on the host origin | ADR-0019, risk R-1 | ADR proposed, ruling pending |
+| ESM via acorn→CJS, no live bindings, no TLA, no destructured exports | ADR-0012, `P0-rulings.md` P0-4 | supersession proposed, ruling pending |
+| User code runs with `new Function` on the host origin | ADR-0019, risk P0-1 | ADR proposed, ruling pending |
 | VFS: implicit parents, no symlinks, no watch | Phase 3 steps 1–3, 6 | not started |
-| `npx`, `pnpm`, `yarn`, `sh`, `bash`, `zsh` refused | ADR-0009, `P0-rulings.md` R-2 | real shell required, Phase 6 |
+| `npx`, `pnpm`, `yarn`, `sh`, `bash`, `zsh` refused | ADR-0009, `P0-rulings.md` P0-2 | real shell required, Phase 6 |
 
 ## Fix order, as executed against this tree
 
-1. **Phase 0 ADRs — done** (`63c3607`). ADR-0018, ADR-0019, and nine numbered rulings in `P0-rulings.md`. Nothing in
+1. **Phase 0 ADRs — done** (`63c3607`). ADR-0018, ADR-0019, and ten numbered rulings (`P0-1` to `P0-10`) in `P0-rulings.md`. Nothing in
    Phases 1–9 can be honestly started until those are answered.
 2. **Live-registry and CORS spike — partly measured today.** From this environment: `registry.npmjs.org` returns
    `access-control-allow-origin: *` for both the packument (`application/json`, `max-age=300`) and the tarball
@@ -70,12 +70,12 @@ is why Phase 2 is held behind ADR-0019 rather than sequenced later.
    resolver problem, not a CORS problem. What is not measured: rate limits, redirects, and behaviour behind a service
    worker on a cross-origin page. Those need a browser lane, and the four fixes above come first.
 3. **Real preview** (cross-origin frame, SW preview on its own origin, MessagePort) — blocked on ADR-0019 plus a domain.
-4. **Kernel Worker + per-process Workers** — blocked on ADR-0018 (R-1).
+4. **Kernel Worker + per-process Workers** — blocked on ADR-0018 (P0-1).
 5. **Shell and PTY with xterm.js** — follows 3 and 4.
 6. **Persistence on OPFS/IndexedDB with Web Locks** — blocked on ADR-0019's open question about *where* persistence lives.
 7. **Node-semantics differential tests** — started today for the event loop; module resolution and error shapes follow the
    same harness.
-8. **ESM** — blocked on R-4.
+8. **ESM** — blocked on P0-4.
 9. **Freeze the 20 fixtures and fix the README** — README corrections landed today; freezing waits for real packages.
 10. **Benchmark against StackBlitz** — correctly last.
 

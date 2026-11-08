@@ -39,7 +39,7 @@ nextTick queue drained before promise jobs, and a drain loop that is quiescent r
 
 ## What is deliberately not being done now
 
-The fix is Phase 1 work, and Phase 1 depends on ADR-0018 being accepted (R-1 in `P0-rulings.md`). Changing scheduler
+The fix is Phase 1 work, and Phase 1 depends on ADR-0018 being accepted (P0-1 in `P0-rulings.md`). Changing scheduler
 semantics before that ruling would be taking the architectural decision the charter reserves for the expert, and it would
 touch ordering that current fixtures rely on. The measurement is the deliverable here; the fix has a named home.
 

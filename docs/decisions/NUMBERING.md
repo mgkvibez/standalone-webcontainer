@@ -1,58 +1,58 @@
-# Numbering: four schemes that currently collide
+# Numbering: what every number in this repository means
 
-The project is reviewed by an outside auditor, by the owner, and by whoever reads the commit log next. Four separate
-numbering schemes are in play, and three of them use the token "6" or "R6" to mean different things. This page is the
-disambiguation. It decides nothing about architecture and changes no code.
+Four numbering schemes are in play, and three of them used the token "6" or "R6" for different things. On 2026-11-08 the
+rulings were renamed to end the worst of the collision. This page is the reference.
 
-**Rule of thumb:** the audit's numbering is authoritative for the audit document. The repository's numbering is
-authoritative for the repository. Never cite a bare number across the boundary: write `Phase 6` (repo plan), `P0-6`
-(ruling), `M6` (milestone), or `PR #6`.
+**Rule:** the audit's numbering is authoritative for the audit document. The repository's numbering is authoritative for
+the repository. Never cite a bare number across that boundary. Write `Phase 6` (plan phase), `P0-6` (ruling), `R6`
+(historical milestone), `PR #6` (pull request), `ADR-0009` (decision record).
 
-## The four schemes
+## Current names
 
-| Scheme | Where it lives | What "6" means there | Range in use |
+| Scheme | Lives in | Range | Example |
 | --- | --- | --- | --- |
-| **Audit Programmes** | external audit document, not in this repo | unknown; the document was never delivered past Programme 5 | 1 to 8, of which 1 to 5 are known |
-| **Plan Phases** | `docs/decisions/` plan phases, quoted in the fix plan | `Phase 6` = a real shell on a PTY, replacing the fixed command list | 0 to 10 |
-| **P0 rulings** | `docs/decisions/P0-rulings.md` | `R-6` = wire or delete `src/shims/presets.ts` | R-1 to R-10 |
-| **Milestones** | `docs/phase-6/`, ADR-0016, commit messages | `R6` = deterministic offline dependency corpus, with sub-steps R6a to R6e | R1 to R7 within one phase |
+| **Audit Programmes** | external audit document, not in this repo | 1 to 8, of which only 1 to 5 were ever delivered | "Programme 6" |
+| **Plan Phases** | the fix plan; phase headings throughout `docs/` | 0 to 10 | `Phase 6` = a real shell on a PTY |
+| **P0 rulings** | `docs/decisions/P0-rulings.md` | `P0-1` to `P0-10` | `P0-6` = wire or delete `src/shims/presets.ts` |
+| **Milestones** | `docs/phase-6/`, ADR-0016, commit messages | `R1` to `R7`, with sub-steps `R6a` to `R6e` | `R6` = deterministic offline dependency corpus |
+| **ADRs** | `docs/decisions/ADR-*.md` | `ADR-0001` to `ADR-0019` | `ADR-0019` = cross-origin runtime |
+| **Pull requests** | GitHub | `#1` upward | `PR #6` = phase2/envelope-presets |
 
-Two further namespaces appear in the same sentences and should never be abbreviated: **ADRs** (`ADR-0009`) and **pull
-requests** (`PR #6`, `PR #7`). A sentence like "R6 lands after #6" contains a milestone, a pull request, and an implied
-phase, and is unreadable without this table.
+## What was renamed, and why
 
-## The collision matrix for the token 6
+The rulings were `R-1` to `R-10` and collided with the milestone series `R1` to `R7`, which is a one-character
+distinction (`R-6` ruling versus `R6` milestone) that survived review three separate times. They are now `P0-1` to
+`P0-10`, which also matches where they live: under the Phase 0 heading.
 
-| Written | Actually means |
-| --- | --- |
-| `Phase 6` | a real shell and PTY; the phase that unblocks `npx`, `pnpm`, `yarn`, `sh` and `bash` |
-| `R-6` | ruling: is `src/shims/presets.ts` wired in or deleted? |
-| `R6` / `R6a` to `R6e` | milestone: deterministic offline dependency corpus, already built (ADR-0016) |
-| `docs/phase-6/` | folder holding that milestone's proposal and the pnpm command contract |
-| `PR #6` | phase2/envelope-presets, the pull request that wires `presets.ts` in |
-| `Phase 0` | decisions to ratify; where `R-1` to `R-10` live |
+References updated in: `docs/decisions/P0-rulings.md`, `docs/audit/response-nov-08.md`,
+`docs/references/discovery-stackblitz-public.md`, `ADR-0005`, `ADR-0007`, `ADR-0012`, `ADR-0013`, `ADR-0016`,
+`ADR-0017`, `ADR-0019`, and one code comment in `src/network/preview-gateway.ts`.
 
-## A trap worth recording
+Deliberately **not** renamed:
 
-`R-6` asks whether `src/shims/presets.ts` should be wired in or deleted. **That file does not exist on
+- **Milestone names** `R6`, `R6a` to `R6e`, `R2`. They appear in commit messages, ADRs and the milestone docs, and
+  rewriting history would break more than it fixes. The two live milestone docs now carry a header stating they are
+  milestones and not rulings.
+- **ADR decision ids** `D-1` upward. Two different ADRs both define a `D-1`, so a bare `D-1` is ambiguous: always write
+  it with its ADR, as `ADR-0004 D-1`.
+
+`ADR-0009` is hash-pinned by `tests/unit/harness.refusal-contract.test.ts`, which is why the annotation pass leaves it
+alone and why any future edit to it must update that hash deliberately.
+
+## The trap this file exists to prevent
+
+`P0-6` asks whether `src/shims/presets.ts` should be wired in or deleted. **That file does not exist on
 `docs/audit-response-2` (`af8bf97`) or its engine base `feat/p1d-worker-supervisor` (`5c15fe2`).** `src/shims/` there
 holds `fs`, `path`, `process`, `events`, `http`, `stream` and `.gitkeep`, and nothing else.
 
-The file exists only where `PR #6` (`7205395`) is present, which is `main` after the merge commit `e65e087`. So `R-6` is
-not a question about a currently-dead file on the audited branch; it is a question about what to do **when PR #6
-lands**. Anyone reading `P0-rulings.md` against a branch that lacks the file will conclude the file was already deleted
-and the ruling is moot. It is not.
+The file exists only where `PR #6` (`7205395`) is present, which is `main` after the merge `e65e087`. So `P0-6` is not a
+question about a currently-dead file; it is a question about what to do **when PR #6 lands**. A reviewer reading
+`P0-rulings.md` against a branch without the file will conclude the transfer already happened and the ruling is moot.
+It is not. The ruling now carries this note inline.
 
-## Suggested rename, for the owner to accept or reject
+## The same trap, generalised
 
-Renaming is cheap now and expensive after more documents cite these numbers, but it is a documentation change with
-in-flight references, so it needs an owner decision rather than being done unilaterally:
-
-- Rulings `R-1` to `R-10` become `P0-1` to `P0-10`. Distinct from every other scheme, and they already live under a
-  Phase 0 heading.
-- Milestones keep their historical names in `docs/phase-6/` but future ones are written `M7.1`, `M7.2`, so no milestone
-  is ever a bare "R" again.
-- ADR decision ids keep `D-n` but always carry their ADR: `ADR-0004 D-1`, never `D-1` alone. Two ADRs use `D-1`, which
-  is its own silent collision.
-
-Until a rename is accepted, this page is the reference.
+Every audit of this project so far reviewed a snapshot whose commit was unnamed, which is how three audits in a row
+reported a service-worker registration that both audits were right to miss and wrong to generalise. Before auditing,
+name the commit: `git archive <sha>` or a `PROVENANCE.md` inside the archive. See `docs/decisions/P0-rulings.md` and the
+archive shipped on 2026-11-08 (`af8bf97`).
