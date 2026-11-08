@@ -13,17 +13,27 @@
     "node": ">=20"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.runtime.json --noEmit && tsc -p tsconfig.browser.json --noEmit",
     "test": "vitest run",
-    "verify": "npm run typecheck && npm test && npm run fixtures:check && npm run corpus:check",
+    "verify": "npm run typecheck && npm run guard:identifiers && npm run guard:licences && npm run test:report && npm run tests:count:check && npm run fixtures:check && npm run corpus:check",
     "fixtures:freeze": "vite-node tools/freeze-fixtures.ts",
     "fixtures:check": "vite-node tools/freeze-fixtures.ts --check",
     "corpus:build": "vite-node tools/build-corpus.ts --write",
     "corpus:check": "vite-node tools/build-corpus.ts --check",
     "dev:browser": "vite",
     "build:browser": "vite build",
+    "build:browser:preview": "vite build --mode preview",
     "preview:browser": "vite preview",
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "deploy:plan": "vite-node tools/deploy/vercel.ts",
+    "deploy:apply": "vite-node tools/deploy/vercel.ts --apply",
+    "verify:deployment": "vite-node tools/verify/deployment.ts",
+    "test:report": "vitest run --reporter=default --reporter=json --outputFile=artifacts/test-report.json",
+    "tests:count": "vite-node tools/report/test-count.ts --write",
+    "tests:count:check": "vite-node tools/report/test-count.ts --check",
+    "guard:identifiers": "vite-node tools/checks/forbidden-identifiers.ts",
+    "guard:licences": "vite-node tools/checks/licences.ts",
+    "diff:event-loop": "vite-node tools/differential/event-loop.ts"
   },
   "devDependencies": {
     "@codemirror/lang-javascript": "^6.2.5",

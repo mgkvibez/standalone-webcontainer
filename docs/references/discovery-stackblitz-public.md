@@ -118,7 +118,7 @@ code can read the host's cookies, token storage and DOM.
 
 This is not a detail. ADR-0002 #5 chose the simple routing model and does not address origin
 separation; the charter says only the isolation rate justifies shipping user code, so this belongs in
-front of the expert before any preview is offered to a third party. Recorded as risk **R-1**, not
+front of the expert before any preview is offered to a third party. Recorded as risk **P0-1**, not
 acted on.
 
 ## 7. Take / refuse / defer
@@ -144,7 +144,7 @@ and is not in the public member list.
 
 ## 9. Questions this raises for the expert
 
-- **Q1 (R-1):** Do we adopt origin separation for user code now, or ship the same-origin preview and
+- **Q1 (P0-1):** Do we adopt origin separation for user code now, or ship the same-origin preview and
   document the risk? This decides whether ADR-0002 #5 needs revision before any preview ships.
 - **Q2:** Do we adopt StackBlitz's published conformance suite as the literal content of our 20
   slots, or keep slots open for our own cases?

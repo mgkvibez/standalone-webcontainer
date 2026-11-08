@@ -11,7 +11,7 @@
 
 import { defineConfig, devices } from "@playwright/test";
 
-const PORT = 5199;
+const PORT = Number(process.env["SWC_BROWSER_PORT"] ?? 5199);
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 
 export default defineConfig({

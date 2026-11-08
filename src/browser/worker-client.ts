@@ -103,9 +103,16 @@ export class WorkerRuntimeClient implements RuntimeClient {
   }
 
   /** Attach an origin-neutral request/reply channel to the active supervisor. The caller must attach a new port after a Worker reset. */
-  connectTransport(port: MessagePort): void {
+  connectTransport(port: MessagePort): number {
     const worker = this.#ensureWorker();
-    worker.postMessage({ type: "connect-transport", port }, [port]);
+    const id = this.#nextId++;
+    worker.postMessage({ type: "connect-transport", id, port }, [port]);
+    return id;
+  }
+
+  disconnectTransport(id: number): void {
+    if (this.#worker === null) return;
+    this.#worker.postMessage({ type: "disconnect-transport", id });
   }
 
   /** Stop in-memory servers without discarding the project's VFS or supervisor. */
@@ -116,7 +123,7 @@ export class WorkerRuntimeClient implements RuntimeClient {
   }
 
   #receive(message: ServerMessage): void {
-    if (message.type === "pong" || message.type === "servers-stopped") return;
+    if (message.type === "pong" || message.type === "servers-stopped" || message.type === "transport-disconnected") return;
     const pending = this.#pending.get(message.id);
     if (pending === undefined) return; // Late output from a killed run: dropped, never rendered.
 

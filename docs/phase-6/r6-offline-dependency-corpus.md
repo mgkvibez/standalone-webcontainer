@@ -1,5 +1,7 @@
 # R6: deterministic offline dependency installation — architecture proposal
 
+> **Naming.** "R6" here is milestone 6 of Phase 6, not the ruling `P0-6`. See `docs/decisions/NUMBERING.md`.
+
 Status: **proposal only, awaiting owner approval**. No runtime, harness, corpus or fixture file was changed for this
 document. Baseline: `4d1b661`, 575 tests, CI run 41871231038 (success). GATE_THRESHOLD 0.9, ADR-0009, ADR-0013,
 ADR-0014, ADR-0015 and fixtures 4/7/15 are untouched by it.

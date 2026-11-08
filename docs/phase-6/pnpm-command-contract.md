@@ -1,5 +1,7 @@
 # R2: pnpm command contract, for review
 
+> **Naming.** "R2" here is milestone 2 of Phase 6, not the ruling `P0-2`. See `docs/decisions/NUMBERING.md`.
+
 Status: **contract approved with amendments** (owner decisions below). Implementation not started. No pnpm support is implemented, `fixture-10.json` is untouched, and nothing here changes a
 classification. Baseline `ec9b6ea`, 511 tests.
 
