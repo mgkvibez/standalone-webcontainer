@@ -39,3 +39,7 @@ and port ownership is tracked, server stop preserves the project runtime, and a 
 A Chromium test runs the same lifecycle through the real Worker and transferred `MessagePort`. The full browser suite
 passed 19 tests. Typecheck and production browser build passed. The full unit suite had 668 passing tests and four known
 Windows/baseline failures documented in the previous P1c verification.
+
+> **Correction (2026-11-08).** Both figures are historical. The four failures no longer exist: the suite reports zero
+> failures, and the count is now generated from vitest's JSON report into the README by `tools/report/`, with
+> `verify` failing when the README and the suite disagree. Do not quote 668 as current.
