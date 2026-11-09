@@ -29,6 +29,7 @@ test("two processes run concurrently, so the host is no longer serialised", asyn
 
     const finished: { pid: number; state: string; exitCode?: number }[] = [];
     const host = new ProcessHost({
+      spawn: () => new Worker(blobUrl, { type: "module" }),
       onChange: (entry: { readonly pid: number; readonly state: string; readonly exitCode?: number }) => {
         if (entry.state === "exited" || entry.state === "failed" || entry.state === "killed") {
           finished.push({ pid: entry.pid, state: entry.state, ...(entry.exitCode === undefined ? {} : { exitCode: entry.exitCode }) });
@@ -37,8 +38,8 @@ test("two processes run concurrently, so the host is no longer serialised", asyn
     });
 
     const startedAt = Date.now();
-    host.start({ moduleUrl: blobUrl, argv: ["node", "a.js", "200"] });
-    host.start({ moduleUrl: blobUrl, argv: ["node", "b.js", "200"] });
+    host.start({ argv: ["node", "a.js", "200"] });
+    host.start({ argv: ["node", "b.js", "200"] });
 
     await new Promise<void>((resolve) => {
       const poll = setInterval(() => {
@@ -71,9 +72,9 @@ test("killing one process leaves the other running to completion", async ({ page
     const { ProcessHost } = await import(moduleUrl);
     const blobUrl = URL.createObjectURL(new Blob([workerSource], { type: "text/javascript" }));
 
-    const host = new ProcessHost();
-    const long = host.start({ moduleUrl: blobUrl, argv: ["node", "long.js", "4000"] });
-    const short = host.start({ moduleUrl: blobUrl, argv: ["node", "short.js", "120"] });
+    const host = new ProcessHost({ spawn: () => new Worker(blobUrl, { type: "module" }) });
+    const long = host.start({ argv: ["node", "long.js", "4000"] });
+    const short = host.start({ argv: ["node", "short.js", "120"] });
 
     await new Promise((resolve) => setTimeout(resolve, 30));
     const killed = host.kill(long.pid, "test kill");

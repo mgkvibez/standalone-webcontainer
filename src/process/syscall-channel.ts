@@ -243,66 +243,76 @@ export interface ServerEnd {
   readonly close: () => void;
 }
 
+/** Bytes reserved for the header, exported so tests and tools can address the payload regions. */
+export const CHANNEL_HEADER_BYTES = HEADER_BYTES;
+
+interface ServerCore {
+  /** Answer the request that is waiting. The caller only invokes this when the state says a request is pending. */
+  readonly answerOne: (handler: (request: unknown) => unknown) => true;
+  readonly header: Int32Array;
+  readonly state: () => number;
+  readonly close: () => void;
+}
+
 /**
- * The kernel side: waits for a request, hands it to a synchronous handler, publishes the answer.
+ * The state machine both serve paths share: publish an answer, expose the state word, close.
  *
- * The handler is called synchronously and its thrown error becomes a `SyscallRejectedError` on the caller's side. That
- * matters: an ENOENT must arrive as a rejected syscall with a code, not as a crashed kernel or a silent empty file.
+ * Extracted after the blocking and async paths drifted: the async one was fixed for one class of mistake and not another,
+ * which is exactly what happens to duplicated concurrency logic. The two loops below still differ, because one parks the
+ * thread and the other does not, but they now differ in one place instead of two.
  */
-export function serveChannel(
-  allocation: ChannelAllocation,
-  encoding: Encoding = jsonEncoding,
-): ServerEnd {
+function createServerCore(allocation: ChannelAllocation, encoding: Encoding): ServerCore {
   const { buffer, sizes } = allocation;
   const header = new Int32Array(buffer, 0, HEADER_INTS);
   const requestRegion = new Uint8Array(buffer, HEADER_BYTES, sizes.requestBytes);
   const responseRegion = new Uint8Array(buffer, HEADER_BYTES + sizes.requestBytes, sizes.responseBytes);
 
   const writeResponse = (sequence: number, payload: Uint8Array): void => {
-    if (payload.byteLength > responseRegion.byteLength) {
-      const tooLarge = textEncoder.encode(
-        JSON.stringify({ ok: false, error: { message: `response payload is ${payload.byteLength} bytes`, code: "ERESPTOOLARGE" } }),
-      );
-      responseRegion.set(tooLarge.subarray(0, responseRegion.byteLength));
-      Atomics.store(header, IDX_RESPONSE_LENGTH, Math.min(tooLarge.byteLength, responseRegion.byteLength));
-    } else {
-      responseRegion.set(payload);
-      Atomics.store(header, IDX_RESPONSE_LENGTH, payload.byteLength);
-    }
+    const fits = payload.byteLength <= responseRegion.byteLength;
+    const body = fits
+      ? payload
+      : textEncoder.encode(
+          JSON.stringify({
+            ok: false,
+            error: { message: `response payload is ${payload.byteLength} bytes`, code: "ERESPTOOLARGE" },
+          }),
+        );
+    responseRegion.set(fits ? body : body.subarray(0, responseRegion.byteLength));
+    Atomics.store(header, IDX_RESPONSE_LENGTH, Math.min(body.byteLength, responseRegion.byteLength));
     Atomics.store(header, IDX_SEQUENCE, sequence);
     Atomics.store(header, IDX_STATE, CHANNEL_STATE.responsePending);
     Atomics.notify(header, IDX_STATE);
   };
 
-  return {
-    serveOne: (handler, options) => {
-      const state = Atomics.load(header, IDX_STATE);
-      if (state === CHANNEL_STATE.closed) return false;
-      if (state !== CHANNEL_STATE.requestPending) {
-        const outcome = Atomics.wait(header, IDX_STATE, state, options.timeoutMs);
-        if (outcome === "timed-out") return false;
-        if (Atomics.load(header, IDX_STATE) === CHANNEL_STATE.closed) return false;
-      }
-
-      const sequence = Atomics.load(header, IDX_SEQUENCE);
-      const length = Atomics.load(header, IDX_REQUEST_LENGTH);
-      if (length > requestRegion.byteLength) {
-        writeResponse(sequence, textEncoder.encode(JSON.stringify({ ok: false, error: { message: "request length exceeds region", code: "EREQTOOLARGE" } })));
-        return true;
-      }
-
-      let answer: Uint8Array;
-      try {
-        const request = encoding.decode(requestRegion.slice(0, length));
-        answer = encoding.encode({ ok: true, value: handler(request) });
-      } catch (error) {
-        const err = error as { message?: string; code?: string };
-        answer = encoding.encode({ ok: false, error: { message: err.message ?? String(error), code: err.code ?? "EUNKNOWN" } });
-      }
-      writeResponse(sequence, answer);
+  const answerOne = (handler: (request: unknown) => unknown): true => {
+    const sequence = Atomics.load(header, IDX_SEQUENCE);
+    const length = Atomics.load(header, IDX_REQUEST_LENGTH);
+    if (length > requestRegion.byteLength) {
+      writeResponse(
+        sequence,
+        textEncoder.encode(
+          JSON.stringify({ ok: false, error: { message: "request length exceeds region", code: "EREQTOOLARGE" } }),
+        ),
+      );
       return true;
-    },
-    closed: () => Atomics.load(header, IDX_STATE) === CHANNEL_STATE.closed,
+    }
+
+    let answer: Uint8Array;
+    try {
+      const request = encoding.decode(requestRegion.slice(0, length));
+      answer = encoding.encode({ ok: true, value: handler(request) });
+    } catch (error) {
+      const err = error as { message?: string; code?: string };
+      answer = encoding.encode({ ok: false, error: { message: err.message ?? String(error), code: err.code ?? "EUNKNOWN" } });
+    }
+    writeResponse(sequence, answer);
+    return true;
+  };
+
+  return {
+    answerOne,
+    header,
+    state: () => Atomics.load(header, IDX_STATE),
     close: () => {
       Atomics.store(header, IDX_STATE, CHANNEL_STATE.closed);
       Atomics.notify(header, IDX_STATE);
@@ -310,8 +320,35 @@ export function serveChannel(
   };
 }
 
-/** Bytes reserved before the payload regions: exposed for tests that assert the layout rather than trusting it. */
-export const CHANNEL_HEADER_BYTES = HEADER_BYTES;
+/**
+ * The kernel side: waits for a request, hands it to a synchronous handler, publishes the answer.
+ *
+ * The handler is called synchronously and its thrown error becomes a `SyscallRejectedError` on the caller's side. That
+ * matters: an ENOENT must arrive as a rejected syscall with a code, not as a crashed kernel or a silent empty file.
+ */
+export function serveChannel(allocation: ChannelAllocation, encoding: Encoding = jsonEncoding): ServerEnd {
+  const core = createServerCore(allocation, encoding);
+
+  return {
+    serveOne: (handler, options) => {
+      const deadline = Date.now() + options.timeoutMs;
+      for (;;) {
+        const state = core.state();
+        if (state === CHANNEL_STATE.closed) return false;
+        if (state === CHANNEL_STATE.requestPending) return core.answerOne(handler);
+
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return false;
+        // Re-read the state on every iteration rather than assuming the wake-up meant "a request is pending". A wait also
+        // ends when the state moves somewhere we still cannot serve, such as an answer the caller has not consumed yet;
+        // treating that as work re-answers the previous request and desynchronises the pair.
+        Atomics.wait(core.header, IDX_STATE, state, remaining);
+      }
+    },
+    closed: () => core.state() === CHANNEL_STATE.closed,
+    close: core.close,
+  };
+}
 
 export interface AsyncServerEnd {
   /**
@@ -338,20 +375,23 @@ export async function serveChannelAsync(
   allocation: ChannelAllocation,
   encoding: Encoding = jsonEncoding,
 ): Promise<AsyncServerEnd> {
-  const { buffer, sizes } = allocation;
-  const header = new Int32Array(buffer, 0, HEADER_INTS);
-  const requestRegion = new Uint8Array(buffer, HEADER_BYTES, sizes.requestBytes);
-  const responseRegion = new Uint8Array(buffer, HEADER_BYTES + sizes.requestBytes, sizes.responseBytes);
+  const core = createServerCore(allocation, encoding);
 
-  const waitAsync = (Atomics as unknown as {
-    waitAsync?: (array: Int32Array, index: number, value: number, timeout?: number) => { readonly async: boolean; readonly value: unknown };
-  }).waitAsync;
+  const waitAsync = (
+    Atomics as unknown as {
+      waitAsync?: (
+        array: Int32Array,
+        index: number,
+        value: number,
+        timeout?: number,
+      ) => { readonly async: boolean; readonly value: unknown };
+    }
+  ).waitAsync;
 
   const settle = async (expected: number, timeoutMs: number): Promise<boolean> => {
-    const current = Atomics.load(header, IDX_STATE);
-    if (current !== expected) return true;
+    if (core.state() !== expected) return true;
     if (waitAsync !== undefined) {
-      const outcome = waitAsync(header, IDX_STATE, expected, timeoutMs);
+      const outcome = waitAsync(core.header, IDX_STATE, expected, timeoutMs);
       if (!outcome.async) return outcome.value !== "timed-out";
       const value = await (outcome.value as Promise<string>);
       return value !== "timed-out";
@@ -359,59 +399,26 @@ export async function serveChannelAsync(
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       await microSleep(1);
-      if (Atomics.load(header, IDX_STATE) !== expected) return true;
+      if (core.state() !== expected) return true;
     }
     return false;
   };
 
-  const writeResponse = (sequence: number, payload: Uint8Array): void => {
-    const fits = payload.byteLength <= responseRegion.byteLength;
-    const body = fits
-      ? payload
-      : textEncoder.encode(
-          JSON.stringify({ ok: false, error: { message: `response payload is ${payload.byteLength} bytes`, code: "ERESPTOOLARGE" } }),
-        );
-    responseRegion.set(fits ? body : body.subarray(0, responseRegion.byteLength));
-    Atomics.store(header, IDX_RESPONSE_LENGTH, Math.min(body.byteLength, responseRegion.byteLength));
-    Atomics.store(header, IDX_SEQUENCE, sequence);
-    Atomics.store(header, IDX_STATE, CHANNEL_STATE.responsePending);
-    Atomics.notify(header, IDX_STATE);
-  };
-
   return {
     serveOne: async (handler, options) => {
-      const state = Atomics.load(header, IDX_STATE);
-      if (state === CHANNEL_STATE.closed) return false;
-      // Only wait when there is nothing to do yet. `settle` waits *while* the state equals what was read, so passing a
-      // pending-request state would wait for the very thing it was handed and time out on work that was already there.
-      if (state !== CHANNEL_STATE.requestPending) {
-        const changed = await settle(state, options.timeoutMs);
-        if (!changed) return false;
-        if (Atomics.load(header, IDX_STATE) === CHANNEL_STATE.closed) return false;
-      }
+      const deadline = Date.now() + options.timeoutMs;
+      for (;;) {
+        const state = core.state();
+        if (state === CHANNEL_STATE.closed) return false;
+        if (state === CHANNEL_STATE.requestPending) return core.answerOne(handler);
 
-      const sequence = Atomics.load(header, IDX_SEQUENCE);
-      const length = Atomics.load(header, IDX_REQUEST_LENGTH);
-      if (length > requestRegion.byteLength) {
-        writeResponse(sequence, textEncoder.encode(JSON.stringify({ ok: false, error: { message: "request length exceeds region", code: "EREQTOOLARGE" } })));
-        return true;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return false;
+        // Same rule as the blocking path: a wake-up is not a promise that a request is waiting.
+        if (!(await settle(state, remaining))) return false;
       }
-
-      let answer: Uint8Array;
-      try {
-        const request = encoding.decode(requestRegion.slice(0, length));
-        answer = encoding.encode({ ok: true, value: handler(request) });
-      } catch (error) {
-        const err = error as { message?: string; code?: string };
-        answer = encoding.encode({ ok: false, error: { message: err.message ?? String(error), code: err.code ?? "EUNKNOWN" } });
-      }
-      writeResponse(sequence, answer);
-      return true;
     },
-    closed: () => Atomics.load(header, IDX_STATE) === CHANNEL_STATE.closed,
-    close: () => {
-      Atomics.store(header, IDX_STATE, CHANNEL_STATE.closed);
-      Atomics.notify(header, IDX_STATE);
-    },
+    closed: () => core.state() === CHANNEL_STATE.closed,
+    close: core.close,
   };
 }
