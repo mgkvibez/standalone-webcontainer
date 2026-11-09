@@ -27,6 +27,8 @@ import type { WatchSourcePort } from "../vfs/port.js";
 import { Duplex, PassThrough, pipeline, Readable, Transform, Writable } from "../shims/stream.js";
 import { path } from "../shims/path.js";
 import { createProcessShim, createSink, ProcessExit, type ProcessShim } from "../shims/process.js";
+import { createTtyShim } from "../shims/tty.js";
+import type { Terminal } from "../terminal/pty.js";
 import { TickQueue } from "./ticks.js";
 import {
   installDependencies,
@@ -56,6 +58,17 @@ export interface RunOptions {
   readonly cwd?: string;
   readonly argv?: readonly string[];
   readonly env?: Readonly<Record<string, string>>;
+  /**
+   * The terminal this program talks to, if it has one.
+   *
+   * Absent by default, and that absence is meaningful: a fixture, a test and a piped worker all run with
+   * `process.stdin === null` and `tty.isatty()` false, which is the truthful answer for a program with no terminal. Passing
+   * one makes `process.stdin`, `process.stdout.isTTY`, `process.stdout.columns` and the resize/interrupt signals real.
+   *
+   * The terminal is owned by the CALLER, not by the run: a UI keeps one across many programs, so its size and its buffered
+   * input survive the exit of the program that was reading them.
+   */
+  readonly terminal?: Terminal;
 }
 
 /**
@@ -217,6 +230,7 @@ export class InProcessRuntime implements Runtime {
     const stderr = createSink(onOutput === undefined ? undefined : (text) => onOutput("stderr", text));
     const cwd = options.cwd ?? "/";
     const ticks = new TickQueue();
+    const terminal = options.terminal ?? null;
     const processShim: ProcessShim = createProcessShim({
       argv: options.argv !== undefined ? [...options.argv] : ["node", entryPath],
       cwd,
@@ -224,6 +238,7 @@ export class InProcessRuntime implements Runtime {
       stdout,
       stderr,
       ticks,
+      terminal,
     });
 
     // One scheduler per execution, created before any user code runs: its construction is the wall-clock baseline both
@@ -277,6 +292,9 @@ export class InProcessRuntime implements Runtime {
         // ADR-0015's six classes plus pipeline. Real behaviour, not import-only stubs: fixture 4 fails on this import alone,
         // and a stub would turn four honest failures into four unexplained ones.
         stream: { Readable, Writable, Duplex, Transform, PassThrough, pipeline },
+        // Built from THIS run's terminal, so `tty.isatty(1)` answers about the terminal the program actually has rather than a
+        // module-level guess. With no terminal every fd answers false, which is what Node reports for a pipe.
+        tty: createTtyShim(terminal),
         // A per-runtime facade rather than the module itself: `createServer` must bind into THIS runtime's
         // registry and attach to THIS runtime's gateway, or a script's server would listen and never be
         // routable. Exported classes are passed through so `instanceof` still works for user code.
@@ -388,6 +406,10 @@ export class InProcessRuntime implements Runtime {
         exitCode = 1;
       }
     }
+
+    // The program is over; its signal listeners go with it. The terminal stays (the caller owns it) but nothing from this run
+    // is still attached to it, so the next resize cannot re-enter a scheduler that has already drained.
+    processShim.dispose();
 
     return {
       stdout: stdout.text,
