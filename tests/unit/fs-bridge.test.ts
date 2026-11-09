@@ -9,7 +9,7 @@
 import { describe, expect, it } from "vitest";
 import { FileSystem } from "../../src/vfs/index.js";
 import { createFsSyscallHandler, FileSystemSyscallError, type FsResponse } from "../../src/process/fs-syscalls.js";
-import { createRemoteFileSystem, type SyscallTransport } from "../../src/process/remote-fs.js";
+import { createRemoteFileSystem, DEFAULT_SYSCALL_TIMEOUT_MS, type SyscallTransport } from "../../src/process/remote-fs.js";
 
 /** Stands in for the channel: same envelope, same code-preserving rejection, no Atomics. */
 const transportOver = (fs: FileSystem): SyscallTransport => {
@@ -134,5 +134,61 @@ describe("filesystem bridge", () => {
     await expect(remote.readdir("/")).resolves.toContain("pd");
     await remote.unlink("/p2.txt");
     await expect(remote.readdir("/")).resolves.not.toContain("p2.txt");
+  });
+});
+
+/**
+ * The deadline contract.
+ *
+ * These exist because the fake transport above takes `(request)` — a structurally valid `SyscallTransport` — so it silently
+ * dropped the second argument. The real client reads `options.timeoutMs` and threw `TypeError` on `undefined`, which meant a
+ * port built without options worked in every unit test and failed on the first read in a browser. A double that accepts fewer
+ * parameters than the interface hides exactly this class of bug.
+ */
+describe("every syscall carries a deadline", () => {
+  const recording = (fs: FileSystem, seen: Array<number | undefined>): SyscallTransport => {
+    const handler = createFsSyscallHandler(fs);
+    return {
+      call(request, options): FsResponse {
+        seen.push(options?.timeoutMs);
+        return handler(request);
+      },
+    };
+  };
+
+  it("defaults to a positive deadline when the caller chooses none", () => {
+    const fs = new FileSystem();
+    const seen: Array<number | undefined> = [];
+    fs.writeFileSync("/a.txt", "a");
+    const remote = createRemoteFileSystem(recording(fs, seen), {});
+    expect(remote.readFileSync("/a.txt", "utf8")).toBe("a");
+    expect(seen).toEqual([DEFAULT_SYSCALL_TIMEOUT_MS]);
+    expect(DEFAULT_SYSCALL_TIMEOUT_MS).toBeGreaterThan(0);
+  });
+
+  it("honours an explicit deadline", () => {
+    const fs = new FileSystem();
+    const seen: Array<number | undefined> = [];
+    fs.writeFileSync("/a.txt", "a");
+    const remote = createRemoteFileSystem(recording(fs, seen), { timeoutMs: 1234 });
+    remote.readFileSync("/a.txt", "utf8");
+    expect(seen).toEqual([1234]);
+  });
+
+  it("never hands the transport an undefined options object", () => {
+    const fs = new FileSystem();
+    fs.writeFileSync("/a.txt", "a");
+    const strictHandler = createFsSyscallHandler(fs);
+    // The real client's shape: it dereferences options.timeoutMs before doing anything, so undefined is a crash.
+    const strict: SyscallTransport = {
+      call(request, options): FsResponse {
+        if (options === undefined) throw new TypeError("Cannot read properties of undefined (reading 'timeoutMs')");
+        const deadline = options?.timeoutMs ?? 0;
+        if (!(deadline > 0)) throw new RangeError("A syscall needs a positive deadline.");
+        return strictHandler(request);
+      },
+    };
+    const remote = createRemoteFileSystem(strict);
+    expect(remote.readFileSync("/a.txt", "utf8")).toBe("a");
   });
 });

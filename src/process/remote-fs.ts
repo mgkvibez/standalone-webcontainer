@@ -23,12 +23,23 @@ export interface RemoteFileSystemOptions {
   readonly timeoutMs?: number;
 }
 
+/**
+ * Deadline for a syscall when the caller does not choose one.
+ *
+ * Every call must carry a deadline — an un-deadlined wait on a kernel that died is a hang, which is the failure mode this
+ * whole channel exists to avoid — so an omitted option means "the default", never "no deadline". Omitting it used to pass
+ * `undefined` into `SyscallClient.call`, which threw `TypeError: Cannot read properties of undefined (reading 'timeoutMs')`
+ * on the first read: a port that built cleanly and failed on use.
+ */
+export const DEFAULT_SYSCALL_TIMEOUT_MS = 5_000;
+
 export function createRemoteFileSystem(
   transport: SyscallTransport,
   options: RemoteFileSystemOptions = {},
 ): FileSystemPort {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_SYSCALL_TIMEOUT_MS;
   const send = (request: FsRequest): FsResponse => {
-    const answer = transport.call(request, options.timeoutMs === undefined ? undefined : { timeoutMs: options.timeoutMs });
+    const answer = transport.call(request, { timeoutMs });
     if (typeof answer !== "object" || answer === null || typeof (answer as { kind?: unknown }).kind !== "string") {
       throw new Error("filesystem syscall returned a response the client does not understand");
     }
