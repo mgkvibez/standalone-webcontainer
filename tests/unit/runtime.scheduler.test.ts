@@ -323,3 +323,84 @@ describe("the queue itself", () => {
     expect(scheduler.timeOrigin).toBeLessThanOrEqual(baseline);
   });
 });
+
+describe("14. ref and unref decide whether the loop stays alive (ADR-0013 amendment 3)", () => {
+  // Node is the oracle for every case here; `npm run diff:event-loop` asks it directly. These tests exist so a regression
+  // fails in the suite, without needing Node to be the judge on every run.
+  it("does not fire an unref'd timer when nothing else keeps the loop alive", async () => {
+    const result = await runScript(
+      [`const timer = setTimeout(() => console.log("late"), 50);`, `timer.unref();`, `console.log("sync");`].join("\n"),
+    );
+    expect(lines(result.stdout)).toEqual(["sync"]);
+    expect(result.scheduler.stop).toBe("no-refs-left");
+    expect(result.scheduler.refsExhausted).toBe(true);
+    expect(result.scheduler.unrefPending).toBe(1);
+    // Not a guard: the program asked for this, so a fixture that does it is behaving, not being truncated.
+    expect(result.scheduler.guarded).toBe(false);
+  });
+
+  it("still fires an unref'd timer when a ref'd timer keeps the loop alive past it", async () => {
+    const result = await runScript(
+      [
+        `const order = [];`,
+        `const early = setTimeout(() => order.push("unref"), 10);`,
+        `early.unref();`,
+        `setTimeout(() => console.log(order.join(",")), 20);`,
+      ].join("\n"),
+    );
+    expect(lines(result.stdout)).toEqual(["unref"]);
+    expect(result.scheduler.stop).toBe("queue-empty");
+  });
+
+  it("reports hasRef() accurately, including after the timer has fired", async () => {
+    const result = await runScript(
+      [
+        `const timer = setTimeout(() => {}, 10);`,
+        `const before = timer.hasRef();`,
+        `timer.unref();`,
+        `const after = timer.hasRef();`,
+        `timer.ref();`,
+        `const again = timer.hasRef();`,
+        `setTimeout(() => console.log(before, after, again, timer.hasRef()), 20);`,
+      ].join("\n"),
+    );
+    // The last value is read after the first timer fired: a dead timer holds no ref, as in Node.
+    expect(lines(result.stdout)).toEqual(["true false true false"]);
+  });
+
+  it("does not tick an unref'd interval when nothing else is pending", async () => {
+    const result = await runScript(
+      [`const interval = setInterval(() => console.log("tick"), 5);`, `interval.unref();`, `console.log("sync");`].join("\n"),
+    );
+    expect(lines(result.stdout)).toEqual(["sync"]);
+    expect(result.scheduler.stop).toBe("no-refs-left");
+  });
+
+  it("keeps a timer alive when a ref'd timer is scheduled from inside an unref'd callback", async () => {
+    const result = await runScript(
+      [
+        `const first = setTimeout(() => {`,
+        `  console.log("first");`,
+        `  setTimeout(() => console.log("chained"), 5);`,
+        `}, 5);`,
+        `first.unref();`,
+        // The ref'd timer is what keeps the loop alive, so the unref'd one still runs and can chain.
+        `setTimeout(() => {}, 20);`,
+      ].join("\n"),
+    );
+    expect(lines(result.stdout)).toEqual(["first", "chained"]);
+  });
+
+  it("treats clearing an unref'd timer as a silent no-op", async () => {
+    const result = await runScript(
+      [
+        `const timer = setTimeout(() => console.log("should not print"), 10);`,
+        `timer.unref();`,
+        `clearTimeout(timer);`,
+        `console.log(timer.hasRef());`,
+      ].join("\n"),
+    );
+    expect(lines(result.stdout)).toEqual(["false"]);
+    expect(result.scheduler.stop).toBe("queue-empty");
+  });
+});

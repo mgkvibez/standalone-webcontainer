@@ -30,7 +30,13 @@ export interface SchedulerLimits {
 }
 
 /** Why draining stopped. Exactly one applies to any execution. */
-export type SchedulerStop = "queue-empty" | "budget-exhausted" | "callback-limit" | "real-time-limit";
+export type SchedulerStop =
+  | "queue-empty"
+  | "budget-exhausted"
+  | "callback-limit"
+  | "real-time-limit"
+  /** Every timer left is unref'd, so nothing keeps the loop alive: Node exits here and the timers never fire. */
+  | "no-refs-left";
 
 export interface SchedulerEvidence {
   readonly stop: SchedulerStop;
@@ -47,6 +53,13 @@ export interface SchedulerEvidence {
   readonly callbackErrors: number;
   /** True when a guard, rather than the program, ended draining. Must never be scored as the program's behaviour. */
   readonly guarded: boolean;
+  /**
+   * Timers left pending because they were unref'd and nothing ref'd kept the loop alive to reach them. Not a guard: the
+   * program asked for this by unref'ing, which is how a program says "do not wait for me".
+   */
+  readonly unrefPending: number;
+  /** Whether draining stopped with no ref'd handle left. `true` is Node's "the loop has nothing to live for". */
+  readonly refsExhausted: boolean;
 }
 
 /** What user code receives from `setTimeout`/`setInterval`: clearable, and combinable with `clearTimeout`. */
@@ -68,6 +81,10 @@ interface Entry {
   readonly intervalMs: number;
   fires: number;
   readonly maxFires: number;
+  /** `true` while this entry can still fire. `hasRef()` on a fired or cleared timer is false, as in Node. */
+  live: boolean;
+  /** Ref'd entries keep the loop alive. `unref()` turns this off without cancelling the timer. */
+  refed: boolean;
 }
 
 /** Two microtask hops: one lets the first continuation run, two let a continuation that queues another continuation run. */
@@ -88,6 +105,7 @@ export class Scheduler {
   #nextId = 1;
   #queue: Entry[] = [];
   #intervalsTruncated = 0;
+  #unrefPending = 0;
   /** Totals across every drain pass, so the callback guard bounds the WHOLE execution rather than one pass. */
   #callbacks = 0;
   #callbackErrors = 0;
@@ -140,7 +158,11 @@ export class Scheduler {
     const id = typeof handleOrId === "number" ? handleOrId : handleOrId.id;
     const index = this.#queue.findIndex((entry) => entry.id === id);
     // Clearing twice, or clearing something that never existed, is a no-op rather than an error, as in Node.
-    if (index >= 0) this.#queue.splice(index, 1);
+    if (index >= 0) {
+      const removed = this.#queue[index];
+      if (removed !== undefined) removed.live = false;
+      this.#queue.splice(index, 1);
+    }
   }
 
   /** Entries still scheduled. Exposed for tests and evidence, not for user code. */
@@ -185,6 +207,8 @@ export class Scheduler {
       // A truncated interval is also a guard: the program did not finish, our per-interval cap finished it. Leaving it out
       // made a 0 ms interval storm report guarded=false, which reads as a clean run.
       guarded: stop === "callback-limit" || stop === "real-time-limit" || this.#intervalsTruncated > 0,
+      unrefPending: this.#unrefPending,
+      refsExhausted: stop === "no-refs-left",
     });
     return this.#evidence;
   }
@@ -201,6 +225,17 @@ export class Scheduler {
       }
       // A timer past the budget is deferred, never silently dropped: silence is indistinguishable from a callback that
       // never fired, and the difference matters when a fixture is scored.
+      // Node's rule: an unref'd timer still fires when a ref'd handle keeps the loop alive past its due time, but it never
+      // keeps the loop alive itself. So the loop is only dead when the next entry is unref'd AND nothing ref'd is due at
+      // or before it. Reachable-but-later unref'd timers fire normally.
+      const refDue = this.#earliestRefDue();
+      // `refDue === Infinity` needs its own test: with no ref'd entry left, `due > Infinity` is false, so the comparison
+      // alone would fire exactly the timers this rule exists to skip.
+      if (!next.refed && (refDue === Infinity || next.due > refDue)) {
+        stop = "no-refs-left";
+        this.#unrefPending = this.#queue.length;
+        break;
+      }
       if (next.due > this.#budgetMs) {
         stop = "budget-exhausted";
         break;
@@ -215,6 +250,7 @@ export class Scheduler {
       }
 
       this.#remove(next.id);
+      next.live = false;
       // Capture the instant this callback is FOR before rescheduling the interval. Reading `next.due` after the reschedule
       // put the clock one period ahead, so `Date.now()` inside an interval callback reported the NEXT tick: a bug a test
       // caught only because it asserted the elapsed virtual time and not just the output.
@@ -226,6 +262,7 @@ export class Scheduler {
         } else {
           next.due = fireAt + (next.intervalMs === 0 ? 0 : next.intervalMs);
           next.seq = this.#seq++;
+          next.live = true;
           this.#queue.push(next);
         }
       }
@@ -261,6 +298,8 @@ export class Scheduler {
         intervalsTruncated: this.#intervalsTruncated,
         callbackErrors: 0,
         guarded: false,
+        unrefPending: 0,
+        refsExhausted: false,
       }
     );
   }
@@ -285,16 +324,25 @@ export class Scheduler {
       intervalMs: safeDelay,
       fires: 0,
       maxFires: kind === "interval" ? Math.max(1, perIntervalCap) : 1,
+      live: true,
+      refed: true,
     };
     this.#queue.push(entry);
+    // Real ref semantics, not the stubs that were here. A library that unref's its keep-alive timer expects the process to
+    // be able to exit; reporting `hasRef() === true` forever and then draining the timer anyway meant a program that Node
+    // exits immediately kept running here and produced output Node never prints.
     const handle: TimerHandle = {
       id,
       kind,
-      ref: () => handle,
-      // The host stays alive regardless; the methods exist because real libraries call them and a missing `unref` is a
-      // TypeError in code that would otherwise work.
-      unref: () => handle,
-      hasRef: () => true,
+      ref: () => {
+        entry.refed = true;
+        return handle;
+      },
+      unref: () => {
+        entry.refed = false;
+        return handle;
+      },
+      hasRef: () => entry.refed && entry.live,
     };
     return handle;
   }
@@ -306,6 +354,13 @@ export class Scheduler {
       if (best === undefined || entry.due < best.due || (entry.due === best.due && entry.seq < best.seq)) best = entry;
     }
     return best;
+  }
+
+  /** Due time of the earliest ref'd entry, or `Infinity` when every remaining timer is unref'd. */
+  #earliestRefDue(): number {
+    let due = Infinity;
+    for (const entry of this.#queue) if (entry.refed && entry.due < due) due = entry.due;
+    return due;
   }
 
   #remove(id: number): void {

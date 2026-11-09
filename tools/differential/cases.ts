@@ -100,4 +100,55 @@ export const CASES: readonly DifferentialCase[] = [
       "setTimeout(() => console.log(out.join(',')), 5);",
     ].join("\n"),
   },
+  // ref/unref (ADR-0013 amendment 3). Every case here asks the same question in a different shape: does an unref'd timer
+  // keep the loop alive? Node's answer is no, and until now this runtime's stubs made it yes.
+  {
+    id: "unref-alone-never-fires",
+    question: "does an unref'd timer fire when nothing else keeps the loop alive?",
+    source: ["const timer = setTimeout(() => console.log('late'), 50);", "timer.unref();", "console.log('sync');"].join("\n"),
+  },
+  {
+    id: "unref-before-ref",
+    question: "does an unref'd timer still fire when a ref'd timer keeps the loop alive past its due time?",
+    source: [
+      "const order = [];",
+      "const early = setTimeout(() => order.push('unref'), 10);",
+      "early.unref();",
+      "setTimeout(() => console.log(order.join(',')), 20);",
+    ].join("\n"),
+  },
+  {
+    id: "hasref-toggles",
+    question: "does hasRef() follow ref() and unref()?",
+    source: [
+      "const timer = setTimeout(() => {}, 10);",
+      "const before = timer.hasRef();",
+      "timer.unref();",
+      "const after = timer.hasRef();",
+      "timer.ref();",
+      "const again = timer.hasRef();",
+      "clearTimeout(timer);",
+      "console.log(before, after, again);",
+    ].join("\n"),
+  },
+  {
+    id: "unref-interval-never-ticks",
+    question: "does an unref'd interval tick when nothing else is pending?",
+    source: ["const interval = setInterval(() => console.log('tick'), 5);", "interval.unref();", "console.log('sync');"].join("\n"),
+  },
+  {
+    id: "clear-unref-is-quiet",
+    question: "is clearing an unref'd timer a silent no-op?",
+    source: [
+      "const timer = setTimeout(() => console.log('should not print'), 10);",
+      "timer.unref();",
+      "clearTimeout(timer);",
+      "console.log('cleared');",
+    ].join("\n"),
+  },
+  {
+    id: "unref-immediate",
+    question: "does an unref'd setImmediate run when nothing else is pending?",
+    source: ["const immediate = setImmediate(() => console.log('immediate'));", "immediate.unref();", "console.log('sync');"].join("\n"),
+  },
 ];
