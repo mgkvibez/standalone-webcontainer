@@ -22,11 +22,23 @@ export const DEFAULT_VIRTUAL_BUDGET_MS = 1_000;
 export const DEFAULT_MAX_CALLBACKS = 10_000;
 /** Real milliseconds per execution. Bounds microtask storms and pathological synchronous callbacks. */
 export const DEFAULT_MAX_REAL_MS = 5_000;
+/** How often a drain with outstanding handles checks whether anything happened. Real milliseconds. */
+export const DEFAULT_KEEP_ALIVE_POLL_MS = 10;
 
 export interface SchedulerLimits {
   readonly budgetMs?: number;
   readonly maxCallbacks?: number;
   readonly maxRealMs?: number;
+  /**
+   * How many live handles are still waiting on something the timer queue cannot see, such as an open filesystem watcher.
+   *
+   * Node exits when the loop empties, and an open watcher is a ref'd handle, so a program that watches stays alive. Without
+   * this the loop would finish the instant a program stopped scheduling timers, and a watcher would be silently pointless.
+   * The count is polled rather than pushed: the scheduler owns no knowledge of what a handle is.
+   */
+  readonly keepAlive?: () => number;
+  /** How long to wait between checks while handles are outstanding. Real milliseconds, not virtual. */
+  readonly keepAlivePollMs?: number;
 }
 
 /** Why draining stopped. Exactly one applies to any execution. */
@@ -111,6 +123,8 @@ export class Scheduler {
   #callbackErrors = 0;
   #evidence: SchedulerEvidence | null = null;
   readonly #onCallbackError: ((error: unknown) => void) | undefined;
+  readonly #keepAlive: (() => number) | undefined;
+  readonly #keepAlivePollMs: number;
 
   constructor(limits: SchedulerLimits = {}, onCallbackError?: (error: unknown) => void) {
     this.#budgetMs = limits.budgetMs ?? DEFAULT_VIRTUAL_BUDGET_MS;
@@ -119,6 +133,8 @@ export class Scheduler {
     this.#baselineEpoch = Date.now();
     this.#realStart = Date.now();
     this.#onCallbackError = onCallbackError;
+    this.#keepAlive = limits.keepAlive;
+    this.#keepAlivePollMs = limits.keepAlivePollMs ?? DEFAULT_KEEP_ALIVE_POLL_MS;
   }
 
   /** Virtual elapsed scheduled time, from 0. What `performance.now()` reports. */
@@ -193,7 +209,22 @@ export class Scheduler {
       if (pass !== "queue-empty") break;
       // Let continuations run, then look again: they may have scheduled more work.
       await drainContinuations();
-      if (this.#queue.length === 0) break;
+      if (this.#queue.length === 0) {
+        // Nothing to run, but an open handle may still be waiting on the outside world: stay alive, re-check, and let the
+        // real-time guard end a program that watches forever rather than exiting behind its back.
+        const outstanding = this.#keepAlive === undefined ? 0 : this.#keepAlive();
+        if (outstanding > 0) {
+          if (Date.now() - this.#realStart > this.#maxRealMs) {
+            stop = "real-time-limit";
+            break;
+          }
+          await new Promise((resolve) => {
+            setTimeout(resolve, this.#keepAlivePollMs);
+          });
+          continue;
+        }
+        break;
+      }
     }
 
     this.#evidence = Object.freeze({
