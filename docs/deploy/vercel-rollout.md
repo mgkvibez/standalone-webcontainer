@@ -85,7 +85,7 @@ Asserts, against the real origins:
 - neither origin sends `X-Frame-Options` or CSP `frame-ancestors`
 - the shell document answers 200 on `<previewId>.<preview base>`
 - the preview origin differs from the editor origin, by host
-- existing COOP/COEP state is **reported, not changed**
+- COOP/COEP are **expected** on both origins; missing ones fail the check
 
 It prints `PASS`/`FAIL` per check and exits non-zero on any failure.
 
@@ -97,9 +97,11 @@ the preview frame renders and the Worker's HTTP server answers.
 
 ## What this rollout deliberately does not do
 
-- **No COOP/COEP.** Nothing shipped today needs `SharedArrayBuffer`, and `COEP: require-corp` would break the preview
-  iframe unless every subresource carried CORP. Adding it is a separate decision with its own consequences, so the
-  current policy (none) is preserved and reported.
+- **COOP/COEP are now shipped, not deferred.** `require-corp` on the editor, the preview host and the documents the
+  preview service worker serves, plus CORP `cross-origin` on everything that worker returns. Two consequences worth
+  knowing before changing it: any cross-origin subresource added later needs CORP or CORS, and a preview document that
+  the worker serves without COOP/COEP is blocked outright (`net::ERR_BLOCKED_BY_RESPONSE`) inside the isolated shell,
+  which looks like an empty frame with no error in the page. The browser lane pins both.
 - **No frame restrictions.** The editor must be able to embed the shell, so neither `X-Frame-Options` nor
   `frame-ancestors` may be introduced.
 - **No DNS changes.** Not one record has been read or written from this environment.
