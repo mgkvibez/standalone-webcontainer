@@ -312,3 +312,106 @@ export function serveChannel(
 
 /** Bytes reserved before the payload regions: exposed for tests that assert the layout rather than trusting it. */
 export const CHANNEL_HEADER_BYTES = HEADER_BYTES;
+
+export interface AsyncServerEnd {
+  /**
+   * Wait for one request and answer it, without blocking the calling thread.
+   *
+   * A kernel Worker serves many processes, so it cannot afford the blocking `Atomics.wait` that the caller side needs: it
+   * would be unable to answer process B while waiting on process A. `Atomics.waitAsync` returns instead of parking the
+   * thread, which lets one kernel hold several pending waits at once.
+   */
+  serveOne: (handler: (request: unknown) => unknown, options: ServeOptions) => Promise<boolean>;
+  readonly closed: () => boolean;
+  readonly close: () => void;
+}
+
+const microSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The kernel side, non-blocking.
+ *
+ * Uses `Atomics.waitAsync` where it exists (Chromium and Node 20+). Where it does not, it polls with a sleep, which is
+ * honest but slower: the timeout is the resolution of the poll, so a fallback kernel answers up to one poll late.
+ */
+export async function serveChannelAsync(
+  allocation: ChannelAllocation,
+  encoding: Encoding = jsonEncoding,
+): Promise<AsyncServerEnd> {
+  const { buffer, sizes } = allocation;
+  const header = new Int32Array(buffer, 0, HEADER_INTS);
+  const requestRegion = new Uint8Array(buffer, HEADER_BYTES, sizes.requestBytes);
+  const responseRegion = new Uint8Array(buffer, HEADER_BYTES + sizes.requestBytes, sizes.responseBytes);
+
+  const waitAsync = (Atomics as unknown as {
+    waitAsync?: (array: Int32Array, index: number, value: number, timeout?: number) => { readonly async: boolean; readonly value: unknown };
+  }).waitAsync;
+
+  const settle = async (expected: number, timeoutMs: number): Promise<boolean> => {
+    const current = Atomics.load(header, IDX_STATE);
+    if (current !== expected) return true;
+    if (waitAsync !== undefined) {
+      const outcome = waitAsync(header, IDX_STATE, expected, timeoutMs);
+      if (!outcome.async) return outcome.value !== "timed-out";
+      const value = await (outcome.value as Promise<string>);
+      return value !== "timed-out";
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await microSleep(1);
+      if (Atomics.load(header, IDX_STATE) !== expected) return true;
+    }
+    return false;
+  };
+
+  const writeResponse = (sequence: number, payload: Uint8Array): void => {
+    const fits = payload.byteLength <= responseRegion.byteLength;
+    const body = fits
+      ? payload
+      : textEncoder.encode(
+          JSON.stringify({ ok: false, error: { message: `response payload is ${payload.byteLength} bytes`, code: "ERESPTOOLARGE" } }),
+        );
+    responseRegion.set(fits ? body : body.subarray(0, responseRegion.byteLength));
+    Atomics.store(header, IDX_RESPONSE_LENGTH, Math.min(body.byteLength, responseRegion.byteLength));
+    Atomics.store(header, IDX_SEQUENCE, sequence);
+    Atomics.store(header, IDX_STATE, CHANNEL_STATE.responsePending);
+    Atomics.notify(header, IDX_STATE);
+  };
+
+  return {
+    serveOne: async (handler, options) => {
+      const state = Atomics.load(header, IDX_STATE);
+      if (state === CHANNEL_STATE.closed) return false;
+      // Only wait when there is nothing to do yet. `settle` waits *while* the state equals what was read, so passing a
+      // pending-request state would wait for the very thing it was handed and time out on work that was already there.
+      if (state !== CHANNEL_STATE.requestPending) {
+        const changed = await settle(state, options.timeoutMs);
+        if (!changed) return false;
+        if (Atomics.load(header, IDX_STATE) === CHANNEL_STATE.closed) return false;
+      }
+
+      const sequence = Atomics.load(header, IDX_SEQUENCE);
+      const length = Atomics.load(header, IDX_REQUEST_LENGTH);
+      if (length > requestRegion.byteLength) {
+        writeResponse(sequence, textEncoder.encode(JSON.stringify({ ok: false, error: { message: "request length exceeds region", code: "EREQTOOLARGE" } })));
+        return true;
+      }
+
+      let answer: Uint8Array;
+      try {
+        const request = encoding.decode(requestRegion.slice(0, length));
+        answer = encoding.encode({ ok: true, value: handler(request) });
+      } catch (error) {
+        const err = error as { message?: string; code?: string };
+        answer = encoding.encode({ ok: false, error: { message: err.message ?? String(error), code: err.code ?? "EUNKNOWN" } });
+      }
+      writeResponse(sequence, answer);
+      return true;
+    },
+    closed: () => Atomics.load(header, IDX_STATE) === CHANNEL_STATE.closed,
+    close: () => {
+      Atomics.store(header, IDX_STATE, CHANNEL_STATE.closed);
+      Atomics.notify(header, IDX_STATE);
+    },
+  };
+}
