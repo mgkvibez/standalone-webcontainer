@@ -50,8 +50,8 @@ const hostWith = (maxProcesses = 4) => {
 describe("process host", () => {
   it("spawns one Worker per process, with its own channel and an init message carrying pid, argv and env", () => {
     const { host, spawned } = hostWith();
-    const first = host.start({ moduleUrl: "/src/process/process.worker.js", argv: ["node", "a.js"], env: { NODE_ENV: "test" } });
-    const second = host.start({ moduleUrl: "/src/process/process.worker.js", argv: ["node", "b.js"] });
+    const first = host.start({ argv: ["node", "a.js"], env: { NODE_ENV: "test" } });
+    const second = host.start({ argv: ["node", "b.js"] });
 
     expect(spawned).toHaveLength(2);
     expect(first.pid).toBe(1);
@@ -69,7 +69,7 @@ describe("process host", () => {
 
   it("records an exit the Worker reports and releases the Worker", () => {
     const { host, spawned } = hostWith();
-    const { pid } = host.start({ moduleUrl: "/w.js", argv: ["node", "a.js"] });
+    const { pid } = host.start({ argv: ["node", "a.js"] });
 
     spawned[0]?.emit({ type: "exit", code: 0 });
 
@@ -80,7 +80,7 @@ describe("process host", () => {
 
   it("records a Worker error as a failed process with the message kept", () => {
     const { host, spawned } = hostWith();
-    const { pid } = host.start({ moduleUrl: "/w.js", argv: ["node", "a.js"] });
+    const { pid } = host.start({ argv: ["node", "a.js"] });
 
     spawned[0]?.fail("boom");
 
@@ -89,8 +89,8 @@ describe("process host", () => {
 
   it("kills a process by terminating its Worker and marking it killed, leaving the others alone", () => {
     const { host, spawned } = hostWith();
-    const first = host.start({ moduleUrl: "/w.js", argv: ["node", "a.js"] });
-    const second = host.start({ moduleUrl: "/w.js", argv: ["node", "b.js"] });
+    const first = host.start({ argv: ["node", "a.js"] });
+    const second = host.start({ argv: ["node", "b.js"] });
 
     expect(host.kill(first.pid, "user request")).toBe(true);
 
@@ -103,15 +103,15 @@ describe("process host", () => {
 
   it("does not spawn beyond the limit, so a runaway spawn loop hits a wall", () => {
     const { host, spawned } = hostWith(1);
-    host.start({ moduleUrl: "/w.js", argv: ["node", "a.js"] });
+    host.start({ argv: ["node", "a.js"] });
 
-    expect(() => host.start({ moduleUrl: "/w.js", argv: ["node", "b.js"] })).toThrow(ProcessLimitError);
+    expect(() => host.start({ argv: ["node", "b.js"] })).toThrow(ProcessLimitError);
     expect(spawned).toHaveLength(1);
   });
 
   it("ignores unrelated Worker messages instead of mangling the table", () => {
     const { host, spawned } = hostWith();
-    const { pid } = host.start({ moduleUrl: "/w.js", argv: ["node", "a.js"] });
+    const { pid } = host.start({ argv: ["node", "a.js"] });
 
     spawned[0]?.emit({ type: "stdout", text: "hello" });
     spawned[0]?.emit(null);
@@ -122,14 +122,16 @@ describe("process host", () => {
 
   it("lists live channels for a kernel loop, and drops them when a process ends", () => {
     const { host, spawned } = hostWith();
-    const first = host.start({ moduleUrl: "/w.js", argv: ["node", "a.js"] });
-    const second = host.start({ moduleUrl: "/w.js", argv: ["node", "b.js"] });
+    const first = host.start({ argv: ["node", "a.js"] });
+    const second = host.start({ argv: ["node", "b.js"] });
 
     expect(host.channels().map((entry) => entry.pid)).toEqual([1, 2]);
 
     spawned[0]?.emit({ type: "exit", code: 0 });
     expect(host.channels().map((entry) => entry.pid)).toEqual([second.pid]);
-    expect(host.channelFor(first.pid).buffer).toBe(first.allocation.buffer);
+    // The dead process keeps neither its Worker nor its shared buffer: a channel is live memory, and a table of finished
+    // pids holding buffers is a leak that would only show up as "why is the tab using 400 MB".
+    expect(() => host.channelFor(first.pid)).toThrow(/No syscall channel/);
   });
 });
 

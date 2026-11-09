@@ -1,17 +1,17 @@
 /**
- * One Worker per process.
+ * One Worker per process, each one running the real runtime.
  *
- * This is the structural change ADR-0018 asks for, and the difference it makes is easy to state: today execution is
- * serialised behind `#runQueue`, `kill` terminates the only Worker, and `ps` is bookkeeping over a queue. Here, each
- * process gets its own Worker, its own syscall channel, and a row in a real process table, so two processes genuinely run
- * at the same time and killing one leaves the other alone.
+ * The structural change ADR-0018 asks for is easy to state: execution used to be serialised behind one queue, `kill`
+ * terminated the only Worker, and `ps` was bookkeeping over that queue. Here each process gets its own Worker, its own
+ * syscall channel, and a row in a real process table, so two processes genuinely run at once and killing one leaves the
+ * other alone.
  *
- * The Worker is injected (`spawn`) because that is the only way to unit-test the bookkeeping in Node, where `Worker` does
- * not exist. The browser lane uses the real one.
+ * The Worker entry is `process-worker.ts`: it builds a filesystem port over the channel and runs the program from the
+ * kernel's filesystem. So a process is not a module that happens to be loaded; it is an argv.
  *
- * What this deliberately does not do yet: run the runtime inside the Worker. The Worker is handed its channel, argv, env
- * and pid, and is expected to report `exit` or `failed`; wiring the loader, the shims and the VFS into that Worker is the
- * next step, and pretending it already works would make this file a lie.
+ * The Worker factory is injected because that is the only way to unit-test the bookkeeping in Node, where `Worker` does
+ * not exist. The browser lane uses the real one, and the default is a *static* `new URL(...)` so the bundler emits the
+ * entry rather than leaving it to be resolved at runtime.
  */
 
 import { allocateChannel, type ChannelAllocation, type ChannelSizes } from "./syscall-channel.js";
@@ -25,13 +25,13 @@ export interface ProcessWorkerLike {
   onerror: ((event: { readonly message?: string }) => void) | null;
 }
 
-export type SpawnWorker = (moduleUrl: string) => ProcessWorkerLike;
+export type SpawnWorker = () => ProcessWorkerLike;
 
 export interface StartProcessOptions {
-  /** Module URL of the process Worker. Absolute in a browser, which a blob's base URL makes unavoidable. */
-  readonly moduleUrl: string;
+  /** `["node", "/main.js"]`. The entry path is resolved against the kernel's filesystem, not against a module URL. */
   readonly argv: readonly string[];
   readonly env?: Readonly<Record<string, string>>;
+  readonly cwd?: string;
   /** Channel capacities. Small by default: a syscall payload is a path or a small buffer, not a file. */
   readonly channelSizes?: ChannelSizes;
 }
@@ -39,6 +39,17 @@ export interface StartProcessOptions {
 export interface StartedProcess {
   readonly pid: number;
   readonly allocation: ChannelAllocation;
+}
+
+export interface ProcessHostOptions {
+  readonly spawn?: SpawnWorker;
+  readonly maxProcesses?: number;
+  readonly onChange?: (entry: ProcessEntry<ProcessWorkerLike>) => void;
+  /**
+   * Output as it is written, before the process exits. Without this a long-running program is silent until it ends,
+   * which is the difference between a terminal and a log dump.
+   */
+  readonly onOutput?: (pid: number, channel: "stdout" | "stderr", text: string) => void;
 }
 
 export class ProcessWorkerUnavailableError extends Error {
@@ -50,32 +61,30 @@ export class ProcessWorkerUnavailableError extends Error {
 
 const DEFAULT_CHANNEL_SIZES: ChannelSizes = { requestBytes: 64 * 1024, responseBytes: 256 * 1024 };
 
-const defaultSpawn: SpawnWorker = (moduleUrl) => {
+/** Only names the Worker in devtools; the pid is assigned by the table after the Worker exists. */
+let spawned = 0;
+
+const defaultSpawn: SpawnWorker = () => {
   if (typeof Worker === "undefined") throw new ProcessWorkerUnavailableError();
-  // eslint-disable-next-line no-undef -- the browser lane provides Worker; Node does not, which is why spawn is injectable.
-  const worker = new Worker(moduleUrl, { type: "module" });
+  spawned += 1;
+  // The `new URL(...)` form is what lets the bundler see this entry at build time. A runtime-built string would work in
+  // dev and 404 in production, which is the kind of bug that only shows up after deploy.
+  const worker = new Worker(new URL("./process-worker.ts", import.meta.url), {
+    type: "module",
+    name: `process-${spawned}`,
+  });
   return worker as unknown as ProcessWorkerLike;
 };
-
-export interface ProcessHostOptions {
-  readonly spawn?: SpawnWorker;
-  readonly maxProcesses?: number;
-  readonly onChange?: (entry: ProcessEntry<ProcessWorkerLike>) => void;
-}
-
-export interface ProcessExitReport {
-  readonly type: "exit";
-  readonly code?: number;
-  readonly reason?: string;
-}
 
 export class ProcessHost {
   readonly #table: ProcessTable<ProcessWorkerLike>;
   readonly #spawn: SpawnWorker;
   readonly #channels = new Map<number, ChannelAllocation>();
+  readonly #onOutput: ProcessHostOptions["onOutput"];
 
   constructor(options: ProcessHostOptions = {}) {
     this.#spawn = options.spawn ?? defaultSpawn;
+    this.#onOutput = options.onOutput;
     this.#table = new ProcessTable<ProcessWorkerLike>({
       maxProcesses: options.maxProcesses ?? 8,
       ...(options.onChange === undefined ? {} : { onChange: options.onChange }),
@@ -94,7 +103,7 @@ export class ProcessHost {
     this.#table.ensureCapacity();
     // Allocation happens before the pid so a spawn failure cannot leave a half-registered process behind.
     const allocation = allocateChannel(sizes);
-    const worker = this.#spawn(options.moduleUrl);
+    const worker = this.#spawn();
 
     const pid = this.#table.add({ argv: options.argv, handle: worker });
     this.#channels.set(pid, allocation);
@@ -106,6 +115,7 @@ export class ProcessHost {
       pid,
       argv: [...options.argv],
       env: { ...(options.env ?? {}) },
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       buffer: allocation.buffer,
       sizes: allocation.sizes,
     });
@@ -130,22 +140,37 @@ export class ProcessHost {
   kill(pid: number, reason = "killed"): boolean {
     const entry = this.#table.get(pid);
     const killed = this.#table.kill(pid, reason);
-    if (killed) this.#retire(entry.handle);
+    if (killed) this.#retire(pid, entry.handle);
     return killed;
   }
 
   /** Mark a process finished. Called from the Worker's own exit report or from a failure. */
-  finish(pid: number, state: Extract<ProcessState, "exited" | "failed">, detail: { readonly exitCode?: number; readonly reason?: string } = {}): void {
+  finish(
+    pid: number,
+    state: Extract<ProcessState, "exited" | "failed">,
+    detail: { readonly exitCode?: number; readonly reason?: string } = {},
+  ): void {
     const entry = this.#table.get(pid);
     if (!["exited", "failed"].includes(entry.state)) {
       this.#table.transition(pid, state, detail);
-      this.#retire(entry.handle);
+      this.#retire(pid, entry.handle);
     }
   }
 
   #onWorkerMessage(pid: number, data: unknown): void {
     if (typeof data !== "object" || data === null) return;
-    const message = data as { readonly type?: unknown; readonly code?: unknown; readonly reason?: unknown };
+    const message = data as {
+      readonly type?: unknown;
+      readonly code?: unknown;
+      readonly reason?: unknown;
+      readonly channel?: unknown;
+      readonly text?: unknown;
+    };
+    if (message.type === "output") {
+      const channel = message.channel === "stderr" ? "stderr" : "stdout";
+      if (typeof message.text === "string") this.#onOutput?.(pid, channel, message.text);
+      return;
+    }
     if (message.type === "exit") {
       this.finish(pid, "exited", {
         ...(typeof message.code === "number" ? { exitCode: message.code } : {}),
@@ -154,7 +179,9 @@ export class ProcessHost {
       return;
     }
     if (message.type === "failed") {
-      this.finish(pid, "failed", { reason: typeof message.reason === "string" ? message.reason : "worker reported failure" });
+      this.finish(pid, "failed", {
+        reason: typeof message.reason === "string" ? message.reason : "worker reported failure",
+      });
     }
   }
 
@@ -162,8 +189,12 @@ export class ProcessHost {
     this.finish(pid, "failed", { reason });
   }
 
-  /** Terminate the Worker and drop the channel. Called once per process: after this the pid is history, not a handle. */
-  #retire(worker: ProcessWorkerLike): void {
+  /**
+   * Terminate the Worker and drop the channel. Once per process: after this the pid is history, not a handle. Dropping
+   * the channel matters because its buffer is shared memory that would otherwise be retained by a table of dead pids.
+   */
+  #retire(pid: number, worker: ProcessWorkerLike): void {
+    this.#channels.delete(pid);
     try {
       worker.terminate();
     } catch {
