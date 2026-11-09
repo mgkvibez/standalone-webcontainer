@@ -335,3 +335,28 @@ test("terminal file commands operate on the project the explorer shows", async (
   await expect(page.locator("#tree li[data-path='/lib/helper.js']")).toBeVisible();
   await expect(page.locator("#scrollback")).toContainText("helper.js");
 });
+
+/**
+ * The terminal facts cross two boundaries: the page describes the size, the Worker builds the terminal, the program reads it.
+ *
+ * This is the cheapest honest proof of that path. The page's prompt is line-based, so raw keystrokes into a program need the UI's
+ * raw mode (still to come); but the size, the isTTY flags and require("tty") all have to arrive correctly for any interactive
+ * program to work at all, and a mistake in the wire protocol shows up here as `undefined` rather than as 80.
+ */
+test("a program run from the terminal sees the session's terminal size", async ({ page }) => {
+  await boot(page);
+  await openFile(page, "/index.js");
+  await setEditorText(page, `
+    const tty = require("tty");
+    console.log("cols=" + process.stdout.columns + " rows=" + process.stdout.rows);
+    console.log("isTTY=" + process.stdout.isTTY + " isatty=" + tty.isatty(1));
+    console.log("stdin=" + (process.stdin === null ? "null" : "stream"));
+  `);
+
+  await runLine(page, "node index.js");
+
+  // 80x24 is the session default, and it has to survive the page → Worker → runtime → shim path to appear here.
+  await expect(page.locator("#scrollback")).toContainText("cols=80 rows=24");
+  await expect(page.locator("#scrollback")).toContainText("isTTY=true isatty=true");
+  await expect(page.locator("#scrollback")).toContainText("stdin=stream");
+});

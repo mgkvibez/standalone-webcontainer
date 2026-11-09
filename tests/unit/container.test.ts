@@ -67,8 +67,24 @@ interface FakeRuntimeOptions {
 
 class FakeRuntime implements RuntimeClient {
   readonly requests: RuntimeRunRequest[] = [];
+  /** Every keystroke and resize the container forwarded, in order, so routing can be asserted rather than assumed. */
+  readonly typed: { processId: number; text: string }[] = [];
+  readonly resized: { processId: number; columns: number; rows: number }[] = [];
   resets = 0;
   #hold: (() => void) | null = null;
+
+  write(processId: number, text: string): void {
+    this.typed.push({ processId, text });
+  }
+
+  resize(processId: number, columns: number, rows: number): void {
+    this.resized.push({ processId, columns, rows });
+  }
+
+  /** Releases a held run, so a test can keep a process alive while it types into it. */
+  release(): void {
+    this.#hold?.();
+  }
 
   constructor(private readonly options: FakeRuntimeOptions = {}) {}
 
@@ -389,5 +405,108 @@ describe("honest refusal", () => {
     await container.execute(session.id, "node missing.js");
     expect(runtime.requests).toHaveLength(0);
     expect(output(container, session.id).some((line) => line.includes("cannot find module '/missing.js'"))).toBe(true);
+  });
+});
+
+/**
+ * Interactive sessions: the container is the only thing between a keystroke and a program.
+ *
+ * These pin the routing rules, because every one of them is a chance to type into the wrong program: a size that outlives the
+ * process that read it, input addressed to the process actually running, and input that goes nowhere when nothing is running
+ * rather than to some earlier process's pid.
+ */
+describe("interactive sessions", () => {
+  it("starts a session at 80x24 and tells the program it runs", async () => {
+    const { container, runtime } = containerWith();
+    const session = container.createSession();
+
+    expect([session.columns, session.rows]).toEqual([80, 24]);
+
+    await container.execute(session.id, "node index.js");
+    expect(runtime.requests).toHaveLength(1);
+    expect(runtime.requests[0]?.terminal).toEqual({ columns: 80, rows: 24 });
+  });
+
+  it("types into the program that is running, not into the session's history", async () => {
+    const { container, runtime } = containerWith({ runtime: { outcome: { killed: false } } });
+    const session = container.createSession();
+
+    // Typing with nothing running goes nowhere: this is a program's stdin, not a line editor.
+    container.write(session.id, "ignored");
+    expect(runtime.typed).toEqual([]);
+
+    const running = container.execute(session.id, "node index.js");
+    // The run is queued behind the container's queue, so the keystroke below lands while it is in flight.
+    container.write(session.id, "hello\n");
+    runtime.release();
+    await running;
+
+    expect(runtime.typed).toEqual([{ processId: 1, text: "hello\n" }]);
+  });
+
+  it("stops typing into a program once it has exited", async () => {
+    const { container, runtime } = containerWith();
+    const session = container.createSession();
+
+    await container.execute(session.id, "node index.js");
+    container.write(session.id, "too late");
+
+    // The process is over, so nothing is addressed. A stale pid would be worse: it could collide with a later process.
+    expect(runtime.typed).toEqual([]);
+  });
+
+  it("carries a new size to the running program, and keeps it for the next one", async () => {
+    const { container, runtime } = containerWith();
+    const session = container.createSession();
+
+    // Nothing running: the size is still remembered, because the window does not shrink back when a program exits.
+    container.resizeSession(session.id, 120, 40);
+    expect([session.columns, session.rows]).toEqual([120, 40]);
+    expect(runtime.resized).toEqual([]);
+
+    await container.execute(session.id, "node index.js");
+    expect(runtime.requests[0]?.terminal).toEqual({ columns: 120, rows: 40 });
+  });
+
+  it("forwards a resize to the program that is running", async () => {
+    const { container, runtime } = containerWith();
+    const session = container.createSession();
+
+    const running = container.execute(session.id, "node index.js");
+    container.resizeSession(session.id, 100, 30);
+    runtime.release();
+    await running;
+
+    expect(runtime.resized).toEqual([{ processId: 1, columns: 100, rows: 30 }]);
+  });
+
+  it("says nothing when the size did not change, because a TUI would redraw for nothing", () => {
+    const { container, runtime } = containerWith();
+    const session = container.createSession();
+
+    container.resizeSession(session.id, 80, 24);
+    expect(runtime.resized).toEqual([]);
+  });
+
+  it("refuses a nonsense size instead of carrying it", () => {
+    const { container } = containerWith();
+    const session = container.createSession();
+
+    expect(() => container.resizeSession(session.id, 0, 24)).toThrow(RangeError);
+    expect(() => container.resizeSession(session.id, 80, -1)).toThrow(RangeError);
+    expect([session.columns, session.rows]).toEqual([80, 24]);
+  });
+
+  it("keeps sessions apart, so typing in one cannot reach another's program", async () => {
+    const { container, runtime } = containerWith();
+    const first = container.createSession();
+    const second = container.createSession();
+
+    const running = container.execute(first.id, "node index.js");
+    container.write(second.id, "wrong session");
+    runtime.release();
+    await running;
+
+    expect(runtime.typed).toEqual([]);
   });
 });

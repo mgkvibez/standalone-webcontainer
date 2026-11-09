@@ -73,9 +73,27 @@ export class WorkerRuntimeClient implements RuntimeClient {
       cwd: request.cwd,
       env: { ...request.env },
       timeoutMs: request.timeoutMs,
+      ...(request.terminal === undefined ? {} : { terminal: request.terminal }),
     };
     worker.postMessage(message satisfies ClientMessage);
     return outcome;
+  }
+
+  /**
+   * Typed text, sent to the Worker where the program that reads it actually runs.
+   *
+   * Fire-and-forget: there is no acknowledgement, because a keystroke has no reply and a program may already have exited by the
+   * time this arrives. The Worker drops input for a process it is not running, so a race here is a no-op rather than an error.
+   */
+  write(processId: number, text: string): void {
+    if (this.#worker === null) return;
+    this.#worker.postMessage({ type: "input", processId, text } satisfies ClientMessage);
+  }
+
+  /** A new window size. This is what delivers SIGWINCH to a running program. */
+  resize(processId: number, columns: number, rows: number): void {
+    if (this.#worker === null) return;
+    this.#worker.postMessage({ type: "resize", processId, columns, rows } satisfies ClientMessage);
   }
 
   /** Kill the host and settle everything in flight. The next `run` starts a new Worker. */

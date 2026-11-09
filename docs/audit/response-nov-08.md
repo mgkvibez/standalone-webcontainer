@@ -71,7 +71,9 @@ is why Phase 2 is held behind ADR-0019 rather than sequenced later.
    worker on a cross-origin page. Those need a browser lane, and the four fixes above come first.
 3. **Real preview** (cross-origin frame, SW preview on its own origin, MessagePort) — blocked on ADR-0019 plus a domain.
 4. **Kernel Worker + per-process Workers** — blocked on ADR-0018 (P0-1).
-5. **Shell and PTY with xterm.js** — follows 3 and 4.
+5. **Shell and PTY with xterm.js** — follows 3 and 4. The PTY core and its wire to the page are done (ADR-0023 and its
+   amendment): sizes, `isTTY`, `require("tty")`, stdin delivery and resize all cross page → Worker → runtime. The xterm.js pane
+   and raw keystroke input remain.
 6. **Persistence on OPFS/IndexedDB with Web Locks** — blocked on ADR-0019's open question about *where* persistence lives.
 7. **Node-semantics differential tests** — started today for the event loop; module resolution and error shapes follow the
    same harness.
