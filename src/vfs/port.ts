@@ -34,6 +34,14 @@ export interface FileSystemPort {
   mkdirSync(path: string, options?: MkdirOptionsPort): void;
   readdirSync(path: string): string[];
   statSync(path: string): VfsStatsPort;
+  /**
+   * Stat several paths, one entry per path, `null` where the path does not exist.
+   *
+   * Optional because it is a capability, not a requirement: a substrate that can answer N stats in one round trip should say
+   * so, and one that cannot is still a filesystem. `null` rather than a throw is deliberate, because the only caller probes
+   * for existence in a fixed order and a miss is an ordinary answer, not a failure.
+   */
+  statManySync?(paths: readonly string[]): readonly (VfsStatsPort | null)[];
   unlinkSync(path: string): void;
   rmdirSync(path: string): void;
   renameSync(from: string, to: string): void;

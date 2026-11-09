@@ -13,9 +13,15 @@
 
 import type { FileSystemPort, MkdirOptionsPort, VfsStatsPort, WriteOptionsPort } from "../vfs/port.js";
 import type { FsRequest, FsResponse } from "./fs-syscalls.js";
+import type { BatchOutcome } from "./syscall-channel.js";
 
 export interface SyscallTransport {
   call(request: unknown, options?: { readonly timeoutMs?: number }): unknown;
+  /**
+   * Optional: a transport that can carry several independent calls in one round trip. A transport without it is still a
+   * transport, and the filesystem falls back to N calls rather than refusing to work.
+   */
+  callMany?(requests: readonly unknown[], options?: { readonly timeoutMs?: number }): readonly BatchOutcome[];
 }
 
 export interface RemoteFileSystemOptions {
@@ -87,6 +93,38 @@ export function createRemoteFileSystem(
       const answer = send({ op: "stat", path });
       if (answer.kind !== "stats") throw new Error(`filesystem stat of "${path}" returned "${answer.kind}" where stats were expected`);
       return { kind: answer.vfsKind, size: answer.size, modifiedAt: answer.modifiedAt, createdAt: answer.createdAt };
+    },
+    /**
+     * Stat several paths in ONE round trip. This is where batching earns its keep: module resolution probes a candidate and
+     * every extension guess for it, and those probes are independent even though their order decides which one wins.
+     *
+     * A failure maps to `null` rather than propagating, because every caller uses this to answer "does this exist" and a
+     * missing file is the common case, not an exception. A failed entry costs only itself: the other answers in the batch
+     * are still returned.
+     */
+    statManySync(paths: readonly string[]): readonly (VfsStatsPort | null)[] {
+      if (paths.length === 0) return [];
+      // One round trip where the transport offers batching; otherwise the same answers, one call at a time.
+      const outcomes: readonly BatchOutcome[] = transport.callMany
+        ? transport.callMany(paths.map((path) => ({ op: "stat", path })), { timeoutMs })
+        : paths.map((path): BatchOutcome => {
+            try {
+              return { ok: true, value: send({ op: "stat", path }) };
+            } catch (error) {
+              return { ok: false, error: { message: (error as Error).message } };
+            }
+          });
+      return outcomes.map((outcome) => {
+        if (!outcome.ok) return null;
+        const answer = outcome.value as { kind?: string; vfsKind?: "file" | "dir"; size?: number; modifiedAt?: number; createdAt?: number };
+        if (answer?.kind !== "stats") return null;
+        return {
+          kind: answer.vfsKind as "file" | "dir",
+          size: answer.size as number,
+          modifiedAt: answer.modifiedAt as number,
+          createdAt: answer.createdAt as number,
+        };
+      });
     },
     unlinkSync(path: string): void {
       expectEmpty(send({ op: "unlink", path }), "unlink");

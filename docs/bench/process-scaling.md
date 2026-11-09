@@ -100,6 +100,16 @@ larger — that is the module compilation path, not the process machinery.
 3. **Nothing here argues for replacing the channel.** A single kernel sustaining 24k ops/s with a flat curve to 20
    processes is not the bottleneck a redesign would target first.
 
+**Follow-up (ADR-0022).** Batching landed, and it is measured on a real channel rather than argued:
+`tests/browser/batch-roundtrips.spec.ts` sends sixteen trivial stats both ways. Sequentially that is 16 request frames and
+0.84 ms; batched it is 1 frame and 0.19 ms, 4.4x, with the frame count asserted as a count so a fast machine cannot make a
+pessimisation look good. The resolver now resolves a specifier in one probe instead of up to four (two instead of five for a
+directory), which at ~50 us per avoided wake-up is ~100-150 us of boot per specifier that needs an extension.
+
+What batching does NOT do, so this doc does not overstate it: it does not make a *dependent* chain of calls cheaper
+(`read` after `stat` is still two round trips), it does not split an oversized batch, and the end-to-end boot time was not
+re-measured against a like-for-like baseline. Memory per channel, listed as unmeasured above, is still unmeasured.
+
 Not measured here, and worth doing before any claim about hundreds of processes: memory per channel (each channel allocates
 its request and response regions, so 20 processes at 1 MiB response regions is 20 MiB of `SharedArrayBuffer` before any user
 data), and the effect of a real project's mixed workload rather than one hot loop.
