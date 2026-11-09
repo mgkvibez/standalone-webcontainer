@@ -33,7 +33,7 @@ import {
   type PackageManifest,
   type RegistryClient,
 } from "../npm/install.js";
-import { FileSystem } from "../vfs/index.js";
+import type { FileSystemPort } from "../vfs/port.js";
 import { CommonJsLoader, type RuntimeGlobals } from "./commonjs.js";
 import { createVirtualDate, createVirtualPerformance, Scheduler, type SchedulerEvidence, type TimerHandle } from "./scheduler.js";
 import { ProcessRefusal, type Refusal } from "./refusal.js";
@@ -116,11 +116,11 @@ export interface InProcessRuntimeOptions {
 }
 
 export class InProcessRuntime implements Runtime {
-  readonly #vfs: FileSystem;
+  readonly #vfs: FileSystemPort;
   readonly #registry: PortRegistry;
   readonly #gateway: PreviewGateway;
 
-  constructor(vfs: FileSystem, options: InProcessRuntimeOptions = {}) {
+  constructor(vfs: FileSystemPort, options: InProcessRuntimeOptions = {}) {
     this.#vfs = vfs;
     this.#registry = options.registry ?? new PortRegistry();
     this.#gateway = new PreviewGateway({ registry: this.#registry });
