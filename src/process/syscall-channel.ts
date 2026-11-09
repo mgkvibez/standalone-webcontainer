@@ -131,7 +131,7 @@ export function allocateChannel(sizes: ChannelSizes): ChannelAllocation {
   };
 }
 
-interface Encoding {
+export interface Encoding {
   readonly encode: (value: unknown) => Uint8Array;
   readonly decode: (bytes: Uint8Array) => unknown;
 }
@@ -139,7 +139,13 @@ interface Encoding {
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-const jsonEncoding: Encoding = {
+/**
+ * The wire format: JSON, so binary bodies travel base64 (33% overhead).
+ *
+ * Exported so a measurement can encode with the SAME encoder the channel uses. A bench that reformats its own JSON measures
+ * the bench, not the transport, and would quietly disagree with production the first time either changed.
+ */
+export const jsonEncoding: Encoding = {
   encode: (value) => textEncoder.encode(JSON.stringify(value)),
   decode: (bytes) => JSON.parse(textDecoder.decode(bytes)) as unknown,
 };
