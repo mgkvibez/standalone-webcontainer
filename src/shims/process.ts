@@ -11,6 +11,7 @@
  *   `process.version`, and ADR-0002 #7 names Node 20 LTS as the API target. It is
  *   a compatibility claim, not a claim to be Node's runtime.
  */
+import type { TickQueue } from "../runtime/ticks.js";
 export class ProcessExit extends Error {
   readonly code: number;
 
@@ -71,6 +72,11 @@ export interface ProcessOptions {
   readonly cwd?: string;
   readonly stdout?: WritableSink;
   readonly stderr?: WritableSink;
+  /**
+   * The run's nextTick queue. Passed in rather than created here so the runner can observe it when deciding whether the
+   * run has settled; a queue owned by the shim would be invisible to the thing waiting on it.
+   */
+  readonly ticks?: TickQueue;
 }
 
 export const createProcessShim = (options: ProcessOptions = {}): ProcessShim => {
@@ -93,10 +99,16 @@ export const createProcessShim = (options: ProcessOptions = {}): ProcessShim => 
       throw new ProcessExit(code);
     },
     nextTick: (callback, ...args) => {
-      // Node defers to the next tick; here a microtask is the closest honest
-      // equivalent, and it keeps ordering intact for the common `nextTick(fn)`
-      // pattern without pretending to have a full event loop.
-      queueMicrotask(() => callback(...(args as [])));
+      // A real tick queue, drained before promise continuations (see runtime/ticks.ts). It used to be queueMicrotask,
+      // which put ticks in the same queue as promises and produced a different order than Node in three differential
+      // cases.
+      const ticks = options.ticks;
+      if (ticks === undefined) {
+        // No runner supplied a queue: still correct on its own, just unobservable to a waiter.
+        queueMicrotask(() => callback(...(args as [])));
+        return;
+      }
+      ticks.schedule(callback, args);
     },
     stdout,
     stderr,

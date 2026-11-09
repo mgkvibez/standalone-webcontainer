@@ -1,7 +1,7 @@
 # Phase 0 rulings: what needs deciding, by whom, and what each answer changes
 
 **Date:** 2026-11-08
-**Status:** Open. Nine questions, each with a recommendation. Nothing here has been implemented.
+**Status:** **ACCEPTED 2026-11-09.** All ten rulings answered by the owner; see the acceptance record below. Acceptance is a decision, not an implementation: the code changes land in later phases, in the order the plan gives.
 **Decider:** the project owner / expert. The charter reserves architecture to the human expert, so this page is a
 decision request, not a decision record.
 
@@ -9,19 +9,48 @@ Phase 0 of the fix plan says: ratify decisions before building, because three ex
 StackBlitz-style behaviour and everything else sits on top of them. This page is that ratification request. It changes no
 code, which is why it is safe to do while the rulings are pending.
 
+## Acceptance record, 2026-11-09
+
+Owner accepted every recommendation in this register on 2026-11-09 ("Accept all recommendations"). Nothing is
+re-litigated below; this table exists so that no later reader mistakes it for still-open.
+
+| Ruling | Question | Answer | Effective |
+| --- | --- | --- | --- |
+| P0-1 | Accept ADR-0018 (process model)? | **Accepted** | Phase 1 onward, incrementally |
+| P0-2 | Accept ADR-0009's supersession (real shell)? | **Accepted** | Phase 6, not before |
+| P0-3 | Accept ADR-0013's supersession (real timers)? | **Accepted** | Phase 1, with the event loop |
+| P0-4 | Accept ADR-0012's supersession (native ESM)? | **Accepted** | Phase 5 |
+| P0-5 | Amend ADR-0004 D-3 to `process.platform = "linux"`? | **Accepted** | With the process lane |
+| P0-6 | `src/shims/presets.ts`: wire or delete? | **Accepted** | Decided when PR #6 lands |
+| P0-7 | Accept ADR-0016's supersession (real install)? | **Accepted** | Phase 7 |
+| P0-8 | Accept ADR-0019 (cross-origin runtime)? | **Accepted** | When the runtime origin exists |
+| P0-9 | Freeze the 20 fixtures? | **Accepted** | Before the next gate reading |
+| P0-10 | Where does persistence live once cross-origin? | **Accepted: OPFS on the runtime origin** | Phase 8 |
+
+Two consequences that are easy to get wrong later:
+
+1. **P0-2 is accepted but sequenced.** ADR-0009 is byte-pinned by `tests/unit/harness.refusal-contract.test.ts`, and it
+   stays byte-identical until the shell work begins in Phase 6. Acceptance means "this will be superseded", not "the pin
+   may be edited".
+2. **P0-9 precedes any new gate number.** The gate denominator is 15 front-end-only slots and currently two are staged,
+   so the score is 2/15 = 13.3%. Freezing is what lets the gate count; it does not raise the score by itself.
+
+Accepted rulings do not authorise skipping the charter's other gates: one change at a time, isolated commit verification,
+full suite after every milestone, and no redefining the gate after seeing results.
+
 ## Supersession table
 
-| ADR | Current decision | Proposed outcome | State after this commit |
+| ADR | Current decision | Accepted outcome | State |
 | --- | --- | --- | --- |
-| 0013 | Drain continuations, 1,000 virtual ms budget, interval cap | Superseded by ADR-0018; virtual clock becomes opt-in test mode | Annotated, pending P0-3 |
-| 0009 | Fixed command language, no shell | Superseded; a real shell is required (Phase 6) | **Not annotated**: byte-pinned by a test, pending P0-2 |
-| 0012 | ESM transformed to CommonJS | Superseded; native ESM with live bindings and TLA (Phase 5) | Annotated, pending P0-4 |
-| 0004 D-3 | `process.platform` is `"browser"` | Amended to `"linux"` | Annotated, pending P0-5 |
-| 0004 D-1 | Hand-written fs/path/buffer instead of unenv/memfs | Kept; `src/shims/presets.ts` wired in or deleted, not left dead | Annotated, pending P0-6 |
+| 0013 | Drain continuations, 1,000 virtual ms budget, interval cap | Superseded by ADR-0018; virtual clock becomes opt-in test mode | Annotated; accepted, effective Phase 1 |
+| 0009 | Fixed command language, no shell | Superseded; a real shell is required (Phase 6) | Not annotated: byte-pinned by a test; accepted, effective Phase 6 |
+| 0012 | ESM transformed to CommonJS | Superseded; native ESM with live bindings and TLA (Phase 5) | Annotated; accepted, effective Phase 5 |
+| 0004 D-3 | `process.platform` is `"browser"` | Amended to `"linux"` | Annotated; accepted, effective with the process lane |
+| 0004 D-1 | Hand-written fs/path/buffer instead of unenv/memfs | Kept; `src/shims/presets.ts` wired in or deleted, not left dead | Annotated; accepted: decide when PR #6 lands |
 | 0004 D-5 | A `while (true)` loop cannot be stopped | Resolved for the process lane by ADR-0018 | Annotated |
-| 0016 | Volatile offline dependency overlay | Superseded by real installs (Phase 7); corpus stays as the test lane | Annotated, pending P0-7 |
-| 0017 | Origin-separated previews | Kept and extended to the runtime itself by ADR-0019 | Annotated, pending P0-8 |
-| 0007 | Fixtures frozen before results exist | Kept; actually freeze them (Phase 10 step 7) | Annotated, pending P0-9 |
+| 0016 | Volatile offline dependency overlay | Superseded by real installs (Phase 7); corpus stays as the test lane | Annotated; accepted, effective Phase 7 |
+| 0017 | Origin-separated previews | Kept and extended to the runtime itself by ADR-0019 | Annotated; accepted, effective when the origin exists |
+| 0007 | Fixtures frozen before results exist | Kept; actually freeze them (Phase 10 step 7) | Annotated; accepted: freeze before the next gate reading |
 
 Two new ADRs are proposed and both need a named decider and a date to become real:
 
