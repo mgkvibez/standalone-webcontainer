@@ -93,6 +93,22 @@ function parentOf(p: string): string | undefined {
  * - Zero DOM references: instantiable and runnable inside the Dedicated Web
  *   Worker that solely owns it (#2, #6). The main thread never holds it.
  */
+/**
+ * A change to the filesystem, as the watcher layer sees it.
+ *
+ * Node's two event names are the whole vocabulary: `change` means a file's contents moved, `rename` means it appeared,
+ * disappeared, or moved. Creation and deletion are both `rename` because that is what a program watching a directory reacts
+ * to, and a third category would be an invention Node does not have.
+ */
+export interface VfsChange {
+  readonly kind: "change" | "rename";
+  readonly path: string;
+  /** For a rename: where the entry came from, so a watcher can tell a move from an unrelated pair of events. */
+  readonly previousPath?: string;
+}
+
+export type VfsListener = (change: VfsChange) => void;
+
 export class FileSystem {
   readonly maxFileSize: number;
   readonly maxTotalBytes: number;
@@ -102,6 +118,8 @@ export class FileSystem {
   readonly #descendantCounts = new Map<string, number>();
   #totalBytes = 0;
   #accessCounter = 0;
+  /** Change subscribers. Empty in the common case, so watching costs a size check per write. */
+  readonly #listeners = new Set<VfsListener>();
 
   constructor(options: FileSystemOptions = {}) {
     this.maxFileSize = options.maxFileSize ?? MAX_FILE_SIZE;
@@ -113,6 +131,40 @@ export class FileSystem {
     // fail when protected files occupy the remaining capacity.
     if (this.maxFileSize > this.maxTotalBytes) {
       throw new RangeError("maxFileSize must not exceed maxTotalBytes");
+    }
+  }
+
+  /**
+   * Observe every mutation, for `fs.watch` and the kernel's watch registry.
+   *
+   * Returns an unsubscribe function rather than exposing `off(listener)`: a closure cannot be confused with another
+   * subscriber's, and dropping the last watcher must not leave a dead listener queued behind every write.
+   */
+  subscribe(listener: VfsListener): () => void {
+    this.#listeners.add(listener);
+    return () => {
+      this.#listeners.delete(listener);
+    };
+  }
+
+  get watcherCount(): number {
+    return this.#listeners.size;
+  }
+
+  /**
+   * Tell subscribers what changed.
+   *
+   * A throwing listener is contained on purpose: notification observes a write that already succeeded, so a bug in a watcher
+   * must not turn a successful `writeFileSync` into a failed one. The throw is swallowed and the other listeners still run.
+   */
+  #emit(change: VfsChange): void {
+    if (this.#listeners.size === 0) return;
+    for (const listener of [...this.#listeners]) {
+      try {
+        listener(change);
+      } catch {
+        // Observation must never affect the observed write.
+      }
     }
   }
 
@@ -176,6 +228,7 @@ export class FileSystem {
     });
     if (existing === undefined) this.#changeAncestorCounts(p, 1);
     this.#totalBytes += bytes.byteLength;
+    this.#emit({ kind: "change", path: p });
   }
 
   /** Read `path`. Returns `Uint8Array`, or `string` when encoding is "utf8". */
@@ -249,6 +302,7 @@ export class FileSystem {
     const now = Date.now();
     this.#nodes.set(p, { kind: "dir", createdAt: now, modifiedAt: now } satisfies DirNode);
     this.#changeAncestorCounts(p, 1);
+    this.#emit({ kind: "rename", path: p });
   }
 
   /** List direct child names of the directory at `path`, sorted. */
@@ -336,6 +390,7 @@ export class FileSystem {
     this.#nodes.delete(p);
     this.#changeAncestorCounts(p, -1);
     this.#totalBytes -= node.size;
+    this.#emit({ kind: "rename", path: p });
   }
 
   /**
@@ -379,6 +434,7 @@ export class FileSystem {
     }
     this.#nodes.delete(p);
     this.#changeAncestorCounts(p, -1);
+    this.#emit({ kind: "rename", path: p });
   }
 
   /**
@@ -445,6 +501,9 @@ export class FileSystem {
       this.#changeAncestorCounts(movedPath, 1);
       this.#nodes.set(movedPath, node);
     }
+    // One event carrying both names, not two: a watcher interested in either side of the move must be able to tell that
+    // these two paths are the same entry, which two unrelated `rename` events could not express.
+    this.#emit({ kind: "rename", path: dst, previousPath: src });
   }
 
   // ── internals ──────────────────────────────────────────────────────────
