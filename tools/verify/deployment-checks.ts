@@ -94,8 +94,13 @@ export function checkFramingAllowed(result: HttpResult, label: string): CheckRes
 }
 
 /**
- * A cross-origin isolation policy is not required by anything we ship today (no SharedArrayBuffer on the critical
- * path), and COEP would break the preview iframe unless every subresource carried CORP. Reported, never enforced.
+ * Cross-origin isolation is now part of what this deployment claims, because ADR-0018's synchronous syscall channel needs
+ * `SharedArrayBuffer` and `SharedArrayBuffer` needs `crossOriginIsolated`. The rollout that used to report "no COOP/COEP"
+ * as an accepted state is over: `vercel.json`, the dev server and the preview service worker all send them, and the
+ * browser lane asserts `crossOriginIsolated === true` on both origins.
+ *
+ * Still reported rather than asserted: a live deployment's headers can drift from the repository's config, and this
+ * check reads the deployment, not the config. Treat a missing header here as a failed rollout, not as informational.
  */
 export function reportIsolationPolicy(result: HttpResult, label: string): CheckResult {
   const coop = header(result.headers, "cross-origin-opener-policy");
@@ -104,7 +109,11 @@ export function reportIsolationPolicy(result: HttpResult, label: string): CheckR
     coop === "" ? "no COOP" : `COOP: ${coop}`,
     coep === "" ? "no COEP" : `COEP: ${coep}`,
   ].join(", ");
-  return ok(`${label} isolation policy`, `${detail} (unchanged by this rollout)`);
+  const missing = [coop === "" ? "COOP" : "", coep === "" ? "COEP" : ""].filter((part) => part !== "");
+  if (missing.length > 0) {
+    return { name: `${label} isolation policy`, ok: false, detail: `${detail}: ${missing.join(" and ")} absent, so SharedArrayBuffer is unavailable` };
+  }
+  return ok(`${label} isolation policy`, `${detail}`);
 }
 
 /** The whole point of the preview design: previews never share the editor's origin. */

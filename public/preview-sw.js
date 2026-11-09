@@ -69,6 +69,18 @@ async function routePreviewRequest(event, url) {
       }
       const headers = new Headers(message.headers);
       headers.delete("content-length");
+      // COEP world: every response this worker synthesises is a subresource of a cross-origin-isolated document, so it has
+      // to declare that it may be embedded. Without this the preview shell (or the preview document itself, once it is
+      // isolated) refuses the response and the frame renders empty with no visible error in the page.
+      headers.set("cross-origin-resource-policy", "cross-origin");
+      // A document served into a cross-origin-isolated embedder has to be isolated as well, or the frame is blocked
+      // outright (`net::ERR_BLOCKED_BY_RESPONSE`) rather than merely running unisolated. Only documents get these two:
+      // COEP on every asset would demand CORP from anything the previewed app loads.
+      const contentType = headers.get("content-type") ?? "";
+      if (contentType.includes("text/html")) {
+        headers.set("cross-origin-opener-policy", "same-origin");
+        headers.set("cross-origin-embedder-policy", "require-corp");
+      }
       const responseBody = event.request.method === "HEAD" || NO_BODY.has(message.statusCode)
         ? null
         : new Uint8Array(message.body);
@@ -92,5 +104,11 @@ async function routePreviewRequest(event, url) {
 }
 
 function plain(status, text) {
-  return new Response(text, { status, headers: { "content-type": "text/plain; charset=utf-8" } });
+  return new Response(text, {
+    status,
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "cross-origin-resource-policy": "cross-origin",
+    },
+  });
 }
