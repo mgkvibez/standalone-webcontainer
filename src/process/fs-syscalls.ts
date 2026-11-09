@@ -13,16 +13,17 @@
 
 import type { FileSystemPort } from "../vfs/port.js";
 import type { WatchRegistry } from "./watch-registry.js";
-import { decodeBase64, encodeBase64 } from "./base64.js";
 
 export type FsRequest =
   | { readonly op: "read"; readonly path: string; readonly encoding?: "utf8" }
   | {
       readonly op: "write";
       readonly path: string;
-      readonly data: string;
-      readonly dataEncoding: "utf8" | "base64";
-      readonly mode?: number;
+      readonly data: string | Uint8Array;
+      readonly dataEncoding: "utf8" | "binary";
+      // Declared as `evictable`, which is what both ends have always sent. The union said `mode?: number`, and the object
+      // spread in the client hid the mismatch from the typechecker, so the declared shape described nothing.
+      readonly evictable?: boolean;
     }
   | { readonly op: "mkdir"; readonly path: string; readonly recursive?: boolean }
   | { readonly op: "readdir"; readonly path: string }
@@ -34,7 +35,7 @@ export type FsRequest =
 export type FsResponse =
   | { readonly kind: "empty" }
   | { readonly kind: "text"; readonly text: string }
-  | { readonly kind: "bytes"; readonly base64: string }
+  | { readonly kind: "bytes"; readonly bytes: Uint8Array }
   | { readonly kind: "names"; readonly names: readonly string[] }
   | {
       readonly kind: "stats";
@@ -136,7 +137,7 @@ export function createFsSyscallHandler(
           }
           if (encoding !== undefined) refuse('filesystem read encoding must be "utf8" or absent');
           const bytes = fs.readFileSync(target) as Uint8Array;
-          return { kind: "bytes", base64: encodeBase64(bytes) };
+          return { kind: "bytes", bytes };
         }
         case "write": {
           const { path, data, dataEncoding, evictable } = request as {
@@ -146,10 +147,19 @@ export function createFsSyscallHandler(
             evictable?: unknown;
           };
           const target = requireString(path, "path");
-          if (typeof data !== "string") refuse("filesystem write data must be a string");
-          if (dataEncoding !== "utf8" && dataEncoding !== "base64") refuse("filesystem write dataEncoding must be utf8 or base64");
           if (evictable !== undefined && typeof evictable !== "boolean") refuse("filesystem write evictable must be a boolean");
-          const payload: string | Uint8Array = dataEncoding === "utf8" ? data : decodeBase64(data);
+          // Binary arrives as bytes, not as base64: the wire frame carries the array directly. A "base64" request is refused
+          // by name rather than silently accepted, because a half-migrated peer would otherwise be undetectable.
+          const payload: string | Uint8Array =
+            dataEncoding === "utf8"
+              ? typeof data === "string"
+                ? data
+                : refuse("filesystem write data must be a string when dataEncoding is utf8")
+              : dataEncoding === "binary"
+                ? data instanceof Uint8Array
+                  ? data
+                  : refuse("filesystem write data must be a Uint8Array when dataEncoding is binary")
+                : refuse('filesystem write dataEncoding must be "utf8" or "binary"');
           fs.writeFileSync(target, payload, evictable === undefined ? {} : { evictable });
           return { kind: "empty" };
         }

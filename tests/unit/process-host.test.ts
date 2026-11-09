@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CHANNEL_HEADER_BYTES, CHANNEL_STATE, allocateChannel, serveChannelAsync } from "../../src/process/syscall-channel.js";
+import { framedEncoding } from "../../src/process/frame.js";
 import { ProcessHost, type ProcessWorkerLike } from "../../src/process/process-host.js";
 import { ProcessLimitError } from "../../src/process/process-table.js";
 
@@ -141,7 +142,7 @@ describe("serving a process without blocking the kernel", () => {
   const stageRequest = (buffer: SharedArrayBuffer, value: unknown): void => {
     const header = new Int32Array(buffer, 0, 16);
     const region = new Uint8Array(buffer, CHANNEL_HEADER_BYTES, sizes.requestBytes);
-    const payload = new TextEncoder().encode(JSON.stringify(value));
+    const payload = framedEncoding.encode(value);
     region.set(payload);
     Atomics.store(header, 1, payload.byteLength);
     Atomics.store(header, 3, 1);
@@ -160,7 +161,7 @@ describe("serving a process without blocking the kernel", () => {
     const header = new Int32Array(allocation.buffer, 0, 16);
     const length = Atomics.load(header, 2);
     const region = new Uint8Array(allocation.buffer, CHANNEL_HEADER_BYTES + sizes.requestBytes, sizes.responseBytes);
-    expect(JSON.parse(new TextDecoder().decode(region.slice(0, length)))).toEqual({
+    expect(framedEncoding.decode(region.slice(0, length))).toEqual({
       ok: true,
       value: { seen: { op: "read", path: "/a.txt" } },
     });

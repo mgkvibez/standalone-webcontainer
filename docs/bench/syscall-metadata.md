@@ -45,9 +45,14 @@ small call costs**.
 The round trips are five times the transfer cost, and trimming keys does not remove a round trip. At 40 us per call this
 architecture is dominated by the *number* of calls, not their width.
 
-The two payload rows are where bytes genuinely are the cost. A 262,144-byte read becomes 349,525 base64 characters plus
-escaping, and the measured large-payload ceiling is ~35 MB/s, against ~47 MB/s raw. That is a **33% tax on every binary
-byte**, and it grows with the payload while the envelope stays at ~100 bytes.
+The two payload rows are where bytes genuinely are the cost. A 262,144-byte read became 349,525 base64 characters plus
+escaping, and the large-payload ceiling measured at the time was ~35 MB/s, against ~47 MB/s raw: a **33% tax on every binary
+byte**, growing with the payload while the envelope stays at ~100 bytes.
+
+**Follow-up (ADR-0021).** That tax was removed, and the measurement here then falsified the obvious way to remove it: framing
+*every* message costs ~46 bytes each and made this same boot mix 27% bigger, so the wire now frames only messages that carry
+a body. The boot figures in the table above are therefore unchanged to the byte (169.2 bytes/call), and the binary case moved
+from ~41 MB/s to 211 MB/s at 64 KiB. See `docs/bench/process-scaling.md` for the A/B.
 
 ## What this decides
 

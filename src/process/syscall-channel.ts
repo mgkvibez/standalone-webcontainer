@@ -35,6 +35,10 @@
  * - This module does not decide *which* calls are synchronous. ADR-0018 leaves that open on purpose.
  */
 
+// The wire codec. `frame.ts` imports this module's `Encoding` type only, and type imports are erased, so this is not a
+// runtime cycle.
+import { framedEncoding } from "./frame.js";
+
 export const CHANNEL_STATE = {
   idle: 0,
   requestPending: 1,
@@ -163,7 +167,7 @@ export class SyscallClient {
   readonly #encoding: Encoding;
   #sequence = 0;
 
-  constructor(allocation: ChannelAllocation, encoding: Encoding = jsonEncoding) {
+  constructor(allocation: ChannelAllocation, encoding: Encoding = framedEncoding) {
     const { buffer, sizes } = allocation;
     this.#header = new Int32Array(buffer, 0, HEADER_INTS);
     this.#request = new Uint8Array(buffer, HEADER_BYTES, sizes.requestBytes);
@@ -277,12 +281,10 @@ function createServerCore(allocation: ChannelAllocation, encoding: Encoding): Se
     const fits = payload.byteLength <= responseRegion.byteLength;
     const body = fits
       ? payload
-      : textEncoder.encode(
-          JSON.stringify({
-            ok: false,
-            error: { message: `response payload is ${payload.byteLength} bytes`, code: "ERESPTOOLARGE" },
-          }),
-        );
+      : encoding.encode({
+          ok: false,
+          error: { message: `response payload is ${payload.byteLength} bytes`, code: "ERESPTOOLARGE" },
+        });
     responseRegion.set(fits ? body : body.subarray(0, responseRegion.byteLength));
     Atomics.store(header, IDX_RESPONSE_LENGTH, Math.min(body.byteLength, responseRegion.byteLength));
     Atomics.store(header, IDX_SEQUENCE, sequence);
@@ -296,9 +298,7 @@ function createServerCore(allocation: ChannelAllocation, encoding: Encoding): Se
     if (length > requestRegion.byteLength) {
       writeResponse(
         sequence,
-        textEncoder.encode(
-          JSON.stringify({ ok: false, error: { message: "request length exceeds region", code: "EREQTOOLARGE" } }),
-        ),
+        encoding.encode({ ok: false, error: { message: "request length exceeds region", code: "EREQTOOLARGE" } }),
       );
       return true;
     }
@@ -332,7 +332,7 @@ function createServerCore(allocation: ChannelAllocation, encoding: Encoding): Se
  * The handler is called synchronously and its thrown error becomes a `SyscallRejectedError` on the caller's side. That
  * matters: an ENOENT must arrive as a rejected syscall with a code, not as a crashed kernel or a silent empty file.
  */
-export function serveChannel(allocation: ChannelAllocation, encoding: Encoding = jsonEncoding): ServerEnd {
+export function serveChannel(allocation: ChannelAllocation, encoding: Encoding = framedEncoding): ServerEnd {
   const core = createServerCore(allocation, encoding);
 
   return {
@@ -379,7 +379,7 @@ const microSleep = (ms: number): Promise<void> => new Promise((resolve) => setTi
  */
 export async function serveChannelAsync(
   allocation: ChannelAllocation,
-  encoding: Encoding = jsonEncoding,
+  encoding: Encoding = framedEncoding,
 ): Promise<AsyncServerEnd> {
   const core = createServerCore(allocation, encoding);
 

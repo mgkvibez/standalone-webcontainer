@@ -12,7 +12,6 @@
  */
 
 import type { FileSystemPort, MkdirOptionsPort, VfsStatsPort, WriteOptionsPort } from "../vfs/port.js";
-import { decodeBase64, encodeBase64 } from "./base64.js";
 import type { FsRequest, FsResponse } from "./fs-syscalls.js";
 
 export interface SyscallTransport {
@@ -58,7 +57,7 @@ export function createRemoteFileSystem(
         return answer.text;
       }
       if (answer.kind !== "bytes") throw new Error(`filesystem read of "${path}" returned "${answer.kind}" where bytes were expected`);
-      return decodeBase64(answer.base64);
+      return answer.bytes;
     },
     writeFileSync(path: string, data: string | Uint8Array, writeOptions?: WriteOptionsPort): void {
       const request: FsRequest =
@@ -67,8 +66,8 @@ export function createRemoteFileSystem(
           : {
               op: "write",
               path,
-              data: encodeBase64(data),
-              dataEncoding: "base64",
+              data,
+              dataEncoding: "binary",
               ...(writeOptions?.evictable === undefined ? {} : { evictable: writeOptions.evictable }),
             };
       expectEmpty(send(request), "write");
