@@ -9,6 +9,7 @@ import {
   allocateChannel,
   serveChannel,
 } from "../../src/process/syscall-channel.js";
+import { framedEncoding } from "../../src/process/frame.js";
 
 /**
  * The syscall channel's non-blocking half.
@@ -24,7 +25,9 @@ const SIZES = { requestBytes: 256, responseBytes: 256 };
 const stageRequest = (buffer: SharedArrayBuffer, value: unknown, sequence = 1): void => {
   const header = new Int32Array(buffer, 0, 16);
   const region = new Uint8Array(buffer, CHANNEL_HEADER_BYTES, SIZES.requestBytes);
-  const payload = new TextEncoder().encode(JSON.stringify(value));
+  // Framed, because the channel speaks frames. These helpers used to hand-encode JSON, which is exactly the coupling the
+  // codec change was meant to remove: a test that formats its own wire format only tests its own formatting.
+  const payload = framedEncoding.encode(value);
   region.set(payload);
   Atomics.store(header, 1, payload.byteLength);
   Atomics.store(header, 3, sequence);
@@ -38,7 +41,7 @@ const readResponse = (buffer: SharedArrayBuffer): { state: number; decoded: unkn
   return {
     state: Atomics.load(header, 0),
     length,
-    decoded: JSON.parse(new TextDecoder().decode(region.slice(0, length))),
+    decoded: framedEncoding.decode(region.slice(0, length)),
   };
 };
 

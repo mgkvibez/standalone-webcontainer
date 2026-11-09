@@ -16,7 +16,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createRemoteFileSystem } from "../../src/process/remote-fs.js";
 import { createFsSyscallHandler } from "../../src/process/fs-syscalls.js";
-import { jsonEncoding } from "../../src/process/syscall-channel.js";
+import { framedEncoding } from "../../src/process/frame.js";
 import { FileSystem } from "../../src/vfs/index.js";
 
 export interface OpMeasurement {
@@ -28,6 +28,15 @@ export interface OpMeasurement {
   readonly responseBytes: number;
   /** Bytes of the payload those responses carried (file contents, directory names), summed. */
   readonly payloadBytes: number;
+  /**
+   * What the same calls would have cost on the retired base64-in-JSON wire, summed.
+   *
+   * Measuring only the current codec answers "how big is a call" but not "was framing worth it", and the second question is
+   * the one the decision turned on. Both figures come from the same call with the same value, so the difference is the codec
+   * and nothing else.
+   */
+  readonly legacyRequestBytes: number;
+  readonly legacyResponseBytes: number;
 }
 
 export interface MetadataReport {
@@ -37,14 +46,57 @@ export interface MetadataReport {
     readonly requestBytes: number;
     readonly responseBytes: number;
     readonly payloadBytes: number;
+    /** Total bytes the same calls would have cost on the retired base64 wire. */
+    readonly legacyBytes: number;
+    /** Share of the old wire's bytes that framing removed, 0..1. Negative if framing ever cost more. */
+    readonly framingSavingShare: number;
     /** Share of all wire bytes that is envelope rather than payload, 0..1. */
     readonly metadataShare: number;
   };
 }
 
 interface Recorder {
-  record(op: string, requestBytes: number, responseBytes: number, payloadBytes: number): void;
+  record(
+    op: string,
+    requestBytes: number,
+    responseBytes: number,
+    payloadBytes: number,
+    legacyRequestBytes: number,
+    legacyResponseBytes: number,
+  ): void;
 }
+
+/**
+ * The retired wire, reconstructed exactly: a binary body was `{kind:"bytes", base64}` in a response and
+ * `{data:<base64>, dataEncoding:"base64"}` in a request, with everything JSON-encoded around it.
+ *
+ * Reconstructing the shape rather than approximating it matters: "base64" and "binary" are the same length, but "base64" and
+ * "bytes" are not, and a comparison that quietly changed a key name would understate the old cost.
+ */
+export const toLegacyShape = (value: unknown): unknown => {
+  if (value instanceof Uint8Array) return Buffer.from(value).toString("base64");
+  if (Array.isArray(value)) return value.map((entry) => toLegacyShape(entry));
+  if (value !== null && typeof value === "object") {
+    const source = value as Record<string, unknown>;
+    if (source.kind === "bytes" && source.bytes instanceof Uint8Array) {
+      return { kind: "bytes", base64: Buffer.from(source.bytes).toString("base64") };
+    }
+    const converted: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(source)) {
+      if (source.dataEncoding === "binary" && key === "data") {
+        converted[key] = toLegacyShape(entry);
+        continue;
+      }
+      converted[key] = toLegacyShape(entry);
+    }
+    if (source.dataEncoding === "binary") converted.dataEncoding = "base64";
+    return converted;
+  }
+  return value;
+};
+
+export const legacyBytesOf = (value: unknown): number =>
+  new TextEncoder().encode(JSON.stringify(toLegacyShape(value) ?? null)).byteLength;
 
 /** A client-shaped object that measures each call on its way to the real handler. */
 export const createMeasuringClient = (
@@ -53,10 +105,18 @@ export const createMeasuringClient = (
 ): { call: (request: unknown, options: unknown) => unknown } => ({
   call: (request) => {
     const op = String((request as { op?: unknown }).op ?? "unknown");
-    const requestBytes = jsonEncoding.encode(request).byteLength;
+    // The current wire, which is the framed codec: this is what the product actually sends.
+    const requestBytes = framedEncoding.encode(request).byteLength;
     const value = handler(request as never);
-    const responseBytes = jsonEncoding.encode({ ok: true, value }).byteLength;
-    recorder.record(op, requestBytes, responseBytes, payloadBytesOf(value));
+    const responseBytes = framedEncoding.encode({ ok: true, value }).byteLength;
+    recorder.record(
+      op,
+      requestBytes,
+      responseBytes,
+      payloadBytesOf(value),
+      legacyBytesOf(request),
+      legacyBytesOf({ ok: true, value }),
+    );
     return value;
   },
 });
@@ -71,7 +131,10 @@ export const createMeasuringClient = (
 export const payloadBytesOf = (value: unknown): number => {
   const encoder = new TextEncoder();
   if (value === null || typeof value !== "object") return 0;
-  const body = value as { kind?: string; text?: string; base64?: string; names?: unknown };
+  const body = value as { kind?: string; text?: string; base64?: string; bytes?: unknown; names?: unknown };
+  // Raw bytes, which is what the framed wire carries since the base64 tax was removed. Without this branch the instrument
+  // would report 0 payload bytes for every binary body — the exact defect it had the first time, one protocol later.
+  if (body.kind === "bytes" && body.bytes instanceof Uint8Array) return body.bytes.byteLength;
   if (body.kind === "text" && typeof body.text === "string") return encoder.encode(body.text).byteLength;
   // Base64 is 4 chars per 3 bytes, so the decoded size is what the data actually was. This is the number byte-framing
   // would recover, and counting the encoded form would hide the very overhead being measured.
@@ -103,17 +166,95 @@ const seed = (fs: FileSystem): void => {
 };
 
 
-export const measure = async (): Promise<MetadataReport> => {
+/**
+ * The workload framing was chosen for: real binaries, not the small text files a boot mostly touches.
+ *
+ * Kept as its own mix so the boot table keeps answering "what does a syscall cost" without a 64 KiB body dominating the
+ * average and making the envelope look free.
+ */
+export const measureBinary = async (): Promise<MetadataReport> => {
   const fs = new FileSystem();
-  seed(fs);
-  const measured = new Map<string, { calls: number; requestBytes: number; responseBytes: number; payloadBytes: number }>();
+  fs.mkdirSync("/project/assets", { recursive: true });
+  const pattern = (length: number, seed: number): Uint8Array => {
+    const body = new Uint8Array(length);
+    for (let index = 0; index < length; index += 1) body[index] = (index * 31 + seed) % 256;
+    return body;
+  };
+  fs.writeFileSync("/project/assets/icon.png", pattern(4096, 7));
+  fs.writeFileSync("/project/assets/sourcemap.js.map", pattern(65536, 11));
+
+  const empty = { calls: 0, requestBytes: 0, responseBytes: 0, payloadBytes: 0, legacyRequestBytes: 0, legacyResponseBytes: 0 };
+  const measured = new Map<string, typeof empty>();
   const recorder: Recorder = {
-    record: (op, requestBytes, responseBytes, payloadBytes) => {
-      const entry = measured.get(op) ?? { calls: 0, requestBytes: 0, responseBytes: 0, payloadBytes: 0 };
+    record: (op, requestBytes, responseBytes, payloadBytes, legacyRequestBytes, legacyResponseBytes) => {
+      const entry = measured.get(op) ?? { ...empty };
       entry.calls += 1;
       entry.requestBytes += requestBytes;
       entry.responseBytes += responseBytes;
       entry.payloadBytes += payloadBytes;
+      entry.legacyRequestBytes += legacyRequestBytes;
+      entry.legacyResponseBytes += legacyResponseBytes;
+      measured.set(op, entry);
+    },
+  };
+  const handler = createFsSyscallHandler(fs, { owner: "bench-binary" });
+  const client = createMeasuringClient(handler as (request: never) => unknown, recorder);
+  const port = createRemoteFileSystem(client as never, { timeoutMs: 1000 });
+
+  port.statSync("/project/assets/icon.png");
+  await port.readFile("/project/assets/icon.png");
+  await port.readFile("/project/assets/sourcemap.js.map");
+  await port.writeFile("/project/assets/copy.map", pattern(65536, 13));
+  await port.readFile("/project/assets/copy.map");
+
+  return summarise(measured);
+};
+
+const summarise = (measured: Map<string, {
+  calls: number;
+  requestBytes: number;
+  responseBytes: number;
+  payloadBytes: number;
+  legacyRequestBytes: number;
+  legacyResponseBytes: number;
+}>): MetadataReport => {
+  const ops: OpMeasurement[] = [...measured.entries()]
+    .map(([op, entry]) => ({ op, ...entry }))
+    .sort((left, right) => right.requestBytes + right.responseBytes - (left.requestBytes + left.responseBytes));
+  const calls = ops.reduce((total, op) => total + op.calls, 0);
+  const requestBytes = ops.reduce((total, op) => total + op.requestBytes, 0);
+  const responseBytes = ops.reduce((total, op) => total + op.responseBytes, 0);
+  const payloadBytes = ops.reduce((total, op) => total + op.payloadBytes, 0);
+  const legacyBytes = ops.reduce((total, op) => total + op.legacyRequestBytes + op.legacyResponseBytes, 0);
+  const wire = requestBytes + responseBytes;
+  return {
+    ops,
+    totals: {
+      calls,
+      requestBytes,
+      responseBytes,
+      payloadBytes,
+      legacyBytes,
+      framingSavingShare: legacyBytes === 0 ? 0 : (legacyBytes - wire) / legacyBytes,
+      metadataShare: wire === 0 ? 0 : (wire - payloadBytes) / wire,
+    },
+  };
+};
+
+export const measure = async (): Promise<MetadataReport> => {
+  const fs = new FileSystem();
+  seed(fs);
+  const empty = { calls: 0, requestBytes: 0, responseBytes: 0, payloadBytes: 0, legacyRequestBytes: 0, legacyResponseBytes: 0 };
+  const measured = new Map<string, typeof empty>();
+  const recorder: Recorder = {
+    record: (op, requestBytes, responseBytes, payloadBytes, legacyRequestBytes, legacyResponseBytes) => {
+      const entry = measured.get(op) ?? { ...empty };
+      entry.calls += 1;
+      entry.requestBytes += requestBytes;
+      entry.responseBytes += responseBytes;
+      entry.payloadBytes += payloadBytes;
+      entry.legacyRequestBytes += legacyRequestBytes;
+      entry.legacyResponseBytes += legacyResponseBytes;
       measured.set(op, entry);
     },
   };
@@ -144,55 +285,44 @@ export const measure = async (): Promise<MetadataReport> => {
   port.renameSync("/project/dist/main.js", "/project/dist/main.mjs");
   await port.unlink("/project/dist/main.mjs");
 
-  const ops: OpMeasurement[] = [...measured.entries()]
-    .map(([op, entry]) => ({ op, ...entry }))
-    .sort(
-      (left, right) =>
-        right.requestBytes + right.responseBytes - (left.requestBytes + left.responseBytes),
-    );
-
-  const calls = ops.reduce((total, op) => total + op.calls, 0);
-  const requestBytes = ops.reduce((total, op) => total + op.requestBytes, 0);
-  const responseBytes = ops.reduce((total, op) => total + op.responseBytes, 0);
-  const payloadBytes = ops.reduce((total, op) => total + op.payloadBytes, 0);
-  const wire = requestBytes + responseBytes;
-  return {
-    ops,
-    totals: {
-      calls,
-      requestBytes,
-      responseBytes,
-      payloadBytes,
-      metadataShare: wire === 0 ? 0 : (wire - payloadBytes) / wire,
-    },
-  };
+  return summarise(measured);
 };
 
-const main = async (): Promise<void> => {
-  const report = await measure();
-  const percent = (part: number, whole: number): string =>
-    whole === 0 ? "0%" : `${((part / whole) * 100).toFixed(1)}%`;
-
-  console.log("Syscall wire cost, measured through the real client against the real handler\n");
-  console.log("| op | calls | request B/call | response B/call | payload B/call | metadata share |");
-  console.log("| --- | ---: | ---: | ---: | ---: | ---: |");
+const table = (report: MetadataReport, title: string): void => {
+  const percent = (part: number, whole: number): string => (whole === 0 ? "0%" : `${((part / whole) * 100).toFixed(1)}%`);
+  console.log(`\n${title}\n`);
+  console.log("| op | calls | current B/call | retired B/call | payload B/call | metadata share | framing saved |");
+  console.log("| --- | ---: | ---: | ---: | ---: | ---: | ---: |");
   for (const op of report.ops) {
     const bytes = op.requestBytes + op.responseBytes;
+    const legacy = op.legacyRequestBytes + op.legacyResponseBytes;
     console.log(
-      `| ${op.op} | ${op.calls} | ${(op.requestBytes / op.calls).toFixed(1)} | ${(op.responseBytes / op.calls).toFixed(1)} | ${(op.payloadBytes / op.calls).toFixed(1)} | ${percent(bytes - op.payloadBytes, bytes)} |`,
+      `| ${op.op} | ${op.calls} | ${(bytes / op.calls).toFixed(1)} | ${(legacy / op.calls).toFixed(1)} | ${(op.payloadBytes / op.calls).toFixed(1)} | ${percent(bytes - op.payloadBytes, bytes)} | ${percent(legacy - bytes, legacy)} |`,
     );
   }
   const wire = report.totals.requestBytes + report.totals.responseBytes;
   console.log(
-    `| **all** | ${report.totals.calls} | ${(report.totals.requestBytes / report.totals.calls).toFixed(1)} | ${(report.totals.responseBytes / report.totals.calls).toFixed(1)} | ${(report.totals.payloadBytes / report.totals.calls).toFixed(1)} | **${percent(wire - report.totals.payloadBytes, wire)}** |`,
+    `| **all** | ${report.totals.calls} | ${(wire / report.totals.calls).toFixed(1)} | ${(report.totals.legacyBytes / report.totals.calls).toFixed(1)} | ${(report.totals.payloadBytes / report.totals.calls).toFixed(1)} | **${percent(wire - report.totals.payloadBytes, wire)}** | **${percent(report.totals.legacyBytes - wire, report.totals.legacyBytes)}** |`,
   );
   console.log(
-    `\n${wire} bytes over ${report.totals.calls} calls; ${report.totals.payloadBytes} of those bytes were payload.`,
+    `\n${wire} bytes over ${report.totals.calls} calls; ${report.totals.payloadBytes} were payload; the retired wire would have carried ${report.totals.legacyBytes}.`,
   );
+};
+
+const main = async (): Promise<void> => {
+  console.log("Syscall wire cost, measured through the real client against the real handler.");
+  console.log("\"current\" is the framed codec the product sends; \"retired\" is the same call reconstructed on the old");
+  console.log("base64-in-JSON wire, so the last column is the codec and nothing else.");
+
+  const boot = await measure();
+  table(boot, "A toolchain boot in miniature: small text files, many stats");
+
+  const binary = await measureBinary();
+  table(binary, "Real binaries: a 4 KiB asset and two 64 KiB maps");
 
   mkdirSync("artifacts", { recursive: true });
-  writeFileSync("artifacts/syscall-metadata.json", `${JSON.stringify(report, null, 2)}\n`);
-  console.log("written artifacts/syscall-metadata.json");
+  writeFileSync("artifacts/syscall-metadata.json", `${JSON.stringify({ boot, binary }, null, 2)}\n`);
+  console.log("\nwritten artifacts/syscall-metadata.json");
 };
 
 // vite-node replaces argv[1] with its own binary, so "was this file invoked directly?" cannot be answered from argv at all:

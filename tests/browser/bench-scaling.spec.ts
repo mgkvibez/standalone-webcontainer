@@ -79,40 +79,21 @@ test("syscall cost as process count grows, and the price of a payload", async ({
             self.onmessage = (message) => { if (message.data && message.data.stop) stopping = true; };
 
             let answered = 0;
-            while (!stopping) {
-              let served = false;
-              for (const entry of ends) {
-                // Sweep rather than one blocking wait per channel: a kernel that waited on process A could not answer B.
-                // Reading the state word directly keeps the sweep from burning a timeout on idle channels.
-                const state = Atomics.load(entry.header, 0);
-                if (state === 1) {
-                  await entry.end.serveOne(handler, { timeoutMs: 50 });
-                  answered += 1;
-                  served = true;
-                } else if (state === 3) {
-                  // closed by the caller: nothing more to do for this channel
+            // One independent serve loop per channel, which is the shape the kernel actually uses. The previous version
+            // swept all channels in a single loop and, when nothing was pending, slept on a timer clamp: that made a fast
+            // peer look slow. It reported the framed codec as 7x SLOWER than base64 at 64 KiB, and the same measurement
+            // repeated on a per-channel loop showed it 5x FASTER. A benchmark whose loop shape changes the answer by 7x is
+            // measuring its own scheduling, so the loop now matches production and the per-op figures describe the channel.
+            await Promise.all(
+              ends.map(async (entry) => {
+                while (!stopping) {
+                  // A short deadline so a stop request is noticed promptly; false means nothing arrived, not that the
+                  // channel is done, so the loop continues.
+                  const served = await entry.end.serveOne(handler, { timeoutMs: 100 });
+                  if (served) answered += 1;
                 }
-              }
-              if (!served) {
-                // Wake on notify, never on a sleep. A setTimeout(0) backoff is clamped to ~4 ms in a browser Worker, so a
-                // polling kernel pays that clamp on every idle gap — the first run of this benchmark measured 4.4 ms per
-                // 4 KiB read at one process and 57 us at twenty, which is the clamp, not the channel.
-                // Wait on each channel's CURRENT state, not just on "idle". A channel sits at state 2 between our answer
-                // and the caller waking up, and sleeping through that window costs a ~4 ms timer clamp on every call.
-                // Waiting on the observed value wakes on any change, so both directions are covered by one rule.
-                const waits = [];
-                for (const entry of ends) {
-                  const state = Atomics.load(entry.header, 0);
-                  if (state === 3) continue;
-                  const wait = Atomics.waitAsync(entry.header, 0, state, 1000);
-                  // A wait that is not async means the state already changed, so there IS work to sweep. Resolving a
-                  // fulfilled promise keeps this branch yielding instead of spinning the CPU.
-                  waits.push(wait.async ? wait.value : Promise.resolve("changed"));
-                }
-                if (waits.length > 0) await Promise.race(waits);
-                else await new Promise((resolve) => setTimeout(resolve, 5));
-              }
-            }
+              }),
+            );
             self.postMessage({ kind: "stopped", answered });
           } catch (error) {
             self.postMessage({ kind: "fatal", error: String((error && error.stack) || error) });
