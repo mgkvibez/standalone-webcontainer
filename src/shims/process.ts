@@ -12,6 +12,7 @@
  *   a compatibility claim, not a claim to be Node's runtime.
  */
 import type { TickQueue } from "../runtime/ticks.js";
+import type { Terminal, TerminalInput } from "../terminal/pty.js";
 export class ProcessExit extends Error {
   readonly code: number;
 
@@ -25,6 +26,14 @@ export class ProcessExit extends Error {
 export interface WritableSink {
   write(chunk: string | Uint8Array): boolean;
   readonly text: string;
+  /**
+   * Present only when a terminal is attached to the stream. Undefined, not false, when there is none: that is what Node
+   * reports for a pipe, and code that checks `if (process.stdout.isTTY)` behaves the same either way while code that
+   * compares against `false` gets the truth.
+   */
+  readonly isTTY?: boolean;
+  readonly columns?: number;
+  readonly rows?: number;
 }
 
 export interface ProcessShim {
@@ -41,7 +50,24 @@ export interface ProcessShim {
   nextTick(callback: () => void, ...args: unknown[]): void;
   stdout: WritableSink;
   stderr: WritableSink;
+  /**
+   * The program's stdin, or null when no terminal is attached.
+   *
+   * Null rather than a fake empty stream: a program that checks `process.stdin` and finds nothing can report "no input"
+   * honestly, whereas a stream that never delivers would leave it waiting forever for input that cannot arrive. Piped input
+   * is a separate, later piece of work (ADR-0023).
+   */
+  readonly stdin: TerminalInput | null;
+  /** Registers a listener for a signal this runtime can deliver. Unknown events are accepted and never fired. */
   readonly on: (event: string, listener: () => void) => ProcessShim;
+  readonly off: (event: string, listener: () => void) => ProcessShim;
+  /**
+   * Drops every signal registration made through this shim.
+   *
+   * Required because the terminal outlives the process: a UI keeps one terminal across many runs, so a finished program's
+   * listener would still fire on the next resize and re-enter code whose scheduler has already run to termination.
+   */
+  readonly dispose: () => void;
 }
 
 /**
@@ -77,11 +103,37 @@ export interface ProcessOptions {
    * run has settled; a queue owned by the shim would be invisible to the thing waiting on it.
    */
   readonly ticks?: TickQueue;
+  /** The attached terminal, if any. Without one every tty question answers "no" rather than pretending. */
+  readonly terminal?: Terminal | null;
 }
 
+/**
+ * Gives a sink the terminal's live dimensions.
+ *
+ * Getters, not copies: a program that resizes and then reads `process.stdout.columns` must see the new number, and a snapshot
+ * taken at construction would keep answering 80 forever.
+ */
+const withTerminal = (sink: WritableSink, terminal: Terminal | null | undefined): WritableSink => {
+  if (terminal === null || terminal === undefined) return sink;
+  return Object.defineProperties(sink, {
+    isTTY: { get: () => true, enumerable: true },
+    columns: { get: () => terminal.columns, enumerable: true },
+    rows: { get: () => terminal.rows, enumerable: true },
+  });
+};
+
 export const createProcessShim = (options: ProcessOptions = {}): ProcessShim => {
-  const stdout = options.stdout ?? createSink();
-  const stderr = options.stderr ?? createSink();
+  const terminal = options.terminal ?? null;
+  const stdout = withTerminal(options.stdout ?? createSink(), terminal);
+  const stderr = withTerminal(options.stderr ?? createSink(), terminal);
+  /**
+   * Signal wiring. The previous shim returned itself from `on` and registered nothing, which meant `process.on("SIGWINCH", …)`
+   * was silently a no-op and a TUI would never redraw: the silent-lie failure this codebase tries not to ship.
+   *
+   * The map keeps the unsubscribe the terminal handed back, so `off` removes exactly one listener rather than all of them for
+   * that event, which is Node's behaviour and the one a listener that re-registers depends on.
+   */
+  const signalRegistrations = new Map<string, Map<() => void, () => void>>();
   const argv = options.argv !== undefined ? [...options.argv] : ["node"];
   const cwd = options.cwd ?? "/";
 
@@ -112,10 +164,35 @@ export const createProcessShim = (options: ProcessOptions = {}): ProcessShim => 
     },
     stdout,
     stderr,
-    // No signals or real event loop yet. Returning the shim keeps chaining
-    // code (`process.on(...).on(...)`) from crashing; the gap is recorded in
-    // ADR-0004 rather than hidden by a stub that pretends to work.
-    on: () => shim,
+    stdin: terminal === null ? null : terminal.stdin,
+    on: (event, listener) => {
+      // Only signals the terminal can actually deliver are wired. Anything else is accepted to keep chaining code working, but
+      // it is never fired and never claimed: a listener that never runs is better than a listener that runs at the wrong time,
+      // and both are worse than the truth, which is that this runtime delivers two signals today.
+      if (terminal !== null && (event === "SIGWINCH" || event === "SIGINT")) {
+        const existing = signalRegistrations.get(event) ?? new Map<() => void, () => void>();
+        if (!existing.has(listener)) {
+          const unsubscribe = terminal.on(event, listener);
+          existing.set(listener, unsubscribe);
+          signalRegistrations.set(event, existing);
+        }
+      }
+      return shim;
+    },
+    dispose: () => {
+      for (const registrations of signalRegistrations.values()) for (const unsubscribe of registrations.values()) unsubscribe();
+      signalRegistrations.clear();
+    },
+    off: (event, listener) => {
+      const existing = signalRegistrations.get(event);
+      const unsubscribe = existing?.get(listener);
+      if (unsubscribe !== undefined) {
+        unsubscribe();
+        existing?.delete(listener);
+        if (existing?.size === 0) signalRegistrations.delete(event);
+      }
+      return shim;
+    },
   };
 
   return shim;
