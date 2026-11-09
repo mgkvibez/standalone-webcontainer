@@ -10,6 +10,26 @@
 
 import { defineConfig, loadEnv } from "vite";
 
+/**
+ * Isolation headers, needed for `crossOriginIsolated` and therefore for `SharedArrayBuffer`, which ADR-0018's synchronous
+ * syscall channel depends on (`Atomics.wait`). A secure context is not enough: `http://localhost` is already trustworthy,
+ * but SAB still refuses to exist unless the document is cross-origin isolated.
+ *
+ * `require-corp` fails closed, so it would break any cross-origin subresource that does not opt in. That is deliberate:
+ * the app bundles its dependencies (no third-party CDN), so nothing needs an exception today, and the failure mode if
+ * something is added later is a loud console error rather than a silent loss of isolation.
+ *
+ * CORP `cross-origin` is the exception that makes embedding work: the editor embeds the preview as an iframe on a
+ * different host, and under COEP require-corp that child document has to be explicitly shareable.
+ *
+ * Kept identical in `vercel.json`; `tests/unit/isolation.headers.test.ts` fails if the two disagree.
+ */
+const ISOLATION_HEADERS = {
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Cross-Origin-Embedder-Policy": "require-corp",
+  "Cross-Origin-Resource-Policy": "cross-origin",
+} as const;
+
 const isDnsName = (value: string): boolean =>
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(value);
 
@@ -34,8 +54,8 @@ export default defineConfig(({ command, mode }) => {
       sourcemap: true,
       rollupOptions: { input: "index.html" },
     },
-    server: { port: 5199, strictPort: true, host: "127.0.0.1", allowedHosts },
-    preview: { port: 5199, strictPort: true, host: "127.0.0.1", allowedHosts },
+    server: { port: 5199, strictPort: true, host: "127.0.0.1", allowedHosts, headers: ISOLATION_HEADERS },
+    preview: { port: 5199, strictPort: true, host: "127.0.0.1", allowedHosts, headers: ISOLATION_HEADERS },
     worker: { format: "es" },
     // Browser-native stand-ins for the three Node-shaped dependencies the runtime ships with.
     optimizeDeps: { include: ["buffer", "acorn", "pathe"] },
