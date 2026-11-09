@@ -1,3 +1,4 @@
+import type { FileSystemPort } from "../vfs/port.js";
 /**
  * `fs` shim: Node's documented `fs` surface, translated onto our VFS.
  *
@@ -11,7 +12,6 @@
  * because real packages branch on `err.code` and a shim that throws internal
  * error classes breaks them at the first `catch`.
  */
-import { FileSystem } from "../vfs/index.js";
 import { path as nodePath } from "./path.js";
 import { VFSError } from "../vfs/errors.js";
 import { Buffer } from "buffer";
@@ -93,7 +93,7 @@ export interface FsShim {
 }
 
 /** Absolute-path-only core. Everything outside this module goes through the cwd-aware wrapper below. */
-const createAbsoluteFsShim = (vfs: FileSystem): FsShim => ({
+const createAbsoluteFsShim = (vfs: FileSystemPort): FsShim => ({
   readFileSync(path, encoding) {
     try {
       const out = encoding === "utf8" ? vfs.readFileSync(path, "utf8") : vfs.readFileSync(path);
@@ -223,7 +223,7 @@ const createAbsoluteFsShim = (vfs: FileSystem): FsShim => ({
  *
  * Error mapping lives in the absolute shim, so this layer only rewrites paths and cannot change how failures surface.
  */
-export const createFsShim = (vfs: FileSystem, options: { readonly cwd?: string } = {}): FsShim => {
+export const createFsShim = (vfs: FileSystemPort, options: { readonly cwd?: string } = {}): FsShim => {
   const cwd = options.cwd ?? "/";
   const at = (path: string): string => (path.startsWith("/") ? path : nodePath.resolve(cwd, path));
   const inner = createAbsoluteFsShim(vfs);
