@@ -13,6 +13,7 @@ import { expect, test } from "@playwright/test";
 
 interface WatchOutcome {
   readonly events: Array<{ kind: string; filename: string }>;
+  readonly drainedEvents: Array<{ kind: string; filename: string }>;
   readonly statsAfterExit: Array<{ owner: string; watches: number; pending: number }>;
   readonly watcherCount: number;
 }
@@ -171,23 +172,35 @@ test("a process receives a filesystem change made by another process", async ({ 
       const waiters: Array<{ kind: string; resolve: (message: Record<string, unknown>) => void }> = [];
       worker.onmessage = (message: MessageEvent) => {
         const data = message.data as Record<string, unknown>;
-        received.push(data);
         const index = waiters.findIndex((waiter) => waiter.kind === data.kind);
         if (index >= 0) {
+          // A message claimed by a waiter is DELIVERED, not also queued. Queuing it as well meant a later wait for the same
+          // kind found the earlier message and returned it: the second "report" came back as the first, so a test compared
+          // a report with itself. Removal here is the fix; the `findIndex` + `splice` in `waitFor` covers the other order.
           const [waiter] = waiters.splice(index, 1);
           waiter?.resolve(data);
+          return;
         }
+        received.push(data);
       };
       worker.onerror = (event: ErrorEvent) => {
         received.push({ kind: "worker-error", error: event.message });
       };
       return {
         all: () => [...received],
+        /**
+         * Wait for a message of `kind` and CONSUME it.
+         *
+         * Consuming is the whole point: an earlier version looked the message up without removing it, so a second wait for
+         * "report" instantly returned the FIRST report. The test then compared a report against itself and looked like a
+         * watcher bug, which cost a debugging round.
+         */
         waitFor: (kind: string, timeoutMs = 20_000) =>
           new Promise((resolve, reject) => {
-            const existing = received.find((message) => message.kind === kind);
-            if (existing !== undefined) {
-              resolve(existing);
+            const index = received.findIndex((message) => message.kind === kind);
+            if (index >= 0) {
+              const [existing] = received.splice(index, 1);
+              resolve(existing as Record<string, unknown>);
               return;
             }
             const waiter = { kind, resolve };
@@ -226,6 +239,13 @@ test("a process receives a filesystem change made by another process", async ({ 
     watcher.postMessage({ report: true });
     const report = await reported;
 
+    // Then ask again once the queue has had time to refill. If anything were still pending, this second report would carry
+    // it; an empty second report is the drain-to-quiescence check.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const drained = watcherInbox.waitFor("report");
+    watcher.postMessage({ report: true });
+    const secondReport = await drained;
+
     const closed = watcherInbox.waitFor("closed");
     watcher.postMessage({ close: true });
     await closed;
@@ -243,13 +263,31 @@ test("a process receives a filesystem change made by another process", async ({ 
 
     return {
       events: (report.events ?? []) as Array<{ kind: string; filename: string }>,
+      drainedEvents: (secondReport.events ?? []) as Array<{ kind: string; filename: string }>,
       statsAfterExit: (statsMessage.stats ?? []) as Array<{ owner: string; watches: number; pending: number }>,
       watcherCount: (statsMessage.watcherCount ?? -1) as number,
     };
   });
 
-  // Five writes from another process, coalesced by the kernel into one event with Node's base name.
-  expect(outcome.events).toEqual([{ kind: "change", filename: "main.js" }]);
+  /**
+   * What is asserted here is the invariant that actually holds, not the one I first wrote down.
+   *
+   * The kernel coalesces per path, so five writes that all land between two polls arrive as one event. But a poll CAN land
+   * mid-burst — the writer's five writes are five separate syscall round trips, so on a slower machine the watcher drains
+   * between them — and then two events are correct, not a bug. Asserting "exactly one" made this test depend on scheduling
+   * luck: it passed locally and failed in CI, which is the flakiest possible way to be wrong.
+   *
+   * The honest invariant is per-write: every event names the file that changed, every event is a `change` (nothing here
+   * creates or renames), and there are never MORE events than writes, because an event cannot be invented. Coalescing itself
+   * is proven deterministically in tests/unit/watch-registry.test.ts, where the poll is driven by hand.
+   */
+  expect(outcome.events.length).toBeGreaterThanOrEqual(1);
+  expect(outcome.events.length).toBeLessThanOrEqual(5);
+  for (const event of outcome.events) {
+    expect(event).toEqual({ kind: "change", filename: "main.js" });
+  }
+  // Nothing left pending after the burst: the watcher drained rather than falling behind.
+  expect(outcome.drainedEvents).toEqual([]);
   // After the watcher closed and exited, nothing is watching: this is the phantom-watcher check.
   expect(outcome.statsAfterExit).toEqual([]);
   expect(outcome.watcherCount).toBe(1); // the kernel's own subscription remains; it is not a process watch
