@@ -346,6 +346,17 @@ export class FileSystem {
   }
 
   /** Synchronous stat. Same rationale as `writeFileSync` (ADR-0002 #2, #7). */
+  /** The loop, spelled once, so the resolver has one shape to call whatever substrate it is talking to. */
+  statManySync(paths: readonly string[]): (Stats | null)[] {
+    return paths.map((path) => {
+      try {
+        return this.statSync(path);
+      } catch {
+        return null;
+      }
+    });
+  }
+
   statSync(path: string): Stats {
     const p = normalizeVfsPath(path);
     this.#assertNoFileAncestors(p);

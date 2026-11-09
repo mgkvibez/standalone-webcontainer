@@ -176,49 +176,44 @@ export class CommonJsLoader {
     throw new ModuleNotFoundError(specifier, fromDir);
   }
 
-  #isFile(path: string): boolean {
-    try {
-      return this.#deps.fs.statSync(path).isFile();
-    } catch {
-      return false;
-    }
-  }
-
-  #isDirectory(path: string): boolean {
-    try {
-      return this.#deps.fs.statSync(path).isDirectory();
-    } catch {
-      return false;
-    }
-  }
-
   /**
    * Node's documented order: exact file, then extension guesses, then treat as a
    * directory via package.json `main`, then index files.
    */
   #resolveFileOrDirectory(candidate: string): string | undefined {
-    if (this.#isFile(candidate)) return candidate;
-    for (const extension of EXTENSIONS) {
-      if (this.#isFile(candidate + extension)) return candidate + extension;
-    }
-    if (!this.#isDirectory(candidate)) return undefined;
+    // The exact name and every extension guess are INDEPENDENT probes: their ORDER decides the winner, not whether they can
+    // be asked together. Asking in one round trip changes nothing about which file wins and removes up to three wake-ups
+    // from the expensive path, because a miss is the common case (a directory, or a specifier that needs an extension).
+    const fileCandidates = [candidate, ...EXTENSIONS.map((extension) => candidate + extension)];
+    // The manifest probe rides along in the same batch: it is only *used* when the candidate turns out to be a directory, but
+    // asking early costs one entry in a message that is already being sent and saves a whole wake-up on the path that needs it.
+    const probes = [...fileCandidates, nodePath.join(candidate, "/package.json")];
+    const fileStats = this.#deps.fs.statManySync(probes);
+    const fileHit = fileStats.slice(0, fileCandidates.length).findIndex((stats) => stats?.isFile() === true);
+    if (fileHit !== -1) return fileCandidates[fileHit];
 
-    const main = this.#readPackageMain(candidate);
+    if (fileStats[0]?.isDirectory() !== true) return undefined;
+
+    const main = this.#readPackageMain(candidate, fileStats[fileCandidates.length]?.isFile() === true);
     if (main !== undefined) {
       const mainPath = main.startsWith("/") ? nodePath.join(candidate, main) : nodePath.join(candidate, main);
       const resolvedMain = this.#resolveFileOrDirectory(mainPath);
       if (resolvedMain !== undefined) return resolvedMain;
     }
-    for (const extension of EXTENSIONS) {
-      const indexFile = nodePath.join(candidate, `/index${extension}`);
-      if (this.#isFile(indexFile)) return indexFile;
-    }
-    return undefined;
+
+    const indexCandidates = EXTENSIONS.map((extension) => nodePath.join(candidate, `/index${extension}`));
+    const indexStats = this.#deps.fs.statManySync(indexCandidates);
+    const indexHit = indexStats.findIndex((stats) => stats?.isFile() === true);
+    return indexHit === -1 ? undefined : indexCandidates[indexHit];
   }
 
-  #readPackageMain(directory: string): string | undefined {
+  /**
+   * Reads the manifest a batched probe already found. `manifestExists` comes from that probe rather than a fresh stat,
+   * because the answer is already in hand and asking twice is the cost this change exists to remove.
+   */
+  #readPackageMain(directory: string, manifestExists: boolean): string | undefined {
+    if (!manifestExists) return undefined;
     const manifestPath = nodePath.join(directory, "/package.json");
-    if (!this.#isFile(manifestPath)) return undefined;
     try {
       const raw = this.#deps.fs.readFileSync(manifestPath, "utf8");
       const parsed: unknown = JSON.parse(typeof raw === "string" ? raw : raw.toString());

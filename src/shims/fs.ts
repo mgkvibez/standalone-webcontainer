@@ -1,4 +1,4 @@
-import type { FileSystemPort, WatchSourcePort } from "../vfs/port.js";
+import type { FileSystemPort, VfsStatsPort, WatchSourcePort } from "../vfs/port.js";
 import { toWatchAsyncIterator, type WatchAsyncIterator, type WatchHandlePort } from "../vfs/watch-iterator.js";
 /**
  * `fs` shim: Node's documented `fs` surface, translated onto our VFS.
@@ -65,8 +65,25 @@ const toNodeError = (error: unknown, syscall: string, path: string): NodeFsError
   throw error;
 };
 
+/** One place where a port stat becomes the Node-shaped one, so `statSync` and `statManySync` cannot drift apart. */
+const asStats = (stats: VfsStatsPort): StatsShim => ({
+  isFile: () => stats.kind === "file",
+  isDirectory: () => stats.kind === "dir",
+  size: stats.size,
+  mtimeMs: stats.modifiedAt,
+  birthtimeMs: stats.createdAt,
+});
+
 const asBuffer = (data: string | Uint8Array): Buffer =>
   typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data);
+
+export interface StatsShim {
+  isFile(): boolean;
+  isDirectory(): boolean;
+  size: number;
+  mtimeMs: number;
+  birthtimeMs: number;
+}
 
 export interface FsShim {
   readFileSync(path: string, encoding?: "utf8"): Buffer | string;
@@ -74,13 +91,14 @@ export interface FsShim {
   existsSync(path: string): boolean;
   mkdirSync(path: string, options?: { recursive?: boolean }): void;
   readdirSync(path: string): string[];
-  statSync(path: string): {
-    isFile(): boolean;
-    isDirectory(): boolean;
-    size: number;
-    mtimeMs: number;
-    birthtimeMs: number;
-  };
+  statSync(path: string): StatsShim;
+  /**
+   * Stat several paths at once: one entry per path, `null` where it does not exist.
+   *
+   * Always present on the shim so callers have one shape to call, even when the substrate underneath cannot batch: the
+   * fallback is the same loop over `statSync`, which is what the caller would have written anyway.
+   */
+  statManySync(paths: readonly string[]): readonly (StatsShim | null)[];
   unlinkSync(path: string): void;
   rmdirSync(path: string): void;
   renameSync(from: string, to: string): void;
@@ -194,17 +212,22 @@ const createAbsoluteFsShim = (vfs: FileSystemPort, watches?: WatchSourcePort): F
 
   statSync(path) {
     try {
-      const stats = vfs.statSync(path);
-      return {
-        isFile: () => stats.kind === "file",
-        isDirectory: () => stats.kind === "dir",
-        size: stats.size,
-        mtimeMs: stats.modifiedAt,
-        birthtimeMs: stats.createdAt,
-      };
+      return asStats(vfs.statSync(path));
     } catch (error) {
       throw toNodeError(error, "stat", path);
     }
+  },
+
+  statManySync(paths) {
+    const many = vfs.statManySync;
+    if (many !== undefined) return many.call(vfs, paths).map((stats) => (stats === null ? null : asStats(stats)));
+    return paths.map((path) => {
+      try {
+        return asStats(vfs.statSync(path));
+      } catch {
+        return null;
+      }
+    });
   },
 
   unlinkSync(path) {
@@ -295,6 +318,8 @@ export const createFsShim = (
     existsSync: (path) => inner.existsSync(at(path)),
     mkdirSync: (path, mkdirOptions) => inner.mkdirSync(at(path), mkdirOptions),
     readdirSync: (path) => inner.readdirSync(at(path)),
+    // Every path is rewritten before the batch is sent, so the caller batches relative paths and the port sees absolute ones.
+    statManySync: (paths) => inner.statManySync(paths.map(at)),
     statSync: (path) => inner.statSync(at(path)),
     unlinkSync: (path) => inner.unlinkSync(at(path)),
     rmdirSync: (path) => inner.rmdirSync(at(path)),

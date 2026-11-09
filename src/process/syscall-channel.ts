@@ -119,6 +119,27 @@ export class SyscallChannelClosedError extends Error {
   }
 }
 
+/**
+ * The one key a request may not use.
+ *
+ * A batch is a request that carries other requests. The kernel cannot tell the two apart by shape, so the marker has to be a
+ * key that ordinary requests do not have; a caller that happens to build one is refused rather than silently having its call
+ * expanded into something else.
+ */
+export const BATCH_KEY = "@batch";
+
+/** One entry of a batch answer: the same `ok`/`value`/`error` shape the channel uses for a single call. */
+export type BatchOutcome =
+  | { readonly ok: true; readonly value: unknown }
+  | { readonly ok: false; readonly error: { readonly message: string; readonly code?: string } };
+
+export class SyscallUsageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SyscallUsageError";
+  }
+}
+
 const align4 = (value: number): number => Math.ceil(value / 4) * 4;
 
 /** Allocate the shared buffer both ends attach to. The same `SharedArrayBuffer` must reach both Workers. */
@@ -181,6 +202,40 @@ export class SyscallClient {
 
   /** Make one blocking call. Returns the decoded value the kernel produced. */
   call(request: unknown, options: CallOptions): unknown {
+    // The batch marker is the channel's, not the caller's: a request carrying it would be expanded into several calls and
+    // answered with an array, which is not what the caller asked for. Refused here rather than at the kernel, where the
+    // distinction has already been lost.
+    if (typeof request === "object" && request !== null && Object.prototype.hasOwnProperty.call(request, BATCH_KEY)) {
+      throw new SyscallUsageError(`A request may not use the reserved key ${BATCH_KEY}. Use callMany to batch.`);
+    }
+    return this.#transmit(request, options) as unknown;
+  }
+
+  /**
+   * Make several blocking calls in one round trip.
+   *
+   * The caller is stopped once, not once per call: the kernel answers every entry while it already holds the thread. Entries
+   * are independent, so one rejection does not discard the others, and the outcomes come back in the order the requests went
+   * in. What this costs is that the whole batch shares one deadline and one response region: a batch too large to fit fails
+   * as a batch, and the caller's recourse is to send it in pieces.
+   */
+  callMany(requests: readonly unknown[], options: CallOptions): BatchOutcome[] {
+    if (requests.length === 0) return [];
+    for (const entry of requests) {
+      if (typeof entry === "object" && entry !== null && Object.prototype.hasOwnProperty.call(entry, BATCH_KEY)) {
+        throw new SyscallUsageError(`A batched request may not carry ${BATCH_KEY}: batches do not nest.`);
+      }
+    }
+
+    const answer = this.#transmit({ [BATCH_KEY]: requests }, options) as Record<string, unknown> | undefined;
+    const outcomes = answer?.[BATCH_KEY];
+    if (!Array.isArray(outcomes) || outcomes.length !== requests.length) {
+      throw new SyscallRejectedError("Kernel answered a batch with something that is not one.", "EBATCHSHAPE");
+    }
+    return outcomes as BatchOutcome[];
+  }
+
+  #transmit(request: unknown, options: CallOptions): unknown {
     if (Atomics.load(this.#header, IDX_STATE) === CHANNEL_STATE.closed) throw new SyscallChannelClosedError();
     if (options.timeoutMs <= 0) throw new RangeError("A syscall needs a positive deadline.");
 
@@ -271,6 +326,31 @@ interface ServerCore {
  * which is exactly what happens to duplicated concurrency logic. The two loops below still differ, because one parks the
  * thread and the other does not, but they now differ in one place instead of two.
  */
+/**
+ * One request in, one answer out, where "request" may be a batch of them.
+ *
+ * A batch is answered inside a single wake-up: the kernel is already holding the thread, so the marginal cost of the next
+ * entry is the handler call and nothing else. Entries fail independently, because a batch is a caller saying "these are
+ * unrelated questions" and losing seven answers to one missing file would defeat the point.
+ */
+const batchEntry = (request: unknown, handler: (request: unknown) => unknown): unknown => {
+  const entries =
+    typeof request === "object" && request !== null
+      ? (request as Record<string, unknown>)[BATCH_KEY]
+      : undefined;
+  if (!Array.isArray(entries)) return { ok: true, value: handler(request) };
+
+  const outcomes: BatchOutcome[] = entries.map((entry) => {
+    try {
+      return { ok: true, value: handler(entry) };
+    } catch (error) {
+      const err = error as { message?: string; code?: string };
+      return { ok: false, error: { message: err.message ?? String(error), code: err.code ?? "EUNKNOWN" } };
+    }
+  });
+  return { ok: true, value: { [BATCH_KEY]: outcomes } };
+};
+
 function createServerCore(allocation: ChannelAllocation, encoding: Encoding): ServerCore {
   const { buffer, sizes } = allocation;
   const header = new Int32Array(buffer, 0, HEADER_INTS);
@@ -306,7 +386,7 @@ function createServerCore(allocation: ChannelAllocation, encoding: Encoding): Se
     let answer: Uint8Array;
     try {
       const request = encoding.decode(requestRegion.slice(0, length));
-      answer = encoding.encode({ ok: true, value: handler(request) });
+      answer = encoding.encode(batchEntry(request, handler));
     } catch (error) {
       const err = error as { message?: string; code?: string };
       answer = encoding.encode({ ok: false, error: { message: err.message ?? String(error), code: err.code ?? "EUNKNOWN" } });
