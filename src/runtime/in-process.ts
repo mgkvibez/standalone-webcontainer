@@ -24,6 +24,7 @@ import { createFsShim, type FsShim } from "../shims/fs.js";
 import { Duplex, PassThrough, pipeline, Readable, Transform, Writable } from "../shims/stream.js";
 import { path } from "../shims/path.js";
 import { createProcessShim, createSink, ProcessExit, type ProcessShim } from "../shims/process.js";
+import { TickQueue } from "./ticks.js";
 import {
   installDependencies,
   loadLockfile,
@@ -61,8 +62,8 @@ export interface RunOptions {
  * run, so a `.then` that queues another `.then` would still be pending. The microtask queue is empty by the time a timer
  * callback runs, which is the one cheap guarantee available in both a browser and Node.
  *
- * This does not wait for anything in the timer queue, because the runtime has no timer queue of its own yet; work
- * scheduled with a real `setTimeout` of any delay is still unobserved (ADR-0013).
+ * This waits for continuations only. Timers are the scheduler's job (`Scheduler.drain`), which runs after this so that
+ * microtasks keep their Node precedence over timers.
  */
 async function drainAfterEvaluation(): Promise<void> {
   await new Promise<void>((resolve) => {
@@ -198,12 +199,14 @@ export class InProcessRuntime implements Runtime {
     const stdout = createSink(onOutput === undefined ? undefined : (text) => onOutput("stdout", text));
     const stderr = createSink(onOutput === undefined ? undefined : (text) => onOutput("stderr", text));
     const cwd = options.cwd ?? "/";
+    const ticks = new TickQueue();
     const processShim: ProcessShim = createProcessShim({
       argv: options.argv !== undefined ? [...options.argv] : ["node", entryPath],
       cwd,
       env: options.env ?? {},
       stdout,
       stderr,
+      ticks,
     });
 
     // One scheduler per execution, created before any user code runs: its construction is the wall-clock baseline both
@@ -295,6 +298,16 @@ export class InProcessRuntime implements Runtime {
       }
     };
 
+    // The program body, plus the tick drain that Node performs at the end of the turn. The flush is in `finally` so it
+    // still runs when the body throws or calls process.exit, both of which leave queued ticks behind.
+    const runBody = (): number => {
+      try {
+        return execute();
+      } finally {
+        ticks.flushNow();
+      }
+    };
+
     let exitCode: number;
     let timedOut = false;
 
@@ -305,7 +318,7 @@ export class InProcessRuntime implements Runtime {
       const timeout = new Promise<"timeout">((resolve) => {
         timer = setTimeout(() => resolve("timeout"), options.timeoutMs);
       });
-      const outcome = await Promise.race([Promise.resolve(execute()), timeout]);
+      const outcome = await Promise.race([Promise.resolve(runBody()), timeout]);
       if (timer !== undefined) clearTimeout(timer);
       if (outcome === "timeout") {
         timedOut = true;
@@ -314,16 +327,26 @@ export class InProcessRuntime implements Runtime {
         exitCode = outcome;
       }
     } else {
-      exitCode = execute();
+      exitCode = runBody();
     }
 
     // The timer queue runs to termination BEFORE the output is read, and before the continuation drain: a callback that
     // logs, and a `.then` inside that callback, must both be in the snapshot (ADR-0013 amendment 2).
     if (!timedOut) {
       try {
+        // Promise continuations settle BEFORE the timer queue. Node runs every microtask before the first timer callback,
+        // so a `.then` chain must complete even when the timer was registered first. The old order drained timers first
+        // and made `m1,timer,m2` out of a program Node runs as `m1,m2,timer` (differential case
+        // `microtask-starvation`). The boundary is a macrotask, which lets the whole chain run rather than one hop.
+        await drainAfterEvaluation();
+        // Then the timer queue, which drains to quiescence internally and lets continuations run between its passes
+        // (fixture 4 schedules its timer from a `pipeline` callback, which is the case a single pass missed).
         await scheduler.drain();
-        // Promise continuations get their turn before the output is read (ADR-0013). Without this, `console.log` inside a
-        // `.then` wrote into a sink nobody read yet, which is indistinguishable from the program printing nothing.
+        // Ticks queued by a timer callback keep their precedence over the microtasks that follow it.
+        ticks.flushNow();
+        // Callbacks that logged, and any continuation they queued, are only in the snapshot after this. Without it,
+        // `console.log` inside a `.then` wrote into a sink nobody had read yet, which is indistinguishable from the
+        // program printing nothing (ADR-0013).
         await drainAfterEvaluation();
       } catch (error) {
         // A throw from inside a callback or continuation belongs to THIS run. Letting it escape became an uncaught
