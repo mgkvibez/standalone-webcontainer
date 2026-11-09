@@ -10,6 +10,7 @@
  */
 
 import { RuntimeSupervisor } from "./runtime-supervisor.js";
+import { createTerminal, type Terminal } from "../terminal/pty.js";
 import type { ClientMessage, RunRequest, ServerMessage, TransportMessage } from "./protocol.js";
 
 interface WorkerScope {
@@ -25,11 +26,21 @@ const post = (message: ServerMessage): void => {
 
 const supervisor = new RuntimeSupervisor();
 const transportPorts = new Map<number, MessagePort>();
+/**
+ * Terminals for runs that are still alive, keyed by process id.
+ *
+ * The page cannot hold these: a Terminal is a live object with listeners, and the program that reads it runs HERE. So the page
+ * sends dimensions with the run and keystrokes afterwards, and this map is how those messages find the right program. Entries are
+ * removed when the run settles, so a later keystroke cannot reach a finished program.
+ */
+const terminals = new Map<number, Terminal>();
 const MAX_TRANSPORT_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_TRANSPORT_HEADER_COUNT = 128;
 const MAX_TRANSPORT_HEADER_BYTES = 32 * 1024;
 
 async function handleRun(request: RunRequest): Promise<void> {
+  const terminal = request.terminal === undefined ? null : createTerminal(request.terminal);
+  if (terminal !== null) terminals.set(request.processId, terminal);
   try {
     const result = await supervisor.run({
       projectId: request.projectId,
@@ -42,7 +53,7 @@ async function handleRun(request: RunRequest): Promise<void> {
       onOutput: (stream, text) => {
         post({ type: "chunk", id: request.id, stream, text });
       },
-    });
+    }, { terminal });
     post({
       type: "result",
       id: request.id,
@@ -62,6 +73,10 @@ async function handleRun(request: RunRequest): Promise<void> {
       message: error instanceof Error ? error.message : String(error),
       ...(error instanceof Error && error.stack !== undefined ? { stack: error.stack } : {}),
     });
+  } finally {
+    // The program is over, so nothing may still type into it. Deleting here rather than in the success path only means an
+    // error run is cleaned up too.
+    terminals.delete(request.processId);
   }
 }
 
@@ -150,6 +165,13 @@ scope.onmessage = (event: MessageEvent<ClientMessage>): void => {
     }
     case "stop-servers":
       post({ type: "servers-stopped", id: message.id, ports: supervisor.stopServers(message.ports) });
+      return;
+    case "input":
+      // Dropped when no run owns that process id: typing into a program that has exited is a no-op, not an error.
+      terminals.get(message.processId)?.write(message.text);
+      return;
+    case "resize":
+      terminals.get(message.processId)?.resize(message.columns, message.rows);
       return;
   }
 };

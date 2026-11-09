@@ -9,6 +9,12 @@
  * contain hostile code, and nothing here should be described as a sandbox.
  */
 
+/** Terminal dimensions, as plain data: a Terminal object cannot cross a thread boundary. */
+export interface TerminalSize {
+  readonly columns: number;
+  readonly rows: number;
+}
+
 export interface RunRequest {
   readonly type: "run";
   readonly id: number;
@@ -21,6 +27,26 @@ export interface RunRequest {
   readonly cwd: string;
   readonly env: Readonly<Record<string, string>>;
   readonly timeoutMs: number;
+  /**
+   * Present when the run has a terminal. The Worker builds the Terminal from these numbers, because the object itself
+   * cannot cross the boundary; keystrokes arrive later as `input` messages addressed to the same processId.
+   */
+  readonly terminal?: TerminalSize;
+}
+
+/** Typed text, on its way to a running program's stdin. */
+export interface InputMessage {
+  readonly type: "input";
+  readonly processId: number;
+  readonly text: string;
+}
+
+/** A new window size for a running program, which is what makes SIGWINCH reach it. */
+export interface ResizeMessage {
+  readonly type: "resize";
+  readonly processId: number;
+  readonly columns: number;
+  readonly rows: number;
 }
 
 export interface PingRequest {
@@ -51,7 +77,14 @@ export interface StopServersRequest {
   readonly ports: readonly number[];
 }
 
-export type ClientMessage = RunRequest | PingRequest | ConnectTransportMessage | DisconnectTransportMessage | StopServersRequest;
+export type ClientMessage =
+  | RunRequest
+  | PingRequest
+  | ConnectTransportMessage
+  | DisconnectTransportMessage
+  | StopServersRequest
+  | InputMessage
+  | ResizeMessage;
 
 export interface TransportRequest {
   readonly type: "request";

@@ -2,6 +2,7 @@ import type { RuntimeRunOutcome, RuntimeRunRequest } from "../container/types.js
 import { InProcessRuntime } from "../runtime/in-process.js";
 import { FileSystem } from "../vfs/index.js";
 import type { WireRequest, WireResponse } from "../shims/http.js";
+import type { Terminal } from "../terminal/pty.js";
 
 export type SupervisedProcessState = "queued" | "running" | "exited" | "failed" | "stopped";
 
@@ -34,7 +35,11 @@ export class RuntimeSupervisor {
       .map((process) => ({ ...process, ports: [...process.ports] }));
   }
 
-  async run(request: RuntimeRunRequest): Promise<RuntimeRunOutcome> {
+  /**
+   * `extras.terminal` is the Worker-built Terminal for this run, kept out of RuntimeRunRequest because that interface is the
+   * container's and carries only plain data across the thread boundary.
+   */
+  async run(request: RuntimeRunRequest, extras: { terminal?: Terminal | null } = {}): Promise<RuntimeRunOutcome> {
     let outcome: RuntimeRunOutcome | undefined;
     const processId = request.processId ?? this.#nextProcessId++;
     const record: SupervisedProcess = { id: processId, entry: request.entry, state: "queued", ports: [] };
@@ -53,6 +58,7 @@ export class RuntimeSupervisor {
           env: { ...request.env },
           timeoutMs: request.timeoutMs,
           onOutput: request.onOutput,
+          ...(extras.terminal === undefined || extras.terminal === null ? {} : { terminal: extras.terminal }),
         });
         const started = runtime.ports.list()
           .filter((binding) => binding.protocol === "http" && !before.has(binding.port))

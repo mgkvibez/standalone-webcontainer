@@ -45,6 +45,15 @@ export interface ContainerOptions {
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 
+/**
+ * The size a session starts at, before any UI has measured the window.
+ *
+ * 80x24 because that is the terminal default every program assumes, so a program run before the first measurement sees the same
+ * numbers it would in a real terminal that had not been resized.
+ */
+const DEFAULT_TERMINAL_COLUMNS = 80;
+const DEFAULT_TERMINAL_ROWS = 24;
+
 export class Container {
   readonly #runtime: RuntimeClient;
   readonly #files: ProjectFiles;
@@ -94,6 +103,8 @@ export class Container {
       id: `session-${index}`,
       name: name ?? `terminal ${index}`,
       cwd: "/",
+      columns: DEFAULT_TERMINAL_COLUMNS,
+      rows: DEFAULT_TERMINAL_ROWS,
       history: [],
       scrollback: [],
       processIds: [],
@@ -105,6 +116,51 @@ export class Container {
 
   findSession(id: string): Session | undefined {
     return this.#sessions.find((session) => session.id === id);
+  }
+
+  /**
+   * Typed text, delivered to the program running in that session.
+   *
+   * Nothing happens when no program is running: this is the program's stdin, not a line editor. Line editing belongs to the
+   * UI's prompt, and pretending to echo or to buffer a half-typed command here would put a second, worse editor in the path.
+   */
+  write(sessionId: string, text: string): void {
+    const process = this.#runningIn(sessionId);
+    if (process === undefined) return;
+    this.#runtime.write?.(process.pid, text);
+  }
+
+  /**
+   * Changes a session's window size and tells the program running in it.
+   *
+   * Stored on the session even with nothing running, because the size outlives the process: the next program to start in this
+   * session should see the window the user actually has, not the 80 columns this container was built with.
+   */
+  resizeSession(sessionId: string, columns: number, rows: number): void {
+    const session = this.findSession(sessionId);
+    if (session === undefined) throw new Error(`unknown session ${sessionId}`);
+    if (!Number.isInteger(columns) || columns <= 0 || !Number.isInteger(rows) || rows <= 0) {
+      throw new RangeError(`terminal size must be positive integers, got ${columns}x${rows}`);
+    }
+    if (session.columns === columns && session.rows === rows) return;
+    session.columns = columns;
+    session.rows = rows;
+    const process = this.#runningIn(sessionId);
+    if (process !== undefined) this.#runtime.resize?.(process.pid, columns, rows);
+    this.#notify();
+  }
+
+  /** The process a keystroke in this session belongs to, if one is running. */
+  #runningIn(sessionId: string): ProcessRecord | undefined {
+    let found: ProcessRecord | undefined;
+    for (const process of this.#processes.values()) {
+      if (process.sessionId !== sessionId) continue;
+      if (process.state !== "running" && process.state !== "queued") continue;
+      // The newest wins: a session runs one program at a time (the queue guarantees it), so this only settles ties left by a
+      // process that has just ended.
+      if (found === undefined || process.pid > found.pid) found = process;
+    }
+    return found;
   }
 
   helpText(): string {
@@ -326,6 +382,8 @@ export class Container {
         cwd: process.cwd,
         env: { PWD: process.cwd },
         timeoutMs: this.#timeoutMs,
+        // The program gets a terminal sized like the session, so `process.stdout.columns` matches the window the user sees.
+        terminal: { columns: session.columns, rows: session.rows },
         onOutput: (stream, text) => {
           // Live output: the terminal sees it while the process runs, and the record keeps the same text.
           this.#append(session, stream, text);
