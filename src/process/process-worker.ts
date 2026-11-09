@@ -15,6 +15,7 @@
 import type { ChannelSizes } from "./syscall-channel.js";
 import { SyscallClient } from "./syscall-channel.js";
 import { createRemoteFileSystem } from "./remote-fs.js";
+import { createRemoteWatcher, realTimerScheduler } from "./remote-watch.js";
 import { InProcessRuntime } from "../runtime/in-process.js";
 
 interface ProcessScope {
@@ -62,7 +63,19 @@ async function run(start: StartMessage): Promise<void> {
   try {
     const client = new SyscallClient({ buffer: start.buffer, sizes: start.sizes });
     const fs = createRemoteFileSystem(client, { timeoutMs: SYSCALL_TIMEOUT_MS });
-    const runtime = new InProcessRuntime(fs);
+    // Watching from inside a process is pulled over the same channel as everything else: the kernel owns the registry, this
+    // Worker owns the polling client. A local source here would watch a filesystem this Worker does not have.
+    const runtime = new InProcessRuntime(fs, {
+      watches: {
+        watch: (path, watchOptions) =>
+          createRemoteWatcher({
+            transport: client,
+            path,
+            scheduler: realTimerScheduler,
+            ...(watchOptions?.recursive === true ? { recursive: true } : {}),
+          }),
+      },
+    });
 
     const entry = start.argv[1];
     if (entry === undefined) {

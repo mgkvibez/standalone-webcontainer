@@ -21,6 +21,9 @@ import {
 import { PortRegistry } from "../network/port-registry.js";
 import { PreviewGateway } from "../network/preview-gateway.js";
 import { createFsShim, type FsShim } from "../shims/fs.js";
+import { createCountedWatchSource } from "../vfs/watch-iterator.js";
+import { createLocalWatchSource, type WatchableFileSystem } from "../process/local-watch.js";
+import type { WatchSourcePort } from "../vfs/port.js";
 import { Duplex, PassThrough, pipeline, Readable, Transform, Writable } from "../shims/stream.js";
 import { path } from "../shims/path.js";
 import { createProcessShim, createSink, ProcessExit, type ProcessShim } from "../shims/process.js";
@@ -107,23 +110,37 @@ export interface InstallIntoRuntimeOptions {
   readonly maxPackages?: number;
 }
 
+/** A port is only locally watchable if it can subscribe; a channel-backed client cannot and says so. */
+const isWatchable = (vfs: FileSystemPort): vfs is FileSystemPort & WatchableFileSystem =>
+  typeof (vfs as { subscribe?: unknown }).subscribe === "function";
+
 export interface InProcessRuntimeOptions {
   /**
    * The port namespace this runtime binds into. Supplied so several runtimes in one page cannot see each
    * other's preview servers; a private one is created when omitted.
    */
   readonly registry?: PortRegistry;
+  /**
+   * Where `fs.watch` comes from.
+   *
+   * A runtime that OWNS its filesystem gets a local source built for it. A process Worker does not own the filesystem — the
+   * kernel does — so it supplies a channel-backed source instead, and this is the seam that lets both use one shim without
+   * the shim knowing which kind of runtime it is inside.
+   */
+  readonly watches?: WatchSourcePort;
 }
 
 export class InProcessRuntime implements Runtime {
   readonly #vfs: FileSystemPort;
   readonly #registry: PortRegistry;
   readonly #gateway: PreviewGateway;
+  readonly #watches: WatchSourcePort | undefined;
 
   constructor(vfs: FileSystemPort, options: InProcessRuntimeOptions = {}) {
     this.#vfs = vfs;
     this.#registry = options.registry ?? new PortRegistry();
     this.#gateway = new PreviewGateway({ registry: this.#registry });
+    this.#watches = options.watches;
   }
 
   /**
@@ -211,7 +228,19 @@ export class InProcessRuntime implements Runtime {
 
     // One scheduler per execution, created before any user code runs: its construction is the wall-clock baseline both
     // Date.now() and performance.timeOrigin are measured from (ADR-0013 amendment 2).
-    const scheduler = new Scheduler({}, (error: unknown) => {
+    // One watch source per execution, counted, because the scheduler has to know whether anything is still outstanding: an
+    // open watcher is a reference that keeps the loop alive, exactly as in Node.
+    //
+    // A process Worker does not own the filesystem (the kernel does), so it supplies a channel-backed source. A runtime that
+    // does own it gets a local one. A port that can do neither leaves watching unavailable, and the shim refuses by name
+    // rather than handing back a watcher that never fires.
+    const counted =
+      this.#watches !== undefined
+        ? createCountedWatchSource(this.#watches)
+        : isWatchable(this.#vfs)
+          ? createCountedWatchSource(createLocalWatchSource(this.#vfs))
+          : undefined;
+    const scheduler = new Scheduler({ keepAlive: counted?.open ?? ((): number => 0) }, (error: unknown) => {
       // Node would kill the process. Killing the run would make one bad callback look like a broken harness, so the error
       // is reported on stderr and draining continues deterministically.
       const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
@@ -233,7 +262,10 @@ export class InProcessRuntime implements Runtime {
       },
     };
 
-    const fsShim: FsShim = createFsShim(this.#vfs, { cwd });
+    const fsShim: FsShim = createFsShim(this.#vfs, {
+      cwd,
+      ...(counted === undefined ? {} : { watches: counted.source }),
+    });
     const loader = new CommonJsLoader({
       fs: fsShim,
       builtins: {

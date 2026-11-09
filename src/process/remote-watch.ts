@@ -15,6 +15,14 @@
  * - a watcher whose kernel has gone away reports an error and closes, instead of polling a dead channel forever.
  */
 
+import {
+  toWatchAsyncIterator,
+  type WatchAsyncIterator,
+  type WatchHandlePort,
+} from "../vfs/watch-iterator.js";
+
+export type { WatchAsyncIterator } from "../vfs/watch-iterator.js";
+
 export interface WatchTransport {
   call(request: unknown, options: { readonly timeoutMs: number }): unknown;
 }
@@ -56,6 +64,20 @@ export interface RemoteWatchOptions {
   /** Called when the watcher gives up (kernel gone). Defaults to a no-op so a forgotten handler cannot throw. */
   readonly onFatal?: (error: Error) => void;
 }
+
+/**
+ * A scheduler backed by real timers.
+ *
+ * Watching is a real-time activity even inside a virtual-clock runtime: a poll interval measured in virtual milliseconds would
+ * never fire, because virtual time only advances when the timer queue runs and the queue is exactly what is empty while a
+ * watcher waits.
+ */
+export const realTimerScheduler: WatchTickScheduler = {
+  schedule: (tick, delayMs) => {
+    const id = setTimeout(tick, delayMs);
+    return () => clearTimeout(id);
+  },
+};
 
 const DEFAULT_WATCH_POLL_MS = 20;
 const DEFAULT_WATCH_TIMEOUT_MS = 5_000;
@@ -186,71 +208,7 @@ export function createRemoteWatcher(options: RemoteWatchOptions): FsWatcher {
   return watcher;
 }
 
-export interface WatchAsyncIterator
-  extends AsyncIterable<{ readonly eventType: WatchEventType; readonly filename: string }> {
-  next(): Promise<IteratorResult<{ readonly eventType: WatchEventType; readonly filename: string }>>;
-  return(): Promise<IteratorResult<{ readonly eventType: WatchEventType; readonly filename: string }>>;
-}
-
-/**
- * `fs.promises.watch()`, the async-iterator form.
- *
- * `return()` closes the underlying watcher, which is what makes `for await (...) break` release a kernel watch instead of
- * leaking one until the process exits. The iterator ends when the watcher closes, so a `for await` loop cannot hang after
- * somebody cancels it.
- */
 export function createRemoteWatchIterator(watcher: FsWatcher): WatchAsyncIterator {
-  const queue: Array<{ readonly eventType: WatchEventType; readonly filename: string }> = [];
-  let waiting: undefined | ((value: IteratorResult<{ eventType: WatchEventType; filename: string }>) => void) = undefined;
-  let done = false;
-
-  const settle = (): void => {
-    if (waiting === undefined) return;
-    const next = queue.shift();
-    if (next !== undefined) {
-      const resolve = waiting;
-      waiting = undefined;
-      resolve({ value: next, done: false });
-    } else if (done) {
-      const resolve = waiting;
-      waiting = undefined;
-      resolve({ value: undefined as never, done: true });
-    }
-  };
-
-  const remember = (eventType: WatchEventType, filename: string): void => {
-    if (done) return;
-    queue.push({ eventType, filename });
-    settle();
-  };
-
-  watcher.on("change", remember as (...args: never[]) => void);
-  watcher.on("rename", remember as (...args: never[]) => void);
-  watcher.on("close", () => {
-    done = true;
-    settle();
-  });
-
-  const iterator: AsyncIterator<{ readonly eventType: WatchEventType; readonly filename: string }> = {
-    next: () => {
-      const next = queue.shift();
-      if (next !== undefined) return Promise.resolve({ value: next, done: false });
-      if (done) return Promise.resolve({ value: undefined as never, done: true });
-      return new Promise((resolve) => {
-        waiting = resolve;
-        settle();
-      });
-    },
-    return: () => {
-      done = true;
-      queue.length = 0;
-      watcher.close();
-      settle();
-      return Promise.resolve({ value: undefined as never, done: true });
-    },
-  };
-
-  return Object.assign(iterator as unknown as WatchAsyncIterator, {
-    [Symbol.asyncIterator]: () => iterator,
-  });
+  // One implementation, shared with the in-process path: a second copy of this logic is a second place to forget `close()`.
+  return toWatchAsyncIterator(watcher as unknown as WatchHandlePort);
 }

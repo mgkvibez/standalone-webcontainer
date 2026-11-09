@@ -26,6 +26,8 @@ export interface MkdirOptionsPort {
   readonly recursive?: boolean;
 }
 
+import type { WatchHandlePort } from "./watch-iterator.js";
+
 export interface FileSystemPort {
   readFileSync(path: string, encoding?: "utf8"): Uint8Array | string;
   writeFileSync(path: string, data: string | Uint8Array, options?: WriteOptionsPort): void;
@@ -44,4 +46,15 @@ export interface FileSystemPort {
   mkdir(path: string, options?: MkdirOptionsPort): Promise<void>;
   readdir(path: string): Promise<string[]>;
   unlink(path: string): Promise<void>;
+}
+
+/**
+ * Watching, as a port.
+ *
+ * Kept separate from `FileSystemPort` on purpose: watching is a capability a substrate may lack, and a shim that cannot watch
+ * must say so with a typed refusal rather than pretend. Structural typing means the channel-backed watcher and the
+ * in-process one both satisfy this without either importing the other.
+ */
+export interface WatchSourcePort {
+  watch(path: string, options?: { readonly recursive?: boolean }): WatchHandlePort;
 }
