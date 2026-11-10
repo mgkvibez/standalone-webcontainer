@@ -183,3 +183,22 @@ keep in step.
 installed binary), one per refused operation with the approved wording asserted verbatim, the lockfile refusal, an unlisted flag,
 and two executor cases that fail if the deviation record ever appears for npm or disappears for pnpm (mutation-checked both ways).
 `fixture-10` remains unscored, per D-1.
+
+## 7. Confirmation of the claims (Nov 10 2026)
+
+The implementation notes above say what was built. This section lists what was then checked, because a claim about a profile is
+only worth what its evidence shows.
+
+| Claim | How it was confirmed |
+|---|---|
+| The deviation record reaches EVIDENCE, not just a transient detail | A whole fixture (`pnpm install` then `pnpm run build`) runs through `runFixture` with `evidenceRoot` set; `steps.json` on disk contains the sentence, on the install step and not on the run step |
+| npm never claims the profile | The same fixture under `npm install` runs PASS and its `steps.json` contains no deviation sentence |
+| The record cannot silently become unconditional | Mutation check: making the append unconditional fails the npm test |
+| A refused pnpm command is a boundary, not a bug | A fixture whose only step is `pnpm add left-pad` classifies as `UNSUPPORTED_BY_DESIGN`; `verdict.txt` carries "intentionally not supported" and the alternative, `steps.json` carries `"policy": "pnpm-resolution"` |
+| The profile is npm-style, as promised | After `pnpm install` with a real dependency, `node_modules/<pkg>/index.js` exists, `package-lock.json` exists and `pnpm-lock.yaml` does not |
+| Fixture 10 stays out of the gate (D-1) | Pinned in `tests/unit/fixtures.run.test.ts`: the definition is `proposed`, `isScoreable` is false, and its first step is `pnpm install`. Mutation-checked by flipping the file to `frozen`, which fails the test |
+| No fixture was altered by this milestone | `git diff --stat` for the implementation commit over `fixtures/` is empty |
+
+The fixture-10 pin is the one that needed writing rather than checking. Its unscored status holds structurally today (`isScoreable`
+requires `frozen`), which is exactly the kind of fact that disappears the day someone edits one line of JSON. Freezing it now
+requires deliberately changing a test that names D-1.

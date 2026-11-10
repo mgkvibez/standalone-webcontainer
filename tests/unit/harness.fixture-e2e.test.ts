@@ -205,3 +205,187 @@ describe("a whole fixture through the harness", () => {
     expect(report.assertions[0]?.state).toBe("not-evaluated");
   });
 });
+
+/**
+ * The pnpm profile through a WHOLE fixture: install, run, verdict, and the evidence written to disk.
+ *
+ * The unit tests elsewhere prove the plan and the detail string. This proves the part the contract actually claims — that the
+ * deviation record reaches EVIDENCE (`steps.json`), which is what an auditor reads later — and that a refused pnpm command is
+ * classified as a design boundary rather than as a bug of ours.
+ */
+describe("the pnpm profile through a whole fixture", () => {
+  const definitionFor = (
+    id: number,
+    slug: string,
+    steps: readonly { kind: string; command: string }[],
+    // A refused install stops the run at step 0, so the default assertions on step 1 do not apply to it.
+    assertions: readonly { kind: string; step: number; equals?: number; contains?: string }[] = [
+      { kind: "exit-code", step: 1, equals: 0 },
+      { kind: "stdout-contains", step: 1, contains: "built" },
+    ],
+  ): FixtureDefinition =>
+    parseDefinition({
+      formatVersion: 1,
+      id,
+      slug,
+      lane: "front-end-only",
+      title: "pnpm profile integration",
+      intent: "Proves a pnpm command runs under the declared profile and says so in evidence.",
+      source: "harness integration test",
+      status: "frozen",
+      steps: steps.map((entry) => ({
+        kind: entry.kind,
+        command: entry.command,
+        timeoutClass: entry.kind === "install" ? "install" : "run",
+        purpose: "pnpm profile integration",
+      })),
+      assertions,
+      expected: ["PASS"],
+    });
+
+  const DEVIATION =
+    "pnpm-resolution profile: package.json install, npm-style hoisted node_modules, no pnpm-lock.yaml read or written";
+
+  const project = (): { vfs: FileSystem; root: string } => {
+    const { vfs, root } = bootVfs();
+    vfs.writeFileSync(
+      `${root}/package.json`,
+      JSON.stringify({ name: "pnpm-app", version: "1.0.0", scripts: { build: "node build.js" } }),
+    );
+    vfs.writeFileSync(`${root}/build.js`, "console.log('built');\n");
+    return { vfs, root };
+  };
+
+  it("runs pnpm install and pnpm run, and records the deviation in evidence", async () => {
+    const { vfs, root } = project();
+    const registry = await createFakeRegistry({ packages: {} });
+    const runtime = new InProcessRuntime(vfs);
+    const definition = definitionFor(19, "fixture-19", [
+      { kind: "install", command: "pnpm install" },
+      { kind: "run", command: "pnpm run build" },
+    ]);
+
+    const report = await runFixture({
+      definition,
+      executeStep: createStepExecutor({ runtime, registry, root }),
+      environment: environmentFor(vfs),
+      evidenceRoot: scratch,
+    });
+
+    expect(report.classification).toBe("PASS");
+    expect(report.steps.map((entry) => entry.termination)).toEqual(["ok", "ok"]);
+
+    // The claim that matters: the record is IN the evidence an auditor reads, not only in a transient detail string.
+    const steps = readFileSync(join(scratch, "fixture-19", "steps.json"), "utf8");
+    expect(steps).toContain(DEVIATION);
+    // And it is attached to the install step, which is the step that ran the installer.
+    const parsed = JSON.parse(steps) as { record?: { stdout?: string } }[];
+    expect(parsed[0]?.record?.stdout ?? "").toContain(DEVIATION);
+    expect(parsed[1]?.record?.stdout ?? "").not.toContain(DEVIATION);
+  });
+
+  it("writes no deviation record for the same fixture under npm", async () => {
+    const { vfs, root } = project();
+    const registry = await createFakeRegistry({ packages: {} });
+    const runtime = new InProcessRuntime(vfs);
+    const definition = definitionFor(20, "fixture-20", [
+      { kind: "install", command: "npm install" },
+      { kind: "run", command: "npm run build" },
+    ]);
+
+    const report = await runFixture({
+      definition,
+      executeStep: createStepExecutor({ runtime, registry, root }),
+      environment: environmentFor(vfs),
+      evidenceRoot: scratch,
+    });
+
+    expect(report.classification).toBe("PASS");
+    expect(readFileSync(join(scratch, "fixture-20", "steps.json"), "utf8")).not.toContain(DEVIATION);
+  });
+
+  it("classifies a refused pnpm command as a design boundary, with the approved wording in evidence", async () => {
+    const { vfs, root } = project();
+    const registry = await createFakeRegistry({ packages: {} });
+    const runtime = new InProcessRuntime(vfs);
+    const definition = definitionFor(
+      14,
+      "fixture-14",
+      [{ kind: "install", command: "pnpm add left-pad" }],
+      [{ kind: "exit-code", step: 0, equals: 1 }],
+    );
+
+    const report = await runFixture({
+      definition,
+      executeStep: createStepExecutor({ runtime, registry, root }),
+      environment: environmentFor(vfs),
+      evidenceRoot: scratch,
+    });
+
+    // Not HARNESS_BUG: a boundary we chose must never read as a defect to be fixed.
+    expect(report.classification).toBe("UNSUPPORTED_BY_DESIGN");
+    expect(report.classification).not.toBe("HARNESS_BUG");
+
+    const verdict = readFileSync(join(scratch, "fixture-14", "verdict.txt"), "utf8");
+    expect(verdict).toContain("intentionally not supported");
+    expect(verdict).toContain("declare it in package.json");
+    // The policy is named in the step record, so a reader can find the decision without reading our source. It is in steps.json
+    // rather than the verdict text because the verdict carries the sentence and the record carries the structure.
+    const steps = readFileSync(join(scratch, "fixture-14", "steps.json"), "utf8");
+    expect(steps).toContain('"policy": "pnpm-resolution"');
+  });
+});
+
+describe("what a pnpm install actually leaves on disk", () => {
+  const DEVIATION =
+    "pnpm-resolution profile: package.json install, npm-style hoisted node_modules, no pnpm-lock.yaml read or written";
+
+  it("writes npm's lockfile and never a pnpm one, which is what the deviation record promises", async () => {
+    const { vfs, root } = bootVfs();
+    vfs.writeFileSync(
+      `${root}/package.json`,
+      JSON.stringify({ name: "lock-probe", version: "1.0.0", dependencies: { greeter: "^1.0.0" } }),
+    );
+    vfs.writeFileSync(`${root}/check.js`, 'console.log(require("greeter"));\n');
+
+    const registry = await createFakeRegistry({
+      packages: { greeter: [{ version: "1.0.0", files: { "index.js": 'module.exports = "greeter";' } }] },
+    });
+    const runtime = new InProcessRuntime(vfs);
+    const definition = parseDefinition({
+      formatVersion: 1,
+      id: 20,
+      slug: "fixture-20",
+      lane: "front-end-only",
+      title: "what pnpm leaves on disk",
+      intent: "Proves the deviation record describes reality: npm-style tree and lockfile, no pnpm lockfile.",
+      source: "harness integration test",
+      status: "frozen",
+      steps: [
+        { kind: "install", command: "pnpm install", timeoutClass: "install", purpose: "Install under the profile" },
+        { kind: "run", command: "node check.js", timeoutClass: "run", purpose: "Prove the tree is usable" },
+      ],
+      assertions: [
+        { kind: "exit-code", step: 1, equals: 0 },
+        { kind: "file-exists", step: 1, target: "/app/node_modules/greeter/index.js" },
+      ],
+      expected: ["PASS"],
+    });
+
+    const report = await runFixture({
+      definition,
+      executeStep: createStepExecutor({ runtime, registry, root }),
+      environment: environmentFor(vfs),
+      evidenceRoot: null,
+    });
+
+    expect(report.classification).toBe("PASS");
+    // The tree is real: the dependency is where an npm-style hoisted install puts it.
+    expect(exists(vfs, `${root}/node_modules/greeter/index.js`)).toBe(true);
+    // And the lockfile is npm's, because that is the one we read and verify. A pnpm-lock.yaml appearing here would make the
+    // deviation sentence false, so it is asserted absent rather than left to inspection.
+    expect(exists(vfs, `${root}/package-lock.json`)).toBe(true);
+    expect(exists(vfs, `${root}/pnpm-lock.yaml`)).toBe(false);
+    expect(report.steps[0]?.record?.stdout ?? "").toContain(DEVIATION);
+  });
+});
