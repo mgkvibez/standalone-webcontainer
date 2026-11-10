@@ -2,10 +2,32 @@
  * CLI for the fixture executor: `npm run fixtures:run -- --id 4` or `--all`.
  */
 
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import type { RegistryClient } from "../../src/npm/install.js";
 import { createHttpRegistryClient } from "../../src/npm/install.js";
+import { loadSnapshotRegistry } from "../../src/registry/snapshot.js";
 import { loadRegistry, readDefinitions, repoRoot, runDefinition } from "./fixture-executor.js";
+
+/**
+ * The registry lanes, named rather than implied.
+ *
+ * `corpus` (the default) keeps CI hermetic but cannot produce a verdict about a real package. `network` is the product path.
+ * `snapshot:<dir>` is real tarballs frozen on disk, which is the lane a *compatibility* verdict should be measured on: real bytes,
+ * no network, and the exact versions the snapshot holds rather than whatever `latest` means today.
+ */
+const snapshotRegistry = (directory: string): RegistryClient => {
+  const root = directory.startsWith("/") ? directory : join(repoRoot, directory);
+  const manifestText = readFileSync(join(root, "snapshot.json"), "utf8");
+  const slug = directory.split("/").filter((part) => part !== "").at(-1) ?? directory;
+  return loadSnapshotRegistry({
+    slug,
+    root,
+    manifestText,
+    read: (path) => new Uint8Array(readFileSync(path)),
+  });
+};
 
 const main = async (): Promise<number> => {
   const args = process.argv.slice(2);
@@ -21,11 +43,24 @@ const main = async (): Promise<number> => {
     return 2;
   }
 
-  // The corpus is the default because CI must be hermetic. `--registry network` is the product path, and it is never assumed: a
-  // verdict has to say which bytes it ran against.
-  const useNetwork = args.includes("--registry=network") || args[args.indexOf("--registry") + 1] === "network";
-  const registry = useNetwork ? createHttpRegistryClient() : await loadRegistry();
-  console.log(useNetwork ? "registry: network (registry.npmjs.org)" : "registry: offline corpus");
+  // The corpus is the default because CI must be hermetic. `--registry=network` is the product path, and `--registry=snapshot:<dir>`
+  // is the frozen lane. The lane is never assumed: a verdict has to say which bytes it ran against.
+  const registryFlag =
+    args.find((arg) => arg.startsWith("--registry="))?.slice("--registry=".length) ??
+    (args.includes("--registry") ? args[args.indexOf("--registry") + 1] : undefined) ??
+    "corpus";
+  let registry: RegistryClient;
+  if (registryFlag === "network") {
+    registry = createHttpRegistryClient();
+    console.log("registry: network (registry.npmjs.org)");
+  } else if (registryFlag.startsWith("snapshot")) {
+    const directory = registryFlag.includes(":") ? registryFlag.slice(registryFlag.indexOf(":") + 1) : "fixtures/snapshots/express";
+    registry = snapshotRegistry(directory);
+    console.log(`registry: frozen snapshot (${directory}) — real tarballs, pinned by integrity, no network`);
+  } else {
+    registry = await loadRegistry();
+    console.log("registry: offline corpus");
+  }
   let mismatches = 0;
   for (const definition of selected) {
     const report = await runDefinition(definition, registry, evidenceRoot);
