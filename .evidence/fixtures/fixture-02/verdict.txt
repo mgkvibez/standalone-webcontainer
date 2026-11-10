@@ -1,4 +1,4 @@
 fixture: fixture-02
 evidence schema: 2
-classification: HARNESS_BUG
-reason: this runner does not wire the preview proxy, so HTTP assertions cannot be probed
+classification: RUNTIME_INCOMPATIBILITY
+reason: assertion failed: http-status: expected status 200 from http://localhost:3001/, observed 503 (and 2 more)

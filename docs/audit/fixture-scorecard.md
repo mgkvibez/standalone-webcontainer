@@ -1,98 +1,110 @@
 # The twenty fixtures, run for the first time
 
-**Date:** 2026-11-10. **Commit:** `fef2388` plus this change. **Instrument:** `tools/harness/run-fixture.ts`
-(`npm run fixtures:run -- --all`), which drives each definition through the real `Container`, the real runtime and the committed
-offline corpus, and writes evidence to `.evidence/fixtures/<slug>/`.
+**Date:** 2026-11-10. **Commit:** `4ded40e` plus this change. **Instrument:** `tools/harness/fixture-executor.ts` driven by
+`tools/harness/run-fixture.ts` (`npm run fixtures:run -- --all`), which takes each definition through the real `Container`, the
+real runtime, the real VFS and the real preview gateway, and writes evidence to `.evidence/fixtures/<slug>/`.
 
-## Why this had to be built before anything else could be said about release
+## Why an executor had to come first
 
-The gate had definitions, scoring, evidence writing, freeze checking and a threshold. It had no step executor: every test supplied
-a hand-written one, so nothing had ever turned a `FixtureStep` into a run. That is a second reason the gate produces no score, and it
-is independent of the first (no fixture is frozen).
+The gate had definitions, scoring, evidence writing and freeze checking. It had no step executor: every test supplied a
+hand-written one, so no fixture had ever been executed. That was one of three reasons the gate could score nothing, and it was
+independent of "no fixture is frozen".
 
-The adapter is thin on purpose: the command line goes through `Container`, the same dispatcher the workspace uses, so `npm install`,
-`npm run <script>` and `node <file>` behave here as they do in the app; stdout, stderr and the exit code come from the process record
-rather than from parsing the terminal; the corpus is read from the committed bytes, so no network is involved.
+The adapter is thin on purpose. The command line goes through `Container`, the same dispatcher the workspace uses, so
+`npm install`, `npm run <script>` and `node <file>` behave here as they do in the app. stdout, stderr and the exit code come from
+the process record rather than from terminal parsing. The corpus is read from the committed bytes, so no network is involved.
 
-Three limits of the adapter itself, stated rather than left to be discovered in a verdict:
+Two things that looked like adapter gaps are now closed, and each is proven by a test rather than asserted:
 
-1. A program's filesystem writes are not mirrored back to the project, so `file-exists` reads only what the definition seeded.
-2. HTTP assertions need the preview proxy, which this runner does not wire. Such a fixture is reported as a harness fault, which the
-   classification precedence already treats as "not evidence about the runtime".
-3. A `run` step that leaves a server up has no exit code; it is reported as `-1`, not `0`, so an exit-code assertion cannot pass on
-   a process that never exited.
+- **A program's writes are readable.** They exist only in the runtime VFS, so `RuntimeSupervisor.readRuntimeFile` reads it and
+  `file-exists` / `file-contains` consult the VFS after the project snapshot. Without this, a fixture asserted on files it had not
+  itself seeded, which is most of them.
+- **HTTP assertions are probed, not skipped.** They go through the same `PreviewGateway` the browser proxy uses, with the
+  fixture's `http://localhost:<port>/…` translated to the gateway's `/preview/<port>/…` by `src/harness/preview-target.ts`. A
+  remote host is refused as a harness fault instead of being routed to a local port.
 
-## The finding that matters more than any verdict
+`tests/unit/fixture-executor.test.ts` is the proof: one definition whose program writes a file and starts a server, asserting
+`exit-code`, `stdout-contains`, `file-exists`, `http-status` and `http-body-contains`, all five passing through the container. If
+that test is green, a passing fixture elsewhere means something.
 
-**Seventeen of the twenty definitions contain no files at all.** Only `fixture-01`, `fixture-04` and `fixture-07` ship a program.
-A definition that says `npm install` and then `node check.mjs` with no `package.json` and no `check.mjs` cannot pass, in this runtime
-or in Node. So the pre-registered corpus is mostly skeleton: intent, steps and assertions, with nothing to run.
+A step that leaves a server listening reports exit code 0, not -1: the container marks a process "running" with ports only when
+the runtime reported exit 0 for the program, so 0 is what happened and the server is simply outliving it. Anything with no exit
+code that did not become a server is -1, so an exit-code assertion cannot pass on a process that never finished.
 
-Measured, in evidence rather than by reading:
+## Finding 1: seventeen definitions contain no files
+
+Only `fixture-01`, `fixture-04` and `fixture-07` ship a program. A definition that says `npm install` then `node check.mjs`, with
+no `package.json` and no `check.mjs`, cannot pass in this runtime or in Node.
 
 ```
 fixture-09  step 0  exit 1  npm: only npm install/npm ci and --omit=dev are supported; package arguments and other flags are refused
 fixture-09  step 1  exit 1  node: cannot find module '/check.mjs'
 fixture-12  step 0  exit 1  npm error: MISSING_PACKAGE_JSON: no package.json at /package.json
-fixture-12  step 1  exit 0  (nothing to build)
 ```
 
-A second mismatch sits on top of the first: eleven definitions ask for something the approved profiles refuse on purpose
-(`npm install <package>` with arguments, and `pnpm install` for fixture-10). Those refusals are correct behaviour under D-4 and the
-pnpm contract; the definitions predate both.
+Eleven also ask for something the approved profiles refuse on purpose (`npm install <package>` with arguments, and `pnpm install`
+for fixture-10). Those refusals are correct under D-4 and the pnpm contract; the definitions predate both.
+
+## Finding 2: the offline corpus is synthetic, so no real package can install
+
+This is the deeper blocker, and the second pass made it visible. The committed corpus holds **ten packages, all of them
+`@corpus/*` and `@corpus-broken/*`** test fixtures. There is no `vite`, `react`, `next`, `express`, `typescript`, `ws`, `sharp`,
+`is-odd`, `cowsay`, `drizzle-orm` or `@libsql/client` in it, so every install in the front-end lane fails at resolution:
+
+```
+fixture-01  http-status 503 from http://localhost:3000/   (nothing installed, so no runtime was ever loaded)
+fixture-13  body "No project runtime is loaded."
+```
+
+Writing the seventeen missing programs would therefore not move a single verdict until either real packages are vendored into the
+corpus or the runtime is allowed to reach a real registry. That is a decision about what this project is, not a bug: an offline
+corpus is reproducible and a live registry is the product.
 
 ## Every verdict, with its cause
 
-| Fixture | Verdict | Cause | Runnable as written? |
+| Fixture | Verdict | Cause | Runnable today? |
 |---|---|---|---|
-| 01 Vite dev server | HARNESS_BUG | needs the preview proxy | yes, but needs the proxy wired |
-| 02 Next.js-ish boot | HARNESS_BUG | needs the preview proxy; **no files** | no |
-| 03 | RUNTIME_INCOMPATIBILITY | **no files**, so `file-exists` fails | no |
-| 04 core surface | **PASS, 6/6** | all assertions passed | yes |
-| 05 | HARNESS_BUG | needs the preview proxy; **no files** | no |
-| 06 | HARNESS_BUG | needs the preview proxy; **no files** | no |
-| 07 CLI | **PASS, 3/3** | all assertions passed | yes |
-| 08 express | HARNESS_BUG | preview proxy; **no files**; install with arguments | no |
-| 09 is-odd | RUNTIME_INCOMPATIBILITY | install refused (arguments); **no files** | no |
-| 10 pnpm | RUNTIME_INCOMPATIBILITY | `pnpm install` restricted by D-4; **no files** | no |
-| 11 | RUNTIME_INCOMPATIBILITY | **no files** | no |
-| 12 tsc build | RUNTIME_INCOMPATIBILITY | **no files**, so no `package.json` to install | no |
-| 13 | HARNESS_BUG | preview proxy; **no files** | no |
-| 14 cowsay | RUNTIME_INCOMPATIBILITY (expected) | **no files**; install with arguments | no |
-| 15 sharp | RUNTIME_INCOMPATIBILITY | **no files**; native refusal never reached | no |
-| 16 ws | RUNTIME_INCOMPATIBILITY (expected) | **no files**; install with arguments | no |
-| 17 | RUNTIME_INCOMPATIBILITY (expected) | **no files** | no |
-| 18 | RUNTIME_INCOMPATIBILITY | **no files** | no |
-| 19 libsql | RUNTIME_INCOMPATIBILITY (expected) | **no files**; install with arguments | no |
-| 20 drizzle | RUNTIME_INCOMPATIBILITY (expected) | **no files**; install with arguments | no |
+| 01 Vite dev server | RUNTIME_INCOMPATIBILITY | `vite` not in the corpus, so install fails and nothing listens | no |
+| 02 | RUNTIME_INCOMPATIBILITY | no files; no packages | no |
+| 03 shadcn CLI | RUNTIME_INCOMPATIBILITY | no files; `npx` is refused by design | no |
+| 04 core surface | **PASS, 6/6** | fs, http, streams, timers, EventEmitter | yes |
+| 05 | RUNTIME_INCOMPATIBILITY (expected) | no files; no packages | no |
+| 06 | RUNTIME_INCOMPATIBILITY (expected) | no files; no packages | no |
+| 07 CLI | **PASS, 3/3** | argv, a file read, an exit code | yes |
+| 08 express | RUNTIME_INCOMPATIBILITY | no files; install with arguments refused | no |
+| 09 is-odd | RUNTIME_INCOMPATIBILITY | install with arguments refused; no files | no |
+| 10 pnpm | RUNTIME_INCOMPATIBILITY | `pnpm install` restricted by D-4 | no |
+| 11 Vite build | RUNTIME_INCOMPATIBILITY | no files; `vite` not in the corpus | no |
+| 12 tsc build | RUNTIME_INCOMPATIBILITY | no files; `typescript` not in the corpus | no |
+| 13 | RUNTIME_INCOMPATIBILITY (expected) | no files; no runtime loaded | no |
+| 14 cowsay | RUNTIME_INCOMPATIBILITY (expected) | no files; `cowsay` not in the corpus | no |
+| 15 sharp | RUNTIME_INCOMPATIBILITY | no files; native refusal never reached | no |
+| 16 ws | RUNTIME_INCOMPATIBILITY (expected) | no files; `ws` not in the corpus | no |
+| 17 | RUNTIME_INCOMPATIBILITY (expected) | no files; no bundler | no |
+| 18 | RUNTIME_INCOMPATIBILITY | no files; no bundler | no |
+| 19 libsql | RUNTIME_INCOMPATIBILITY (expected) | no files; not in the corpus | no |
+| 20 drizzle | RUNTIME_INCOMPATIBILITY (expected) | no files; not in the corpus | no |
 
-Seven verdicts fell inside their own expected set (04, 07, 14, 16, 17, 19, 20), which is not the same as seven passes: five of those
-fixtures accept `RUNTIME_INCOMPATIBILITY` as a legitimate outcome, so their "expected" is a statement about a refusal, not a success.
+Seven verdicts fall inside their own expected set (04, 07, 14, 16, 17, 19, 20). That is not seven passes: five of those accept
+`RUNTIME_INCOMPATIBILITY` as a legitimate outcome, so their "expected" is a statement about a refusal, not a success.
 
-**Measured facts about the runtime, from the two runnable fixtures.** `fixture-04` exercises `fs`, `http`, streams, timers and
-`EventEmitter` in one script with six assertions, and all six passed through the real container. `fixture-07` exercises a CLI with
-argv, a file read and an exit code, and its three assertions passed. That is the first time the gate's own path has produced a PASS
-rather than a hand-written executor's claim of one.
+**What is actually measured about the runtime.** `fixture-04` exercises `fs`, `http`, streams, timers and `EventEmitter` in one
+script and passes all six assertions through the real container; `fixture-07` exercises a CLI with argv, a file read and an exit
+code and passes all three. Those are the first verdicts the gate has ever produced through its own path.
 
 ## What this means for release
 
-The distance is now concrete and none of it is about the runtime engine:
-
 | Blocker | Size | Owner |
 |---|---|---|
-| 17 definitions have no program | 17 files to write, then freeze | product decision: the contents were always explicitly an owner call |
-| 11 definitions predate the approved npm/pnpm profiles | rewrite as `npm install` against the corpus, or flip expected to the refusal | owner |
-| The runner does not wire the preview proxy, so 6 fixtures cannot be probed | 6 fixtures' worth of bridging, reusing the existing gateway | implementation |
-| Program-written files are not readable by `file-exists` | needs a VFS readback path | implementation |
-| No fixture is frozen | one sign-off per definition, after the four items above | owner |
-
-Everything the runtime itself needs for the two runnable fixtures is already there, and the engine's own suite is green (989 unit
-tests, 48 browser tests). The gate is unearnable because its corpus is empty and its runner is new, not because the interpreter
-cannot run the programs.
+| The corpus holds no real package | either vendor the packages the fixtures name, or allow a real registry | **product decision**: offline-and-reproducible versus connected-and-real |
+| 17 definitions have no program | 17 files to write, each faithful to the intent and assertions already written | implementation, once the corpus question is answered |
+| 11 definitions predate the approved npm/pnpm profiles | rewrite as plain `npm install`, or flip expected to the refusal | owner |
+| No fixture is frozen | one sign-off per definition, after the items above | owner |
 
 ## Limits of this evidence
 
-- Chromium-independent: this runner is Node-side, so it measures the container and the runtime, not the browser Worker path.
-- One engine, one machine, no network. A future real-registry milestone changes fixtures 08-20 entirely.
+- Node-side, so it measures the container, the runtime, the VFS and the gateway, not the browser Worker or the proxy's own
+  network path. The browser lane covers that separately.
+- One engine, one machine, no network.
 - Evidence is written to `.evidence/` (git-ignored). Nothing here is a frozen outcome: an outcome is only an outcome once a
   definition is frozen and its assertions are signed off.

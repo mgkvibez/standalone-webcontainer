@@ -6,5 +6,13 @@
     "passed": false,
     "stepAvailable": true,
     "detail": ".output/server/index.mjs does not exist"
+  },
+  {
+    "index": 1,
+    "kind": "http-status",
+    "state": "failed",
+    "passed": false,
+    "stepAvailable": true,
+    "detail": "expected status 200 from http://localhost:3000/, observed 503"
   }
 ]

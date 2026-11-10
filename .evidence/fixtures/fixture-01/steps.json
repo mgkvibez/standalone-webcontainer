@@ -6,7 +6,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "builtin command reported a failure: npm error: INVALID_PACKAGE_NAME: \"vite\" is not a scoped package name",
-    "elapsedMs": 2,
+    "elapsedMs": 1,
     "record": {
       "index": 0,
       "exitCode": 1,

@@ -1,1 +1,26 @@
-[]
+[
+  {
+    "index": 0,
+    "kind": "http-status",
+    "state": "failed",
+    "passed": false,
+    "stepAvailable": true,
+    "detail": "expected status 200 from http://localhost:3001/, observed 503"
+  },
+  {
+    "index": 1,
+    "kind": "http-status",
+    "state": "failed",
+    "passed": false,
+    "stepAvailable": true,
+    "detail": "expected status 200 from http://localhost:3001/products, observed 503"
+  },
+  {
+    "index": 2,
+    "kind": "http-body-contains",
+    "state": "failed",
+    "passed": false,
+    "stepAvailable": true,
+    "detail": "body of http://localhost:3001/products did not contain \"<div id=\\\"root\\\">\"; observed \"No project runtime is loaded.\""
+  }
+]

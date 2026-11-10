@@ -1,1 +1,18 @@
-[]
+[
+  {
+    "index": 0,
+    "kind": "http-body-contains",
+    "state": "failed",
+    "passed": false,
+    "stepAvailable": true,
+    "detail": "body of http://localhost:3300/ did not contain \"initial-marker\"; observed \"No project runtime is loaded.\""
+  },
+  {
+    "index": 1,
+    "kind": "http-body-contains",
+    "state": "failed",
+    "passed": false,
+    "stepAvailable": true,
+    "detail": "body of http://localhost:3300/ did not contain \"edited-marker\"; observed \"No project runtime is loaded.\""
+  }
+]
