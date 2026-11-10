@@ -19,7 +19,9 @@ Still true and worth saying before any compatibility claim: `crypto`, `child_pro
 absent, termination kills the Worker rather than signalling a process, and there is no preemption, so a program that holds
 its thread can only be stopped by terminating it. Executions are no longer serialised: each process gets its own Worker and
 its own syscall channel, and the browser lane measures two processes running at once against a one-process baseline. The twenty fixtures are defined (`fixtures/definitions/`) and none are frozen, so the gate is
-unearnable: fixtures 4 and 7 pass, the rest are untouched.
+unearnable. `npm run fixtures:run -- --all` now drives every definition through the real container and writes evidence, and it
+found the real reason: seventeen of the twenty definitions contain **no files**, so there is no program to run. Of the three that do,
+fixtures 4 and 7 pass all their assertions and fixture 1 needs the preview proxy. See `docs/audit/fixture-scorecard.md`.
 
 
 <!-- tests:start -->
@@ -54,6 +56,7 @@ npm install        # dev tooling only (typescript, vitest, @playwright/test, @ty
 npm run typecheck  # three lanes: node tooling, runtime (WebWorker, no node types), browser (DOM, no node types)
 npm test           # vitest run (VFS, shims, harness, container, network and npm)
 npm run fixtures:check   # verify frozen fixture pins (no writes); part of `verify`
+npm run fixtures:run -- --id 4   # run one definition through the real container; --all for every one
 npm run verify     # typecheck + guards + tests + count check + fixture pins, what CI runs
 ```
 

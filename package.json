@@ -36,7 +36,8 @@
     "diff:event-loop": "vite-node tools/differential/event-loop.ts",
     "bench:syscall-metadata": "vite-node tools/bench/syscall-metadata.ts",
     "diff:modules": "vite-node tools/differential/modules.ts",
-    "diff:modules:strict": "vite-node tools/differential/modules.ts --strict"
+    "diff:modules:strict": "vite-node tools/differential/modules.ts --strict",
+    "fixtures:run": "vite-node tools/harness/run-fixture.ts"
   },
   "devDependencies": {
     "@codemirror/lang-javascript": "^6.2.5",

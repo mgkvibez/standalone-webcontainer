@@ -1,0 +1,26 @@
+[
+  {
+    "index": 0,
+    "kind": "exit-code",
+    "state": "passed",
+    "passed": true,
+    "stepAvailable": true,
+    "detail": "expected exit code 0, observed 0"
+  },
+  {
+    "index": 1,
+    "kind": "stdout-contains",
+    "state": "passed",
+    "passed": true,
+    "stepAvailable": true,
+    "detail": "stdout contained the expected text"
+  },
+  {
+    "index": 2,
+    "kind": "exit-code",
+    "state": "passed",
+    "passed": true,
+    "stepAvailable": true,
+    "detail": "expected exit code 2, observed 2"
+  }
+]

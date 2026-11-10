@@ -1,0 +1,10 @@
+[
+  {
+    "index": 0,
+    "kind": "file-exists",
+    "state": "failed",
+    "passed": false,
+    "stepAvailable": true,
+    "detail": ".next/BUILD_ID does not exist"
+  }
+]

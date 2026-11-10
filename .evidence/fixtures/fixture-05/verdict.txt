@@ -1,0 +1,4 @@
+fixture: fixture-05
+evidence schema: 2
+classification: HARNESS_BUG
+reason: this runner does not wire the preview proxy, so HTTP assertions cannot be probed

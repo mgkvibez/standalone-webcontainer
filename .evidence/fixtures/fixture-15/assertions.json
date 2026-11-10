@@ -1,0 +1,18 @@
+[
+  {
+    "index": 0,
+    "kind": "exit-code",
+    "state": "failed",
+    "passed": false,
+    "stepAvailable": true,
+    "detail": "expected exit code 1, observed 0"
+  },
+  {
+    "index": 1,
+    "kind": "stderr-contains",
+    "state": "failed",
+    "passed": false,
+    "stepAvailable": true,
+    "detail": "stderr did not contain \"native addon\"; observed \"node: cannot find module '/require-native.mjs'\""
+  }
+]
