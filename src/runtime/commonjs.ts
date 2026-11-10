@@ -17,6 +17,7 @@ import { path as nodePath } from "../shims/path.js";
 import { transformEsm } from "./esm.js";
 import type { FsShim } from "../shims/fs.js";
 import { ProcessRefusal } from "./refusal.js";
+import { INIT_HOOKS } from "./init-hooks.js";
 import type { RequireFunction } from "../shims/module.js";
 
 /** Thrown for a resolver failure; `code` matches Node so callers can branch. */
@@ -160,6 +161,25 @@ export interface RuntimeGlobals {
   readonly clearTimeout: (handle: never) => void;
   readonly clearInterval: (handle: never) => void;
   readonly setImmediate: (...args: never[]) => unknown;
+  /**
+   * The global object itself, under the name a browser gives it.
+   *
+   * Not decoration: the in-thread service inside `esbuild-wasm` copies `self`'s properties into the scope it builds for the Go runtime, and
+   * without this it dies with `self is not defined` before the first transform. A runtime that models a browser and omits the browser's own
+   * name for its global is the one lying about the context it provides.
+   */
+  readonly self: unknown;
+  /**
+   * Realm-level globals a browser has and a package may build a scope from.
+   *
+   * Injected rather than reached for, so the runtime's global object is one described thing instead of whatever the host happens to have. A
+   * package that assembles its own scope by enumerating `self` (the in-thread service inside `esbuild-wasm` does exactly that) gets a browser's
+   * surface rather than eight timer entries.
+   */
+  readonly WebAssembly: unknown;
+  readonly TextEncoder: unknown;
+  readonly TextDecoder: unknown;
+  readonly crypto: unknown;
 }
 
 export interface RuntimeContext {
@@ -183,6 +203,11 @@ const HOST_GLOBALS: RuntimeGlobals = {
   clearTimeout: (handle: Parameters<typeof clearTimeout>[0]) => clearTimeout(handle),
   clearInterval: (handle: Parameters<typeof clearInterval>[0]) => clearInterval(handle),
   setImmediate: (callback: (...args: never[]) => void, ...args: unknown[]) => setTimeout(callback, 0, ...args),
+  self: globalThis,
+  WebAssembly,
+  TextEncoder,
+  TextDecoder,
+  crypto: globalThis.crypto,
 };
 
 /**
@@ -191,6 +216,19 @@ const HOST_GLOBALS: RuntimeGlobals = {
  * Kept as a named set rather than an inline comparison so the next member (a worker thread that must be a real OS thread, say) is a row
  * here instead of a condition in two places.
  */
+/**
+ * Entry files whose package declared a startup hook: resolved path -> package directory.
+ *
+ * Filled at resolution, drained the first time that file is evaluated, because that is the only moment the package's exports exist. Keyed by
+ * entry path rather than by directory so a nested conflict's own copy is prepared independently, exactly as it would be in Node.
+ */
+interface PendingInit {
+  readonly dir: string;
+  readonly key: string;
+}
+
+type InitQueue = Map<string, PendingInit>;
+
 const NATIVE_PROCESS_BUILTINS: ReadonlySet<string> = new Set(["child_process"]);
 
 /** The package a file belongs to, for a diagnostic that names an owner rather than a directory. */
@@ -211,6 +249,8 @@ export class CommonJsLoader {
    * every `require` made afterwards must see the same object.
    */
   #main: ModuleRecord | null = null;
+  /** Entry files whose package needs startup before use: resolved path -> what to run. */
+  #initQueue: InitQueue = new Map();
   /** Directory -> format, because deciding from `type` means reading package.json on every require otherwise. */
   readonly #formats = new Map<string, "esm" | "cjs">();
 
@@ -323,11 +363,17 @@ export class CommonJsLoader {
 
     if (fileStats[0]?.isDirectory() !== true) return undefined;
 
-    const main = this.#readPackageMain(candidate, fileStats[fileCandidates.length]?.isFile() === true);
+    const manifest = this.#readPackageManifest(candidate, fileStats[fileCandidates.length]?.isFile() === true);
+    const main = manifest.main;
     if (main !== undefined) {
       const mainPath = main.startsWith("/") ? nodePath.join(candidate, main) : nodePath.join(candidate, main);
       const resolvedMain = this.#resolveFileOrDirectory(mainPath);
-      if (resolvedMain !== undefined) return resolvedMain;
+      if (resolvedMain !== undefined) {
+        // A package that ships startup its callers never give it (esbuild-wasm's initialize, with its .wasm bytes) is queued here, while the
+        // manifest is already in hand, and run once its entry file has produced exports.
+        if (manifest.name !== undefined) this.#initQueue.set(resolvedMain, { dir: candidate, key: `${manifest.name}:initialize` });
+        return resolvedMain;
+      }
     }
 
     const indexCandidates = EXTENSIONS.map((extension) => nodePath.join(candidate, `/index${extension}`));
@@ -336,27 +382,55 @@ export class CommonJsLoader {
     return indexHit === -1 ? undefined : indexCandidates[indexHit];
   }
 
+
   /**
-   * Reads the manifest a batched probe already found. `manifestExists` comes from that probe rather than a fresh stat,
-   * because the answer is already in hand and asking twice is the cost this change exists to remove.
+   * Runs a package's declared startup the first time its entry file has exports.
+   *
+   * Once only, and the queue entry is dropped before the hook runs: a hook that throws must not be retried on the next require, because the
+   * failure is the package's to report, not ours to loop on.
    */
-  #readPackageMain(directory: string, manifestExists: boolean): string | undefined {
-    if (!manifestExists) return undefined;
+  #runInitHook(path: string, record: ModuleRecord): void {
+    const pending = this.#initQueue.get(path);
+    if (pending === undefined) return;
+    this.#initQueue.delete(path);
+    const hook = INIT_HOOKS.find((candidate) => candidate.key === pending.key);
+    if (hook === undefined) return;
+    const prepared = hook.run(record.exports, { dir: pending.dir, readFile: (file) => this.#deps.fs.readFileSync(file) });
+    // A hook may hand back a replacement (a proxy that awaits readiness on first call). The record is the only place a caller can see it, so it
+    // is replaced here rather than inside the hook, which has no business knowing how modules are cached.
+    if (prepared !== undefined) record.exports = prepared;
+  }
+
+  /**
+   * The parts of a package.json resolution needs: which file to load, and which package it belongs to.
+   *
+   * `browser` wins over `main`. Node ignores that field because Node is not a browser; this runtime IS the browser a dependency was written
+   * for, so a package that ships a browser build is telling the truth about what should run here. esbuild is the case that forced it: its
+   * `main` spawns a native binary, and its `browser` entry runs the same compiler on WebAssembly. Only the string form is honoured: the object
+   * form is a per-file rewrite table, which is a resolution feature this runtime does not have (ADR-0004 D-4).
+   */
+  #readPackageManifest(
+    directory: string,
+    manifestExists: boolean,
+  ): { main: string | undefined; name: string | undefined } {
+    if (!manifestExists) return { main: undefined, name: undefined };
     const manifestPath = nodePath.join(directory, "/package.json");
     try {
       const raw = this.#deps.fs.readFileSync(manifestPath, "utf8");
       const parsed: unknown = JSON.parse(typeof raw === "string" ? raw : raw.toString());
-      if (typeof parsed === "object" && parsed !== null && "main" in parsed) {
-        const main = (parsed as { main?: unknown }).main;
-        if (typeof main === "string" && main !== "") return main;
+      const pick = (value: unknown): string | undefined => (typeof value === "string" && value !== "" ? value : undefined);
+      if (typeof parsed === "object" && parsed !== null) {
+        const manifest = parsed as { main?: unknown; browser?: unknown; name?: unknown };
+        const main = pick(manifest.browser) ?? pick(manifest.main);
+        return { main, name: pick(manifest.name) };
       }
+      return { main: undefined, name: undefined };
     } catch {
       // A malformed package.json is Node's "invalid package config" condition.
       // Surfacing it as a resolution miss keeps the error path simple for now;
       // the fidelity gap is recorded in ADR-0004 rather than swallowed silently.
-      return undefined;
+      return { main: undefined, name: undefined };
     }
-    return undefined;
   }
 
   /** Load a module by absolute path, evaluating it once and caching the record. */
@@ -389,6 +463,7 @@ export class CommonJsLoader {
       const raw = this.#deps.fs.readFileSync(path, "utf8");
       record.exports = JSON.parse(typeof raw === "string" ? raw : raw.toString());
       record.loaded = true;
+      this.#runInitHook(path, record);
       return record;
     }
 
@@ -443,6 +518,13 @@ export class CommonJsLoader {
       ["clearTimeout", runtimeGlobals.clearTimeout],
       ["clearInterval", runtimeGlobals.clearInterval],
       ["setImmediate", runtimeGlobals.setImmediate],
+      // The browser's own name for its global, and the realm-level constructors a package that builds a scope by enumerating it expects. These
+      // are what makes `esbuild-wasm`'s in-thread service possible; without them it throws `self is not defined` before the first transform.
+      ["self", runtimeGlobals.self],
+      ["WebAssembly", runtimeGlobals.WebAssembly],
+      ["TextEncoder", runtimeGlobals.TextEncoder],
+      ["TextDecoder", runtimeGlobals.TextDecoder],
+      ["crypto", runtimeGlobals.crypto],
     ];
     // For an ES module the transform reports its own lexical bindings, so the answer is a fact rather than an inference from
     // generated text. CommonJS keeps the textual scan, because there is no parse to ask.
@@ -501,6 +583,7 @@ export class CommonJsLoader {
       void evaluation.then(
         () => {
           record.loaded = true;
+          this.#runInitHook(path, record);
         },
         () => undefined,
       );
@@ -510,6 +593,8 @@ export class CommonJsLoader {
     factory.call(record.exports, ...injected.map(([, value]) => value));
 
     record.loaded = true;
+
+    this.#runInitHook(path, record);
     return record;
   }
 

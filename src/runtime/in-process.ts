@@ -433,22 +433,34 @@ export class InProcessRuntime implements Runtime {
         },
       },
     });
+    // Built first so the runtime's own global object can name itself: `self` is what a browser calls it, and a package that builds a scope
+    // from `self` (the in-thread service inside esbuild-wasm) needs it to exist.
+    // Written as a literal first so the object can name itself: `self` is what a browser calls this object, and a package that builds a scope
+    // from `self` (the in-thread service inside esbuild-wasm) needs it to exist before it can enumerate anything.
+    const runtimeGlobals = {
+      Date: createVirtualDate(() => scheduler.now()),
+      performance: virtualPerformance,
+      setTimeout: ((fn: (...args: never[]) => void, delay?: number, ...args: unknown[]) =>
+        scheduler.setTimeout(fn, delay ?? 0, ...args)) as RuntimeGlobals["setTimeout"],
+      setInterval: ((fn: (...args: never[]) => void, delay?: number, ...args: unknown[]) =>
+        scheduler.setInterval(fn, delay ?? 0, ...args)) as RuntimeGlobals["setInterval"],
+      clearTimeout: ((handle: TimerHandle | number) => scheduler.clear(handle)) as RuntimeGlobals["clearTimeout"],
+      clearInterval: ((handle: TimerHandle | number) => scheduler.clear(handle)) as RuntimeGlobals["clearInterval"],
+      setImmediate: ((fn: (...args: never[]) => void, ...args: unknown[]) =>
+        scheduler.setImmediate(fn, ...args)) as RuntimeGlobals["setImmediate"],
+      WebAssembly,
+      TextEncoder,
+      TextDecoder,
+      crypto: globalThis.crypto,
+      self: undefined as unknown,
+    } satisfies RuntimeGlobals;
+    runtimeGlobals.self = runtimeGlobals;
+
     loader.setRuntimeContext({
       process: processShim,
       console: consoleShim,
       Buffer,
-      globals: {
-        Date: createVirtualDate(() => scheduler.now()),
-        performance: virtualPerformance,
-        setTimeout: ((fn: (...args: never[]) => void, delay?: number, ...args: unknown[]) =>
-          scheduler.setTimeout(fn, delay ?? 0, ...args)) as RuntimeGlobals["setTimeout"],
-        setInterval: ((fn: (...args: never[]) => void, delay?: number, ...args: unknown[]) =>
-          scheduler.setInterval(fn, delay ?? 0, ...args)) as RuntimeGlobals["setInterval"],
-        clearTimeout: ((handle: TimerHandle | number) => scheduler.clear(handle)) as RuntimeGlobals["clearTimeout"],
-        clearInterval: ((handle: TimerHandle | number) => scheduler.clear(handle)) as RuntimeGlobals["clearInterval"],
-        setImmediate: ((fn: (...args: never[]) => void, ...args: unknown[]) =>
-          scheduler.setImmediate(fn, ...args)) as RuntimeGlobals["setImmediate"],
-      },
+      globals: runtimeGlobals,
     });
 
     let capturedRefusal: Refusal | undefined;

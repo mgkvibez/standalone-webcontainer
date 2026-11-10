@@ -68,3 +68,42 @@ untouched, and the substitution is what stands between Vite and this refusal.
 **Consequence for the offline lane:** the Vite snapshot was captured with native `esbuild`, so an install from that snapshot cannot
 satisfy the substitution. The snapshot needs recapturing through the substitution table before the hermetic lane can speak about Vite
 again; until then `fixture-01` is a network-lane fixture.
+
+## The init hook, measured (one transform, in isolation first)
+
+Before touching the runtime, the same transform was run in plain Node against the extracted package: load `lib/browser.js`, provide `self`,
+`initialize({ wasmModule, worker: false })`, then `transform()`. It works, and gives the numbers this design has to fit in:
+
+| step | plain Node |
+|---|---|
+| load `lib/browser.js` | 2 ms |
+| `initialize` (incl. `new WebAssembly.Module` over 11.1 MB) | 67 ms |
+| first `transform` (TypeScript) | 233 ms |
+| second `transform` (JSX) | immediate |
+
+Three things made it work, and each was a separate defect in the runtime:
+
+1. **The entry.** `esbuild-wasm`'s `main` is still the native-service build that spawns a binary; only its `browser` entry is the WebAssembly
+   compiler. Our resolver now prefers `browser` over `main` (string form only), because this runtime is the browser a dependency was written
+   for. Node ignores that field for the opposite reason.
+2. **The startup.** `esbuild-wasm` must be handed its own `.wasm` through `initialize()`, and **it refuses to be used until that promise
+   resolves**: `You need to wait for the promise returned from "initialize" to be resolved before calling this`. Its callers never call
+   `initialize()` at all. So the hook returns a **lazy proxy**: every callable export awaits readiness on first call, which is the ordering
+   problem the briefing named, demonstrated rather than assumed.
+3. **The globals.** The in-thread service assembles its own scope by enumerating `self`, so the runtime now injects `self`, `WebAssembly`,
+   `TextEncoder`, `TextDecoder` and `crypto`. Without `self` it dies with `self is not defined` before the first transform.
+
+## Where it stops now
+
+The Go runtime boots and reaches its own I/O, then panics:
+
+```
+panic: syscall/js: call of Value.Invoke on undefined
+  syscall.Write(0x1, ...) → syscall/fs_js.go:419 → main.runService
+```
+
+The service writes its protocol to **fd 1**, and the wasm host has no `fs` bridge to write through. That bridge is ours to provide and it is
+ours by nature: fd 1 is the process's stdout, which this runtime already owns. The next step is therefore narrow and well-defined: give the
+wasm host `fs.writeSync`/`fs.write` bound to the running program's stdout and stderr, then re-run the same measurement.
+
+`docs` note: `fixture-01` is untouched and still red. Nothing here classifies it.
