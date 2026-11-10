@@ -55,6 +55,7 @@ import {
 } from "../npm/install.js";
 import type { FileSystemPort } from "../vfs/port.js";
 import { CommonJsLoader, type RuntimeGlobals } from "./commonjs.js";
+import { createCompleteHostFs, hostFsSourceFrom } from "./host-fs.js";
 import { createRealmGlobals } from "./realm-globals.js";
 import { createVirtualDate, createVirtualPerformance, Scheduler, type SchedulerEvidence, type TimerHandle } from "./scheduler.js";
 import { ProcessRefusal, type Refusal } from "./refusal.js";
@@ -454,6 +455,22 @@ export class InProcessRuntime implements Runtime {
     // The object a program sees as `self` is its own global object, the way a browser's is: the realm's constructors plus what this runtime owns.
     // Built as one object so a package that assembles a scope from `self` gets both.
     const globalObject = Object.assign(Object.create(null) as Record<string, unknown>, createRealmGlobals(), runtimeGlobals);
+    /**
+     * The `fs` a Go runtime compiled to `js/wasm` calls into, on the global because that is where esbuild-wasm looks: its loader installs its own
+     * all-`ENOSYS` stub at `globalThis.fs` when one is absent and uses it for every file call. Providing ours decides WHO answers, not whether the
+     * name exists: once a program loads esbuild, `self.fs` is there either way. Metadata only, and the reason is in `host-fs.ts`: the in-thread
+     * service replaces `read` with a stdin-only implementation, so file bytes cannot cross into the Go side at all.
+     */
+    globalObject.fs = createCompleteHostFs(
+      hostFsSourceFrom(this.#vfs),
+      {
+        cwd,
+        write: (fd, text) => {
+          if (fd === 1) stdout.write(text);
+          else if (fd === 2) stderr.write(text);
+        },
+      },
+    );
     // Set after the merge, not before: the merge copies the placeholder `self` in, and a global object whose own `self` is not itself is exactly
     // the kind of half-object this exists to avoid.
     globalObject.self = globalObject;

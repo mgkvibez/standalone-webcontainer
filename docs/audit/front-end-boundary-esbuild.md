@@ -237,7 +237,12 @@ That settles the Worker question in the direction that saves the most work. `Ato
 *synchronous* cross-thread bridge, and there is no synchronous call to bridge. So `esbuild-wasm` needs no Worker for the filesystem: the host object
 is a thin adapter over the runtime's own `fs` shim, which is already async, already VFS-backed, and in production already served from the kernel
 Worker over the SAB channel. The async shape means the same adapter works in-process and across threads unchanged. The fd layer over the syscall
-channel stays unbuilt, and the plugin-mediated resolver the reviewer offered as the main-thread fallback is not needed either.
+channel stays unbuilt.
+
+**Correction, added after the adapter was built.** "The plugin-mediated resolver is not needed either" was wrong, and the measurement in the next
+section is what says so: the host object can answer metadata, but the Go side cannot receive file BYTES at all, so contents must arrive through
+`onLoad` plugins. The resolver point stands and Vite's optimizer route is the one that works. The fd layer conclusion survived: no file bytes cross
+the boundary, so there is no fd read to build.
 
 **Cold versus warm.** Measured, one build in-process: install 357 ms (network, never in a user's boot), `new WebAssembly.Module` over 11.1 MB of wasm
 49-67 ms, first transform 170-233 ms total including init, second transform immediate. Vite's own optimizer output lives in `node_modules/.vite` and
@@ -268,7 +273,50 @@ The second job is there on purpose. It is the shape a real package produced and 
 colliding with the injected CommonJS binding in a loader. Parity is what proves the compiler's output is untouched by anything our loader does around
 it.
 
-**Two jobs are waiting, and the tool names them rather than skipping them silently.** `build:` jobs (plugin round trip, define plus tree shaking)
-make the Go host open and read files from the VFS, which the host object cannot do yet. `--with-builds` runs them, and today fails at exactly the
-measured boundary: `Cannot read directory ".": not implemented on js`. They join the default run as soon as the host `fs` adapter exists, which is the
-next slice.
+**All five jobs now run by default, including both builds.** The two build jobs were described as "waiting on the host `fs` adapter" while that
+adapter did not exist. It exists now, and the jobs are not merely enabled, they are reshaped into the form the embedder can actually reach.
+
+## The host `fs` object: metadata, not bytes
+
+A Go binary compiled to `js/wasm` never touches a filesystem itself. Every file call is a `syscall/js` call into a JavaScript object named `fs`, and
+`esbuild-wasm`'s loader installs a stub of that object whose every member answers `ENOSYS`, guarded as one block behind `if (!globalThis.fs)`. So the
+choice is not "stub or no stub", it is "their stub, or an object of this exact shape": `self.fs = {}` panics the Go runtime at `syscall.init`, while a
+mirror of the stub's member set boots.
+
+**What was measured, not assumed.** `npx tsx tools/measure-esbuild-wasm.ts --syscalls --trace` installs a recording object and prints every call in
+order with its arguments and its outcome. Three findings, each of which changed the design:
+
+1. **Go's `Open` is not POSIX `open`.** From Go's own `src/syscall/fs_js.go`: it calls `open`, then `fstat(fd)`, and only asks for `readdir(path)` if
+   `fstat` says the fd is a directory. A host `open` that fails on a directory makes esbuild report `Cannot read directory ".": Is a directory`, which
+   looks like a host refusing a directory when it is the host failing to open one. The recorded sequence for one build is
+   `stat("C:\")` (ENOENT, esbuild probing the cwd), `open("/app")`, `fstat(3)` → directory, `readdir("/app")`, `close(3)`, then the same for `/`, then
+   `lstat` and `open` on the entry.
+2. **`Stats` is read field by field and a partial object panics.** `syscall.setStat` calls `.Int()` on `dev`, `ino`, `mode`, `nlink`, `uid`, `gid`,
+   `rdev`, `size`, `blksize`, `blocks` and the three `*Ms` values. Omitting them is not a degraded result, it is
+   `panic: syscall/js: call of Value.Int on undefined` at `syscall/fs_js.go:166`. `mode` is load-bearing: directory-ness is `mode & S_IFMT == S_IFDIR`.
+3. **File bytes cannot cross into the Go side at all.** This is the one that decides the architecture. `esbuild-wasm`'s in-thread service assigns
+   `fs.read` and `fs.writeSync` **unconditionally**, after the host object is already in place, and its `read` is stdin-only: any other fd throws
+   `Bad read`. A build whose entry must be read from disk therefore dies inside esbuild's own function, and
+   `npx tsx tools/measure-esbuild-wasm.ts --build` reproduces it: `panic: JavaScript error: Bad read` through
+   `bundler.runOnLoadPlugins -> FSCache.ReadFile -> os.ReadFile -> syscall.Read`.
+
+The consequence is a shape, not a compromise. The Go side can learn a file's **metadata** and never its **bytes**, so module contents have to travel by
+`onLoad`, which is exactly what Vite's dependency optimizer does. `src/runtime/host-fs.ts` implements the measured subset (`stat`, `lstat`, `open`,
+`fstat`, `readdir`, `close`, `write`), keeps the stub's `ENOSYS` for everything unmeasured, and carries the full `Stats` shape so Go does not panic.
+
+**That the adapter is load-bearing is measured too, not argued.** The parity run resolves the entry point with esbuild's own resolver, not a plugin, so
+on the wasm side resolution can only work if the host object answers. With the adapter wired in, every job matches byte for byte. With the one wiring
+line disabled, the same run fails before compiling anything: `Cannot read directory ".": not implemented on js` and `Could not resolve
+"/app/entries/job-3.tsx"`. The build jobs' contents still come from `onLoad`, reading each job's own file with the program's `fs`, which is the
+optimizer's route and the only reachable one.
+
+| job | native | wasm | sha256 (both) |
+|---|---|---|---|
+| typescript, es2020 | 56 B | 56 B | `228c8677a6b50e1c` |
+| module declaring its own `exports` binding | 96 B | 96 B | `30f73cbe0f7c80b8` |
+| jsx automatic runtime | 145 B | 145 B | `d0e24a219796ff6c` |
+| plugin round trip, minified | 40 B | 40 B | `9bc28c70ffbc78ec` |
+| define and tree shaking | 60 B | 60 B | `998d621981d61eaf` |
+
+Each build job gets its own entry file. The jobs run in sequence through one program, so a shared path would hand every job the last job's source and
+report identical results as agreement, which is the kind of green that measures nothing.
