@@ -106,10 +106,35 @@ interface Entry {
   refed: boolean;
 }
 
-/** Two microtask hops: one lets the first continuation run, two let a continuation that queues another continuation run. */
+/**
+ * Lets every pending continuation run, by crossing one macrotask boundary.
+ *
+ * The rule encoded here is Node's: the microtask queue is drained to exhaustion before the next macrotask runs. Two `await Promise.resolve()`
+ * hops were a guess at the depth of a chain, and a measured wrong one: a `.then` whose callback returns another `.then` keeps queueing
+ * continuations, so `setTimeout(() => Promise.resolve().then(..).then(..).then(..))` printed all three links in Node and only the first here
+ * (differential case `chained-then-from-timer`). Only a macrotask boundary guarantees the queue is empty; a hop count can approximate it and
+ * silently truncate anything deeper.
+ *
+ * `MessageChannel` rather than a 0 ms timer wherever it exists: this runs on every drain pass, and a Worker clamps timers to a few
+ * milliseconds per hop. A message event is a macrotask in both a page and a Worker, so it drains microtasks without the clamp.
+ */
 async function drainContinuations(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
+  const Channel = (globalThis as { MessageChannel?: typeof MessageChannel }).MessageChannel;
+  if (Channel !== undefined) {
+    await new Promise<void>((resolve) => {
+      const channel = new Channel();
+      channel.port1.onmessage = () => {
+        channel.port1.close();
+        channel.port2.close();
+        resolve();
+      };
+      channel.port2.postMessage(0);
+    });
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
 }
 
 export class Scheduler {

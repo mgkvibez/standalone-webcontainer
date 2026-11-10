@@ -140,3 +140,34 @@ result, so it is not the loop emptying while work is pending, it is the Go servi
 That is our defect, not esbuild's: the service drives itself with `setTimeout` and microtask turns, and the virtual clock collapses that
 interleaving. Next step is a differential case for it (`npm run diff:event-loop`) rather than a patch: the same program run in real Node against
 the same package gives a transform in 233 ms, so Node is available as the judge.
+
+## The interleaving, decided by Node, and the first transform
+
+`initialize()` never settling was not esbuild's fault either. Asked as a differential case before any patch
+(`chained-then-from-timer`, `npm run diff:event-loop`):
+
+| | Node | this runtime |
+|---|---|---|
+| `setTimeout(() => Promise.resolve().then(..).then(..).then(..))` | `one,two,three` | `one` |
+
+The runtime drained continuations with a fixed **two** microtask hops, which is a guess at the depth of a chain. A `.then` whose callback returns
+another `.then` keeps queueing continuations, so the chain is truncated wherever the hop count runs out. Node's rule is not "a couple of hops",
+it is "the microtask queue is drained to exhaustion before the next macrotask runs", and only a **macrotask boundary** expresses that. The drain
+now crosses one, via `MessageChannel` where it exists (a Worker clamps timers, and this runs on every pass) and a 0 ms timer otherwise.
+
+That single line of semantics was the whole remaining gap. With it:
+
+```
+$ npx tsx tools/measure-esbuild-wasm.ts
+install: 1 package(s) in 357 ms | esbuild -> esbuild-wasm@0.21.5 (initHook esbuild-wasm:initialize)
+esbuild.wasm in the VFS: 11.1 MB
+run: 170 ms | exit 0
+CODE:let x = 1;
+const f = (a) => `${a}`;
+```
+
+One TypeScript transform, in the container, through the real installer: the substitution, the browser entry, the hook with its lazy proxy, the realm
+global object, and the event loop all holding at once. Differential suite 16/16 against real Node; 1102 tests green.
+
+Next, per the agreed sequence: the dependency optimizer, where Vite passes esbuild plugins and the service model differs most (native esbuild runs a
+process, the WASM build runs in-thread). `fixture-01` is still untouched and still red.

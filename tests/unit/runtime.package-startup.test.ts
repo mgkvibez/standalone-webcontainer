@@ -142,3 +142,29 @@ describe("declared startup", () => {
     expect(result.stdout).toBe("untouched\n");
   });
 });
+
+describe("continuation depth", () => {
+  it("runs a promise chain of any depth started inside a timer, as Node does", async () => {
+    // The differential case `chained-then-from-timer` decided this against real Node: a `.then` whose callback returns another `.then` keeps
+    // queueing continuations, so a fixed number of microtask hops truncates the chain. Only a macrotask boundary drains the queue to exhaustion.
+    // Pinned here so the suite catches a regression without Node present.
+    const result = await run(
+      {
+        "/app/main.js": [
+          "const out = [];",
+          "setTimeout(() => {",
+          "  let link = Promise.resolve();",
+          "  for (let depth = 0; depth < 6; depth += 1) {",
+          "    link = link.then(() => { out.push(depth); return Promise.resolve(); });",
+          "  }",
+          "}, 0);",
+          "setTimeout(() => console.log(out.length, out.join(',')), 20);",
+        ].join("\n"),
+      },
+      "main.js",
+    );
+
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("6 0,1,2,3,4,5\n");
+  });
+});
