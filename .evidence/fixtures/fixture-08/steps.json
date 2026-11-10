@@ -5,12 +5,12 @@
     "command": "npm install express",
     "state": "ran",
     "termination": "ok",
-    "detail": "builtin command completed: added 68 package(s) from registry.npmjs.org",
-    "elapsedMs": 2199,
+    "detail": "builtin command completed: added 68 package(s) from snapshot \"express\" (68 pinned packages)",
+    "elapsedMs": 114,
     "record": {
       "index": 0,
       "exitCode": 0,
-      "stdout": "added 68 package(s) from registry.npmjs.org",
+      "stdout": "added 68 package(s) from snapshot \"express\" (68 pinned packages)",
       "stderr": ""
     }
   },
@@ -21,7 +21,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "process 1 exited 0 and left a server listening on port(s) 3200",
-    "elapsedMs": 155,
+    "elapsedMs": 152,
     "record": {
       "index": 1,
       "exitCode": 0,

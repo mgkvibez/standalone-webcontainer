@@ -37,7 +37,8 @@
     "bench:syscall-metadata": "vite-node tools/bench/syscall-metadata.ts",
     "diff:modules": "vite-node tools/differential/modules.ts",
     "diff:modules:strict": "vite-node tools/differential/modules.ts --strict",
-    "fixtures:run": "vite-node tools/harness/run-fixture.ts"
+    "fixtures:run": "vite-node tools/harness/run-fixture.ts",
+    "snapshot:build": "vite-node tools/npm/build-snapshot.ts"
   },
   "devDependencies": {
     "@codemirror/lang-javascript": "^6.2.5",
