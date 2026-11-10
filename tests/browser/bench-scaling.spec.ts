@@ -360,7 +360,12 @@ test("parking versus spinning: what a kernel wake-up costs", async ({ page }) =>
           const { SyscallClient } = await import(MODULES.channel);
           const { createRemoteFileSystem } = await import(MODULES.remoteFs);
           const client = new SyscallClient({ buffer, sizes });
-          const fs = createRemoteFileSystem(client, { timeoutMs: 5000 });
+          // A measurement's syscall deadline is an instrument setting, not a property under test: this spec reports cost per op and
+          // already bounds itself with test.setTimeout. On a contended box (the browser lane's own workers plus anything else running)
+          // a 5 s deadline expires before the kernel reaches the call, and the failure is a SyscallTimeoutError that says nothing about
+          // the number being measured. Measured: this spec failed in the full lane on the untouched tree while passing standalone, so
+          // the tight deadline was reporting the machine, not a regression. A genuine hang still fails, at the spec's outer limit.
+          const fs = createRemoteFileSystem(client, { timeoutMs: 60_000 });
           fs.readFileSync("/small.txt", "utf8");
           const started = performance.now();
           for (let i = 0; i < ops; i += 1) fs.readFileSync("/small.txt", "utf8");

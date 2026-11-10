@@ -160,6 +160,15 @@ export class Scheduler {
    * that wait would have killed every interactive program five seconds after it asked its first question.
    */
   #idleWaitMs = 0;
+  /**
+   * When the current idle stretch began, or null when the program is not idle.
+   *
+   * The stretch has to start before the poll rather than at it: the loop also does bookkeeping between polls (a drain pass, a
+   * continuation drain, the guard check itself), and charging that to the program made a program that only waits die of a budget
+   * it never spent. Measured: a 5 ms ceiling over a 120 ms wait tripped on 2 of 3 local runs with `idle 61 real 67` in the
+   * evidence, and this is a CI-only failure only because a slower machine crosses the line sooner.
+   */
+  #idleStart: number | null = null;
   #callbackErrors = 0;
   #evidence: SchedulerEvidence | null = null;
   readonly #onCallbackError: ((error: unknown) => void) | undefined;
@@ -246,6 +255,18 @@ export class Scheduler {
    * After each callback the continuation queue is drained: without that, a `setTimeout(() => Promise.resolve().then(print))`
    * would print after the snapshot, which is the exact failure ADR-0013 was written for.
    */
+  /** Idle milliseconds including the stretch in progress, so a check mid-wait does not under-count. */
+  #idleTotal(now: number = Date.now()): number {
+    return this.#idleWaitMs + (this.#idleStart === null ? 0 : now - this.#idleStart);
+  }
+
+  /** Folds the idle stretch in progress into the total. Called whenever real work is about to run, and before reporting. */
+  #chargeIdle(): void {
+    if (this.#idleStart === null) return;
+    this.#idleWaitMs += Date.now() - this.#idleStart;
+    this.#idleStart = null;
+  }
+
   async drain(): Promise<SchedulerEvidence> {
     if (this.#evidence !== null) return this.#evidence;
 
@@ -264,23 +285,26 @@ export class Scheduler {
         // real-time guard end a program that watches forever rather than exiting behind its back.
         const outstanding = this.#keepAlive === undefined ? 0 : this.#keepAlive();
         if (outstanding > 0) {
-          if (Date.now() - this.#realStart - this.#idleWaitMs > this.#maxRealMs) {
+          // The stretch starts at the first moment the loop finds nothing to do, and covers everything until work resumes:
+          // the poll, and the bookkeeping around it.
+          if (this.#idleStart === null) this.#idleStart = Date.now();
+          if (Date.now() - this.#realStart - this.#idleTotal() > this.#maxRealMs) {
             stop = "real-time-limit";
+            this.#chargeIdle();
             break;
           }
-          const waitedFrom = Date.now();
           await new Promise((resolve) => {
             setTimeout(resolve, this.#keepAlivePollMs);
           });
           // Waiting for the outside world is not the program working, so it does not count against the runaway guard. Without
           // this, every interactive program died five seconds after asking its first question.
-          this.#idleWaitMs += Date.now() - waitedFrom;
           continue;
         }
         break;
       }
     }
 
+    this.#chargeIdle();
     this.#evidence = Object.freeze({
       stop,
       virtualElapsedMs: this.#virtual,
@@ -334,11 +358,14 @@ export class Scheduler {
         stop = "callback-limit";
         break;
       }
-      if (Date.now() - this.#realStart - this.#idleWaitMs > this.#maxRealMs) {
+      if (Date.now() - this.#realStart - this.#idleTotal() > this.#maxRealMs) {
         stop = "real-time-limit";
+        this.#chargeIdle();
         break;
       }
 
+      // Real work is about to run, so the idle stretch ends here rather than at the next poll.
+      this.#chargeIdle();
       this.#remove(next.id);
       next.live = false;
       // Capture the instant this callback is FOR before rescheduling the interval. Reading `next.due` after the reschedule

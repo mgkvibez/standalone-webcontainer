@@ -161,18 +161,23 @@ describe("a program that waits for input", () => {
         process.exit(0);
       });
     `);
-    // A 5 ms ceiling on WORKING time: without idle exclusion the program is stopped long before the answer arrives 120 ms from
-    // now. That is the bug a user on a slower machine would have met instead of a test.
+    // A ceiling on WORKING time, five times below the wait that follows it: without idle exclusion the program is stopped at 100 ms,
+    // four hundred milliseconds before the answer arrives. The margin is deliberate. A 5 ms ceiling asserted the same thing and was
+    // measuring the machine: boot alone crossed it on CI and on 2 of 3 local runs, so the test failed for a reason that had nothing
+    // to do with the property it names.
     const terminal = createTerminal();
-    const running = runtime.run("/app/main.js", { terminal, workCeilingMs: 5 });
+    const running = runtime.run("/app/main.js", { terminal, workCeilingMs: 100 });
 
-    await new Promise((resolve) => setTimeout(resolve, 120));
+    await new Promise((resolve) => setTimeout(resolve, 500));
     terminal.write("answer\n");
 
     const result = await running;
 
     expect(result.stdout).toContain("late:answer");
     expect(result.exitCode).toBe(0);
+    // The property itself, not just its outcome: the guard did not fire, and the evidence says the wait was accounted as idle.
+    expect(result.scheduler.guarded).toBe(false);
+    expect(result.scheduler.idleMs ?? 0).toBeGreaterThanOrEqual(300);
   });
 
   it("reports the code when a program exits from a stdin handler", async () => {
