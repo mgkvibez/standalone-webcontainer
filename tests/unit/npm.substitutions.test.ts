@@ -118,4 +118,23 @@ describe("an install that substitutes", () => {
       installDependencies({ dependencies: { esbuild: "^0.21.3" } }, { registry: thin, vfs, root }),
     ).rejects.toThrowError(SubstitutionError);
   });
+
+  it("names both versions when the substitute has not published the asked-for line, and installs nothing", async () => {
+    // The version-drift window is real: the two packages move together but not simultaneously, so a dependent can ask for an esbuild version
+    // esbuild-wasm has not shipped. The refusal must be one sentence naming both sides, because naming only the range sends the reader to look
+    // at their own dependency, and it must refuse rather than fall back to "latest", which would hand back a different compiler silently.
+    const drifted = await createFakeRegistry({
+      packages: {
+        esbuild: [{ version: "0.28.2" }],
+        "esbuild-wasm": [{ version: "0.21.4" }, { version: "0.21.5" }],
+      },
+    });
+    const { vfs, root } = bootVfs();
+
+    const attempt = installDependencies({ dependencies: { esbuild: "^0.28.2" } }, { registry: drifted, vfs, root });
+
+    await expect(attempt).rejects.toThrowError(/esbuild@\^0\.28\.2 needs a version esbuild-wasm has not published/);
+    await expect(attempt).rejects.toThrowError(/newest is 0\.21\.5/);
+    expect(() => vfs.statSync(`${root}/node_modules/esbuild`)).toThrow();
+  });
 });
