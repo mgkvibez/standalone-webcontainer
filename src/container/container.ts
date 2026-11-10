@@ -183,14 +183,14 @@ export class Container {
       "  node <file> [args...]   run a file through the runtime",
       `  ${BUILTIN_COMMANDS.join("  ")}`,
       "",
-      "Supported package commands: npm install, npm ci (bundled offline corpus only).",
+      "Supported package commands: npm install, npm ci, npm run <script> [-- args].",
       "Not supported: npx, pnpm, yarn, sh, bash, zsh.",
       "No pipes, globbing, redirection, environment assignment or job control.",
     ].join("\n");
   }
 
   /** Run one line. Resolves when the line is finished, including any process it started. */
-  async execute(sessionId: string, line: string): Promise<void> {
+  async execute(sessionId: string, line: string, scriptDepth = 0): Promise<void> {
     const session = this.findSession(sessionId);
     if (session === undefined) throw new Error(`unknown session ${sessionId}`);
 
@@ -210,7 +210,7 @@ export class Container {
         this.#notify();
         return;
       case "install":
-        await this.#install(session, command.args);
+        await this.#install(session, command.args, scriptDepth);
         return;
       case "builtin":
         this.#builtin(session, command.name, command.args);
@@ -222,13 +222,157 @@ export class Container {
     }
   }
 
-  async #install(session: Session, args: readonly string[]): Promise<void> {
+  /**
+   * `npm run <script> [-- args...]`, and `npm run` with no argument to list them.
+   *
+   * This was the single command standing between the front-end fixtures and any verdict at all: eight definitions start their app with
+   * `npm run dev` or `npm run build`, and the container refused the subcommand by name. What is implemented here is npm's contract for
+   * the parts that matter:
+   *
+   * - the script body comes from `package.json`, and is executed **through this container** like any other line, so a script that runs
+   *   `node server.mjs` behaves exactly like typing it;
+   * - a bare `vite` (or any package-provided binary) resolves the way npm's `.bin` shim does: the package's `bin` field names the
+   *   entry file, and that file is run with `node`. We have no symlinks, so the resolution is done here rather than faked on disk;
+   * - arguments are appended **only after `--`**, which is npm's rule and not pedantry: `npm run dev --port 3000` passes nothing, and
+   *   silently forwarding it would run something the fixture never asked for;
+   * - a missing script is an error naming the script, and a script naming something this container cannot run is refused by name rather
+   *   than attempted.
+   *
+   * Recursion is bounded: `npm run a` where `a` is `npm run b` is legal npm, so a depth counter stops a script that calls itself.
+   */
+  async #runScript(session: Session, args: readonly string[], depth = 0): Promise<void> {
+    if (depth > 8) {
+      this.#line(session, "stderr", "npm error: scripts nested more than 8 deep; refusing to recurse");
+      this.#notify();
+      return;
+    }
+    const raw = this.#files.read("/package.json");
+    if (raw === null) {
+      this.#line(session, "stderr", "npm error: ENOENT: no package.json in this project, so there are no scripts to run");
+      this.#notify();
+      return;
+    }
+    let manifest: { name?: unknown; version?: unknown; scripts?: unknown };
+    try {
+      manifest = JSON.parse(raw) as { name?: unknown; version?: unknown; scripts?: unknown };
+    } catch (error) {
+      this.#line(session, "stderr", `npm error: package.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+      this.#notify();
+      return;
+    }
+    const scripts: Record<string, string> = {};
+    if (typeof manifest.scripts === "object" && manifest.scripts !== null) {
+      for (const [name, value] of Object.entries(manifest.scripts as Record<string, unknown>)) {
+        if (typeof value === "string") scripts[name] = value;
+      }
+    }
+
+    const [name, ...rest] = args;
+    if (name === undefined) {
+      const names = Object.keys(scripts);
+      this.#line(session, "stdout", names.length === 0 ? "no scripts defined" : `available scripts: ${names.join(", ")}`);
+      this.#notify();
+      return;
+    }
+    const script = scripts[name];
+    if (script === undefined) {
+      this.#line(
+        session,
+        "stderr",
+        `npm error: missing script: "${name}"${Object.keys(scripts).length === 0 ? " (package.json defines no scripts)" : ` (available: ${Object.keys(scripts).join(", ")})`}`,
+      );
+      this.#notify();
+      return;
+    }
+
+    // npm appends arguments only after `--`; anything before it belongs to npm, not to the script.
+    const separator = rest.indexOf("--");
+    const extra = separator === -1 ? [] : rest.slice(separator + 1);
+    const composed = `${script.trim()}${extra.length === 0 ? "" : ` ${extra.join(" ")}`}`;
+    const projectName = typeof manifest.name === "string" ? manifest.name : "project";
+    const projectVersion = typeof manifest.version === "string" ? manifest.version : "0.0.0";
+    this.#line(session, "stdout", `> ${projectName}@${projectVersion} ${name}`);
+    this.#line(session, "stdout", `> ${composed}`);
+
+    const resolved = this.#resolveScriptLine(session, composed);
+    if (resolved === null) return;
+    await this.execute(session.id, resolved, depth + 1);
+  }
+
+  /**
+   * Turns a script body into a line this container can run, or refuses it by name.
+   *
+   * The only rewriting is npm's own: a first token that names a package's binary becomes `node <entry>`. Everything else is left
+   * exactly as written, because a container that quietly reinterpreted a script would make the verdict a statement about the rewriter.
+   */
+  #resolveScriptLine(session: Session, composed: string): string | null {
+    const parts = composed.split(/\s+/).filter((part) => part !== "");
+    const [head, ...tail] = parts;
+    if (head === undefined) {
+      this.#line(session, "stderr", "npm error: the script is empty");
+      this.#notify();
+      return null;
+    }
+    if (head === "node" || head === "npm") return composed;
+
+    const entry = this.#findPackageBinary(head);
+    if (entry !== null) return ["node", entry, ...tail].join(" ");
+
+    this.#line(
+      session,
+      "stderr",
+      `${head}: not a command in this container, and no installed package provides a "${head}" binary`,
+    );
+    this.#notify();
+    return null;
+  }
+
+  /**
+   * Reads a path that may live in the installed dependency tree rather than in the project's own files.
+   *
+   * Installed packages are held separately from the project (they are runtime state, re-seeded per run), so a lookup that only asked
+   * the project store found nothing and reported "no installed package provides a vite binary" while vite was installed. One helper,
+   * used by every lookup here, is what keeps that from becoming a habit.
+   */
+  #readInstalled(path: string): string | null {
+    return this.#dependencies.get(path) ?? this.#files.read(path);
+  }
+
+  /** The entry file a package's `bin` field declares for `name`, or null when nothing provides it. */
+  #findPackageBinary(name: string): string | null {
+    const manifestText = this.#readInstalled(`/node_modules/${name}/package.json`);
+    if (manifestText === null) return null;
+    let manifest: { bin?: unknown };
+    try {
+      manifest = JSON.parse(manifestText) as { bin?: unknown };
+    } catch {
+      return null;
+    }
+    const bin = manifest.bin;
+    let relative: string | undefined;
+    if (typeof bin === "string") relative = bin;
+    else if (typeof bin === "object" && bin !== null) {
+      const entry = (bin as Record<string, unknown>)[name];
+      if (typeof entry === "string") relative = entry;
+    }
+    if (relative === undefined) return null;
+    const path = relative.startsWith("/") ? relative : `/node_modules/${name}/${relative.replace(/^\.\//, "")}`;
+    return this.#readInstalled(path) === null ? null : path;
+  }
+
+  async #install(session: Session, args: readonly string[], scriptDepth = 0): Promise<void> {
+    const [subcommand, ...flags] = args;
+    // `npm run` is handled before the registry guard, because running a project's own scripts needs no registry at all. Leaving it
+    // behind the guard meant a container built without one answered "offline corpus is unavailable" to `npm run dev`.
+    if (subcommand === "run" || subcommand === "run-script") {
+      await this.#runScript(session, flags, scriptDepth);
+      return;
+    }
     if (this.#registry === undefined) {
       this.#line(session, "stderr", "npm: offline package corpus is unavailable");
       this.#notify();
       return;
     }
-    const [subcommand, ...flags] = args;
     if (subcommand !== "install" && subcommand !== "i" && subcommand !== "ci") {
       this.#line(session, "stderr", `npm: unsupported command${subcommand === undefined ? "" : ` ${subcommand}`}`);
       this.#notify();
@@ -378,7 +522,9 @@ export class Container {
     }
 
     const entry = resolvePath(session.cwd, target);
-    if (this.#files.read(entry) === null) {
+    // Installed packages live beside the project's own files, so the existence check has to look where the runtime will look. Without
+    // this, `node node_modules/vite/bin/vite.js` reported "cannot find module" for a file that had just been installed.
+    if (this.#readInstalled(entry) === null) {
       this.#line(session, "stderr", `node: cannot find module '${entry}'`);
       this.#notify();
       return;

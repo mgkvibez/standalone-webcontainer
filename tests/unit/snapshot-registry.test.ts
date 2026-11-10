@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
@@ -195,26 +195,28 @@ describe("loading from disk", () => {
   });
 });
 
-describe("the committed express snapshot is intact", () => {
-  it("serves every tarball it claims, matching the pinned integrity", async () => {
+describe("every committed snapshot is intact", () => {
+  for (const slug of readdirSync(join(process.cwd(), "fixtures", "snapshots"))) {
+    it(`serves every tarball ${slug} claims, matching the pinned integrity`, async () => {
     // Guards the committed data rather than the code: regenerating a tarball without regenerating the manifest is exactly the kind of
     // drift a frozen lane must refuse, and this test runs in the ordinary suite where it costs 68 digests.
-    const root = join(process.cwd(), "fixtures", "snapshots", "express");
-    const registry = loadSnapshotRegistry({
-      slug: "express",
+      const root = join(process.cwd(), "fixtures", "snapshots", slug);
+      const registry = loadSnapshotRegistry({
+        slug,
       root,
-      manifestText: readFileSync(join(root, "snapshot.json"), "utf8"),
-      read: (path) => new Uint8Array(readFileSync(path)),
-    });
-    expect(registry.packageCount).toBeGreaterThan(50);
-    let verified = 0;
-    for (const entries of Object.values(registry.manifest.packages)) {
-      for (const entry of entries) {
-        const bytes = await registry.tarball(entry.tarball);
-        expect(bytes.byteLength).toBeGreaterThan(0);
-        verified += 1;
+        manifestText: readFileSync(join(root, "snapshot.json"), "utf8"),
+        read: (path) => new Uint8Array(readFileSync(path)),
+      });
+      expect(registry.packageCount).toBeGreaterThan(0);
+      let verified = 0;
+      for (const entries of Object.values(registry.manifest.packages)) {
+        for (const entry of entries) {
+          const bytes = await registry.tarball(entry.tarball);
+          expect(bytes.byteLength).toBeGreaterThan(0);
+          verified += 1;
+        }
       }
-    }
-    expect(verified).toBe(registry.packageCount);
-  });
+      expect(verified).toBe(registry.packageCount);
+    });
+  }
 });

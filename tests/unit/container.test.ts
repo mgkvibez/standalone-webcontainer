@@ -559,3 +559,109 @@ describe("interactive sessions", () => {
     expect(runtime.typed).toEqual([]);
   });
 });
+
+/**
+ * `npm run`, which eight of the twenty fixtures need and which was refused by name until now.
+ *
+ * The semantics being pinned are npm's, not ours: the script body is executed through this container, arguments are appended only
+ * after `--`, a package-provided binary resolves through its `bin` field the way an `.bin` shim would, and a missing script is an
+ * error that names it.
+ */
+describe("npm run", () => {
+  it("lists the scripts when given no name", async () => {
+    const { container } = containerWith({
+      project: { "/package.json": JSON.stringify({ name: "p", scripts: { dev: "vite", build: "vite build" } }) },
+    });
+    const session = container.createSession();
+    await container.execute(session.id, "npm run");
+    expect(output(container, session.id)).toContain("stdout:available scripts: dev, build");
+  });
+
+  it("runs a script through the container, with npm's two header lines", async () => {
+    const { container, runtime } = containerWith({
+      project: {
+        "/package.json": JSON.stringify({ name: "app", version: "1.2.3", scripts: { start: "node index.js" } }),
+        "/index.js": "console.log(1);",
+      },
+    });
+    const session = container.createSession();
+    await container.execute(session.id, "npm run start");
+
+    const lines = output(container, session.id);
+    expect(lines).toContain("stdout:> app@1.2.3 start");
+    expect(lines).toContain("stdout:> node index.js");
+    expect(runtime.requests.at(-1)?.entry).toBe("/index.js");
+  });
+
+  it("appends arguments only after --, which is npm's rule", async () => {
+    const project = {
+      "/package.json": JSON.stringify({ name: "app", scripts: { dev: "node server.js" } }),
+      "/server.js": "",
+    };
+    const withSeparator = containerWith({ project });
+    const first = withSeparator.container.createSession();
+    await withSeparator.container.execute(first.id, "npm run dev -- --port 3000 --host 127.0.0.1");
+    expect(withSeparator.runtime.requests.at(-1)?.argv.join(" ")).toContain("--port 3000 --host 127.0.0.1");
+
+    const withoutSeparator = containerWith({ project });
+    const second = withoutSeparator.container.createSession();
+    await withoutSeparator.container.execute(second.id, "npm run dev --port 3000");
+    // Silently forwarding these would run something the fixture never asked for: npm treats them as npm's own arguments and ignores them.
+    expect(withoutSeparator.runtime.requests.at(-1)?.argv.join(" ")).not.toContain("--port");
+  });
+
+  it("resolves a package-provided binary through its bin field, the way an .bin shim would", async () => {
+    const project = new FakeProject({
+      "/package.json": JSON.stringify({ name: "app", dependencies: { tool: "^1.0.0" }, scripts: { dev: "tool --host 127.0.0.1" } }),
+    });
+    const runtime = new FakeRuntime();
+    const registry = await createFakeRegistry({
+      packages: { tool: [{ version: "1.0.0", bin: { tool: "bin/cli.js" }, files: { "bin/cli.js": "console.log('tool');" } }] },
+    });
+    const container = new Container({ runtime, files: project, registry });
+    const session = container.createSession();
+
+    await container.execute(session.id, "npm install");
+    await container.execute(session.id, "npm run dev");
+
+    const request = runtime.requests.at(-1);
+    expect(request?.entry).toBe("/node_modules/tool/bin/cli.js");
+    expect(request?.argv.join(" ")).toContain("--host 127.0.0.1");
+  });
+
+  it("names a missing script and lists what exists", async () => {
+    const { container } = containerWith({
+      project: { "/package.json": JSON.stringify({ name: "app", scripts: { dev: "node index.js" } }) },
+    });
+    const session = container.createSession();
+    await container.execute(session.id, "npm run build");
+    expect(output(container, session.id).some((line) => line.includes('missing script: "build"') && line.includes("available: dev"))).toBe(true);
+  });
+
+  it("says there is no package.json rather than inventing one", async () => {
+    const { container } = containerWith();
+    const session = container.createSession();
+    await container.execute(session.id, "npm run dev");
+    expect(output(container, session.id).some((line) => line.includes("ENOENT") && line.includes("no package.json"))).toBe(true);
+  });
+
+  it("refuses a script whose command nothing provides, by name", async () => {
+    const { container } = containerWith({
+      project: { "/package.json": JSON.stringify({ name: "app", scripts: { dev: "vite" } }) },
+    });
+    const session = container.createSession();
+    await container.execute(session.id, "npm run dev");
+    expect(
+      output(container, session.id).some((line) => line.includes("vite: not a command in this container") && line.includes("provides a \"vite\" binary")),
+    ).toBe(true);
+  });
+
+  it("stops a script that calls itself", async () => {
+    const { container } = containerWith({
+      project: { "/package.json": JSON.stringify({ name: "app", scripts: { loop: "npm run loop" } }) },
+    });
+    const session = container.createSession();
+    await container.execute(session.id, "npm run loop");
+    expect(output(container, session.id).some((line) => line.includes("nested more than 8 deep"))).toBe(true);
+  });
+});
