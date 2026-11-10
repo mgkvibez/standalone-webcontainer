@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, describe, expect, it } from "vitest";
 
-import { parseDefinition, type FixtureDefinition } from "../../src/harness/definition.js";
+import { isScoreable, parseDefinition, type FixtureDefinition } from "../../src/harness/definition.js";
 import { createStepExecutor } from "../../src/harness/execute.js";
 import { materializeProject } from "../../src/harness/project.js";
 import { runFixture } from "../../src/harness/runner.js";
@@ -101,5 +101,31 @@ describe("the corpus runs", () => {
     expect(report.assertions).toHaveLength(6);
     expect(report.assertions.every((assertion) => assertion.passed)).toBe(true);
     expect(report.outcome?.evidenceDir).toContain("fixture-04");
+  });
+});
+
+/**
+ * Fixture 10 stays out of the gate (Phase 6 R2, decision D-1).
+ *
+ * The pnpm profile is a command vocabulary, not pnpm's install engine, so a run of fixture 10 under it would assert on a tree we
+ * built with npm semantics. D-1 therefore says the profile must never score it. That holds today for a structural reason —
+ * `isScoreable` requires `status: "frozen"` and fixture 10 is `"proposed"` — which is exactly the kind of fact that disappears
+ * quietly the day someone freezes the file. This pins it, and names what has to be decided first.
+ */
+describe("fixture 10 and the pnpm profile", () => {
+  it("is not scoreable, because only a frozen definition may decide a gate outcome", () => {
+    const fixture10 = loadDefinition("fixture-10");
+
+    expect(fixture10.status).toBe("proposed");
+    expect(isScoreable(fixture10)).toBe(false);
+    // The reason it is unscored is the profile's limits, not an oversight: its first step is the pnpm install path.
+    expect(fixture10.steps[0]?.command).toBe("pnpm install");
+  });
+
+  it("would have to be frozen deliberately, and D-1 says that decision belongs to a milestone that builds the store", () => {
+    const fixture10 = loadDefinition("fixture-10");
+    // Written as an assertion about the DECISION rather than the code: if someone later flips this to "frozen", the comment above
+    // and this test are the two places that say why it needs a recorded decision first.
+    expect(fixture10.expected).toEqual(["PASS", "NETWORK"]);
   });
 });
