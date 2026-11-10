@@ -24,7 +24,9 @@ export class ModuleNotFoundError extends Error {
 
   constructor(specifier: string, fromDir: string) {
     super(`Cannot find module '${specifier}' from '${fromDir}'`);
-    this.name = "ModuleNotFoundError";
+    // Node reports `Error` with code MODULE_NOT_FOUND, and a program that logs `error.name` or compares it sees that, so the
+    // class name is kept for debugging only. The differential caught this: 11 of 14 module cases matched before the fix.
+    this.name = "Error";
   }
 }
 
@@ -98,6 +100,13 @@ const HOST_GLOBALS: RuntimeGlobals = {
 export class CommonJsLoader {
   readonly #deps: LoaderDeps;
   readonly #cache = new Map<string, ModuleRecord>();
+  /**
+   * The module that `require.main` reports: the entry, in Node's sense.
+   *
+   * Set by the first module evaluated rather than passed in, because the loader is created before the entry path is known and
+   * every `require` made afterwards must see the same object.
+   */
+  #main: ModuleRecord | null = null;
   /** Directory -> format, because deciding from `type` means reading package.json on every require otherwise. */
   readonly #formats = new Map<string, "esm" | "cjs">();
 
@@ -295,6 +304,15 @@ export class CommonJsLoader {
     );
 
     const requireFromHere = (specifier: string): unknown => this.require(specifier, moduleDir);
+    // `require.main` is the entry module, on every require function, so the common `require.main === module` test works. It is
+    // read at call time from the loader rather than captured, because the entry is only known after it has been loaded.
+    Object.defineProperty(requireFromHere, "main", {
+      get: () => this.#main,
+      enumerable: false,
+      configurable: false,
+    });
+    // The entry module becomes `require.main` the first time anything is evaluated, which is the entry itself.
+    if (this.#main === null) this.#main = record;
     const runtime = this.#runtimeContext;
     factory.call(
       record.exports,

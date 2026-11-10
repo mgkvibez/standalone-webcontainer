@@ -75,8 +75,9 @@ is why Phase 2 is held behind ADR-0019 rather than sequenced later.
    amendment): sizes, `isTTY`, `require("tty")`, stdin delivery and resize all cross page → Worker → runtime. The xterm.js pane
    and raw keystroke input remain.
 6. **Persistence on OPFS/IndexedDB with Web Locks** — blocked on ADR-0019's open question about *where* persistence lives.
-7. **Node-semantics differential tests** — started today for the event loop; module resolution and error shapes follow the
-   same harness.
+7. **Node-semantics differential tests** — the event loop was first (`docs/audit/event-loop-differential.md`), and module
+   resolution plus error shapes now follow (`docs/audit/module-differential.md`: 14 of 14 cases match Node, after two defects it
+   found, and the comparison is part of `npm run verify`).
 8. **ESM** — blocked on P0-4.
 9. **Freeze the 20 fixtures and fix the README** — README corrections landed today; freezing waits for real packages.
 10. **Benchmark against StackBlitz** — correctly last.
