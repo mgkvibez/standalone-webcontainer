@@ -1,0 +1,226 @@
+/**
+ * Native esbuild versus the substituted esbuild-wasm, compared byte for byte.
+ *
+ * The compatibility claim this exists to make is "identical bytes", not "looks like it works". Both sides run the same jobs at the same version:
+ * native esbuild from this repo's own node_modules (a Node process spawning a platform binary), and esbuild-wasm inside the container through the
+ * substitution table (WebAssembly, in-thread, no child process). Any difference in the produced code is a failure, and every future esbuild bump is
+ * then checked for free.
+ *
+ * A tool rather than a test for the honest reason: it needs 12 MB of wasm from the registry. The mechanisms it exercises are pinned hermetically in
+ * tests/unit/npm.substitutions.test.ts and the init-hook tests.
+ */
+
+import { createHash } from "node:crypto";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createRequire } from "node:module";
+
+import { createHttpRegistryClient, installDependencies } from "../src/npm/install.js";
+import { InProcessRuntime } from "../src/runtime/in-process.js";
+import { FileSystem } from "../src/vfs/index.js";
+
+const require = createRequire(import.meta.url);
+
+/** One job, expressed as data so the same list drives both sides instead of two hand-written copies drifting apart. */
+interface Job {
+  readonly name: string;
+  readonly kind: "transform" | "build";
+  /** The input: handed to transform(), or written to a real file for build(). */
+  readonly source: string;
+  readonly options: Record<string, unknown>;
+  readonly virtual?: boolean;
+  /**
+   * A build that bundles from disk makes the Go host open and read files, which the host object cannot do yet. Such jobs run only under
+   * `--with-builds`, so the default run reports what is actually comparable today and names what is waiting rather than skipping it silently.
+   */
+  readonly needsFiles?: boolean;
+}
+
+const JOBS: readonly Job[] = [
+  {
+    name: "transform: typescript, es2020",
+    kind: "transform",
+    source: "let x: number = 1;\nconst f = (a: number): string => String(a);\nexport { x, f };",
+    options: { loader: "ts", target: "es2020" },
+  },
+  {
+    // The shape a real package produced and a synthetic corpus never would: a module declaring its own exports, colliding with the injected
+    // CommonJS binding. Parity is the check that the compiler's own output is untouched by anything the loader does.
+    name: "transform: module declaring its own exports binding",
+    kind: "transform",
+    source: 'const exports = [];\nfunction thing() { return exports.length; }\nmodule.exports = { thing };',
+    options: { loader: "js", target: "es2020", format: "cjs" },
+  },
+  {
+    name: "transform: jsx automatic runtime",
+    kind: "transform",
+    source: "const Card = (props: { title: string }) => <section>{props.title}</section>;\nexport default Card;",
+    options: { loader: "tsx", jsx: "automatic", target: "es2020" },
+  },
+  {
+    name: "build: plugin round trip, minified",
+    kind: "build",
+    source: 'import value from "virtual:dep";\nconst box = <T,>(_unused: T): T => _unused;\nconsole.log(value, box(1));',
+    options: { minify: true, format: "esm" },
+    virtual: true,
+    needsFiles: true,
+  },
+  {
+    name: "build: define and tree shaking",
+    kind: "build",
+    source: 'const flag = process.env.PARITY_FLAG;\nexport function pick(): string { if (flag === "on") return "on"; return "off"; }\nconsole.log(pick());',
+    options: { define: { "process.env.PARITY_FLAG": '"on"' }, format: "esm", minify: true },
+    needsFiles: true,
+  },
+];
+
+function sha(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
+
+/** The program the container runs. No backticks and no template substitutions: this string is itself a template literal. */
+function program(): string {
+  return [
+    'const fs = require("fs");',
+    'const esbuild = require("esbuild");',
+    'const jobs = JSON.parse(fs.readFileSync("/app/jobs.json", "utf8"));',
+    "",
+    "function run(job) {",
+    '  if (job.kind === "transform") return esbuild.transform(job.source, job.options).then((r) => r.code);',
+    "  const options = Object.assign({ entryPoints: [job.entry], write: false, bundle: true }, job.options);",
+    "  if (job.virtual) {",
+    "    options.plugins = [{",
+    '      name: "virtual",',
+    "      setup(build) {",
+    '        build.onResolve({ filter: /^virtual:dep$/ }, () => ({ path: "virtual:dep", namespace: "virt" }));',
+    '        build.onLoad({ filter: /.*/, namespace: "virt" }, () => ({ contents: "export default 1", loader: "js" }));',
+    "      },",
+    "    }];",
+    "  }",
+    "  return esbuild.build(options).then((r) => r.outputFiles[0].text);",
+    "}",
+    "",
+    "let chain = Promise.resolve();",
+    "jobs.forEach((job, index) => {",
+    "  chain = chain",
+    "    .then(() => run(job))",
+    '    .then((out) => { console.log("R" + index + ":" + JSON.stringify(out)); },',
+    '          (error) => { console.log("E" + index + ":" + JSON.stringify(String(error && error.message))); });',
+    "});",
+    "chain.then(() => console.log(\"DONE\"));",
+  ].join("\n");
+}
+
+async function nativeResults(nativeEsbuild: typeof import("esbuild"), jobs: readonly Job[]): Promise<string[]> {
+  const results: string[] = [];
+  for (const job of jobs) {
+    const source = job.source;
+    if (job.kind === "transform") {
+      const out = await nativeEsbuild.transform(source, job.options as never);
+      results.push(out.code);
+      continue;
+    }
+    // A real file on both sides, not stdin: esbuild's output comments name the input, and a stdin build names it differently from a file build.
+    const dir = mkdtempSync(join(tmpdir(), "parity-"));
+    const entry = join(dir, "entry.tsx");
+    writeFileSync(entry, source);
+    const out = await nativeEsbuild.build({
+      entryPoints: [entry],
+      write: false,
+      bundle: true,
+      ...(job.options as object),
+      plugins: job.virtual
+        ? [
+            {
+              name: "virtual",
+              setup(build: {
+                onResolve: (options: { filter: RegExp }, callback: () => { path: string; namespace: string }) => void;
+                onLoad: (options: { filter: RegExp; namespace: string }, callback: () => { contents: string; loader: string }) => void;
+              }) {
+                build.onResolve({ filter: /^virtual:dep$/ }, () => ({ path: "virtual:dep", namespace: "virt" }));
+                build.onLoad({ filter: /.*/, namespace: "virt" }, () => ({ contents: "export default 1", loader: "js" }));
+              },
+            },
+          ]
+        : [],
+    } as never);
+    results.push(out.outputFiles[0]?.text ?? "");
+  }
+  return results;
+}
+
+async function containerResults(version: string, passed: readonly Job[]): Promise<string[]> {
+  const vfs = new FileSystem();
+  const report = await installDependencies(
+    { dependencies: { esbuild: version } },
+    { registry: createHttpRegistryClient(), vfs, root: "/app", includeDev: false },
+  );
+  const applied = report.substitutions[0];
+  if (applied === undefined) throw new Error(`esbuild@${version} was installed without a substitution; the table did not apply`);
+  if (applied.version !== version) {
+    throw new Error(`parity needs one version on both sides: native esbuild is ${version}, ${applied.substitute} resolved ${applied.version}`);
+  }
+  console.log(`container: ${applied.requested}@${applied.version} served by ${applied.substitute} (rule ${applied.rule})`);
+
+  const jobs = passed.map((job) => ({
+    kind: job.kind,
+    source: job.source,
+    options: job.options,
+    entry: "/app/entry.tsx",
+    virtual: job.virtual === true,
+  }));
+  vfs.writeFileSync("/app/jobs.json", JSON.stringify(jobs));
+  for (const job of passed) {
+    if (job.kind === "build") vfs.writeFileSync("/app/entry.tsx", job.source);
+  }
+  vfs.writeFileSync("/app/main.js", program());
+
+  const run = await new InProcessRuntime(vfs).run("/app/main.js", { timeoutMs: 120_000 });
+  if (run.exitCode !== 0) throw new Error(`container run failed: ${run.stderr.trim().split("\n")[0] ?? ""}`);
+  const results: string[] = [];
+  for (const line of run.stdout.split("\n")) {
+    const match = /^R(\d+):(.*)$/.exec(line);
+    if (match !== null) results[Number(match[1])] = JSON.parse(match[2] ?? '""') as string;
+    const failure = /^E(\d+):(.*)$/.exec(line);
+    if (failure !== null) throw new Error(`job ${failure[1]} failed in the container: ${failure[2] ?? ""}`);
+  }
+  return results;
+}
+
+async function main(): Promise<void> {
+  const nativeEsbuild = require("esbuild") as typeof import("esbuild");
+  const version = (require("esbuild/package.json") as { version: string }).version;
+  console.log(`parity: native esbuild ${version} vs substituted esbuild-wasm ${version}`);
+
+  const withBuilds = process.argv.includes("--with-builds");
+  const passed = JOBS.filter((job) => withBuilds || job.needsFiles !== true);
+  const waiting = JOBS.filter((job) => job.needsFiles === true && !withBuilds);
+  for (const job of waiting) console.log(`waiting on the host fs adapter: ${job.name}`);
+
+  const expected = await nativeResults(nativeEsbuild, passed);
+  const actual = await containerResults(version, passed);
+
+  let differences = 0;
+  for (const [index, job] of passed.entries()) {
+    const left = expected[index] ?? "";
+    const right = actual[index] ?? "";
+    const same = left === right;
+    if (!same) differences += 1;
+    console.log(
+      `${same ? "same" : "DIFF"}  ${job.name.padEnd(46)} native ${String(left.length).padStart(5)} B ${sha(left)}  wasm ${String(right.length).padStart(5)} B ${sha(right)}`,
+    );
+    if (!same) {
+      const at = [...left].findIndex((char, position) => char !== [...right][position]);
+      console.log(`      first difference at character ${at}: native ${JSON.stringify(left.slice(Math.max(0, at - 20), at + 40))}`);
+      console.log(`      ${" ".repeat(28)}wasm ${JSON.stringify(right.slice(Math.max(0, at - 20), at + 40))}`);
+    }
+  }
+  console.log(differences === 0 ? "PARITY OK: identical bytes on every job" : `PARITY FAILED: ${differences} of ${passed.length} jobs differ`);
+  if (differences !== 0) process.exitCode = 1;
+}
+
+main().catch((error: unknown) => {
+  console.error("PARITY ERROR:", error instanceof Error ? error.message : error);
+  process.exitCode = 1;
+});

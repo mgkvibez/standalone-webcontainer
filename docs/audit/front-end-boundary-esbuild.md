@@ -248,3 +248,27 @@ rest of the storage decision, and this note is the revisit trigger it was promis
 version the substitute has not published. That now refuses in one sentence naming both sides
 (`esbuild@^0.28.2 needs a version esbuild-wasm has not published: ... newest is 0.21.5`) and it never degrades to `latest`, which would serve a
 different compiler silently. Pinned by `tests/unit/npm.substitutions.test.ts`, including that nothing is written to disk on the refusal.
+
+## Parity: identical bytes, not "looks like it works"
+
+`npx tsx tools/parity-esbuild.ts` compiles the same input twice and compares the output as bytes: native esbuild from this repo's own `node_modules`
+(a Node process spawning a platform binary) and `esbuild-wasm` inside the container through the substitution table (WebAssembly, in-thread, no child
+process). Any difference is a failure, with the first differing character and its context printed.
+
+| job | native | wasm | sha256 (both) |
+|---|---|---|---|
+| typescript, es2020 | 56 B | 56 B | `228c8677a6b50e1c` |
+| module declaring its own `exports` binding | 96 B | 96 B | `30f73cbe0f7c80b8` |
+| jsx automatic runtime | 145 B | 145 B | `d0e24a219796ff6c` |
+
+Both sides must be the **same version**, and the tool says so instead of quietly comparing different compilers: it installs `esbuild@<native version>`
+through the table, then refuses if the substitute resolved anything else, naming both. Native 0.28.2 today, substituted 0.28.2.
+
+The second job is there on purpose. It is the shape a real package produced and a synthetic corpus never would: a module declaring its own `exports`,
+colliding with the injected CommonJS binding in a loader. Parity is what proves the compiler's output is untouched by anything our loader does around
+it.
+
+**Two jobs are waiting, and the tool names them rather than skipping them silently.** `build:` jobs (plugin round trip, define plus tree shaking)
+make the Go host open and read files from the VFS, which the host object cannot do yet. `--with-builds` runs them, and today fails at exactly the
+measured boundary: `Cannot read directory ".": not implemented on js`. They join the default run as soon as the host `fs` adapter exists, which is the
+next slice.
