@@ -6,7 +6,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "builtin command reported a failure: npm error: MISSING_PACKAGE_JSON: no package.json at /package.json",
-    "elapsedMs": 0,
+    "elapsedMs": 1,
     "record": {
       "index": 0,
       "exitCode": 1,

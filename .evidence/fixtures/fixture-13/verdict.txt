@@ -1,4 +1,4 @@
 fixture: fixture-13
 evidence schema: 2
-classification: HARNESS_BUG
-reason: this runner does not wire the preview proxy, so HTTP assertions cannot be probed
+classification: RUNTIME_INCOMPATIBILITY
+reason: assertion failed: http-body-contains: body of http://localhost:3300/ did not contain "initial-marker"; observed "No project runtime is loaded." (and 1 more)

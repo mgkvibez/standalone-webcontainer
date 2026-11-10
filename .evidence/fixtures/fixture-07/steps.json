@@ -21,7 +21,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "process 1 exited with exit 0",
-    "elapsedMs": 3,
+    "elapsedMs": 4,
     "record": {
       "index": 1,
       "exitCode": 0,
@@ -36,7 +36,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "process 2 exited with exit 2",
-    "elapsedMs": 3,
+    "elapsedMs": 4,
     "record": {
       "index": 2,
       "exitCode": 2,

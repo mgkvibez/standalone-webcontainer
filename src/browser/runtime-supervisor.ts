@@ -87,6 +87,27 @@ export class RuntimeSupervisor {
     return this.#runtime.gateway.handle(request);
   }
 
+  /**
+   * Read a file from the live project VFS.
+   *
+   * A program's writes exist only here. The page supplies the project snapshot at each command boundary and the runtime's VFS is
+   * the only place a `fs.writeFileSync` inside a program lands, so anything that wants to know what a program actually produced
+   * (the fixture harness's `file-exists` assertion, and later a download or a diff) has to read the VFS rather than the snapshot.
+   *
+   * `null` means "nothing to read": a missing file, or a runtime that has been disposed. Both are the same answer to the only
+   * question this method answers, and neither is an error.
+   */
+  readRuntimeFile(path: string): string | null {
+    const vfs = this.#vfs;
+    if (vfs === null) return null;
+    try {
+      const value = vfs.readFileSync(path.startsWith("/") ? path : `/${path}`, "utf8");
+      return typeof value === "string" ? value : new TextDecoder().decode(value);
+    } catch {
+      return null;
+    }
+  }
+
   /** Stop servers owned by a process without throwing away the project VFS or other listening servers. */
   stopServers(ports: readonly number[]): readonly number[] {
     const stopped = this.#runtime?.gateway.closeServers(ports) ?? [];
