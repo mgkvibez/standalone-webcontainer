@@ -2,15 +2,16 @@
  * ES modules through the same loader (ADR-0012).
  *
  * Each test is a shape a real package uses, not a syntax catalogue: default and named imports, a namespace, a
- * re-export, dynamic import, import.meta.url, and interop in both directions with CommonJS. The two refusals are
- * tested as refusals, because a transform that silently mis-executes top-level await would be worse than one that
- * says no.
+ * re-export, dynamic import, import.meta.url, and interop in both directions with CommonJS. Top-level await is tested for what
+ * it actually does now: the transform reports it, an entry module that needs it settles before the program is judged, dynamic
+ * import waits for it, and a synchronous `require` of such a module refuses with Node's own code. Each of those was measured
+ * against node v20.20.2 rather than assumed, and the differential cases in tools/differential keep it that way.
  */
 
 import { describe, expect, it } from "vitest";
 
 import { InProcessRuntime } from "../../src/runtime/in-process.js";
-import { transformEsm, EsmSyntaxError } from "../../src/runtime/esm.js";
+import { transformEsm } from "../../src/runtime/esm.js";
 import { FileSystem } from "../../src/vfs/index.js";
 
 const run = async (files: Record<string, string>, entry: string) => {
@@ -227,17 +228,132 @@ describe("ES modules", () => {
   });
 });
 
-describe("transformEsm", () => {
-  it("refuses top-level await with a message that says what to do instead", () => {
-    expect(() => transformEsm("await Promise.resolve(1);", { url: "file:///app/x.js" })).toThrow(EsmSyntaxError);
-    expect(() => transformEsm("await Promise.resolve(1);", { url: "file:///app/x.js" })).toThrow(/async function/);
+describe("top-level await", () => {
+  it("waits for an entry module that awaits before it reports the run finished", async () => {
+    const result = await run(
+      {
+        "/app/package.json": JSON.stringify({ name: "app", type: "module" }),
+        "/app/main.js": "console.log('before');\nawait Promise.resolve();\nconsole.log('after');",
+      },
+      "main.js",
+    );
+
+    expect(result.stderr).toBe("");
+    // The second line is the whole test: without waiting for evaluation the run ends between the two prints.
+    expect(result.stdout).toBe("before\nafter\n");
   });
 
-  it("allows await inside an async function", () => {
+  it("exposes exports that are only assigned after an await", async () => {
+    const result = await run(
+      {
+        "/app/package.json": JSON.stringify({ name: "app", type: "module" }),
+        "/app/main.js": "import('./late.js').then((m) => console.log('value=' + m.value));",
+        "/app/late.js": "await Promise.resolve();\nexport const value = 'set-after-await';",
+      },
+      "main.js",
+    );
+
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("value=set-after-await\n");
+  });
+
+  it("refuses a synchronous require of an async module with Node's code", async () => {
+    const result = await run(
+      {
+        "/app/package.json": JSON.stringify({ name: "app", type: "commonjs" }),
+        "/app/main.js": [
+          "try { require('./late.mjs'); } catch (error) { console.log('name=' + error.name + ' code=' + error.code); }",
+        ].join("\n"),
+        "/app/late.mjs": "await Promise.resolve();\nexport const value = 'set';",
+      },
+      "main.js",
+    );
+
+    expect(result.stderr).toBe("");
+    // Measured against node v20.20.2: the name is "Error" and the code is ERR_REQUIRE_ASYNC_MODULE.
+    expect(result.stdout).toBe("name=Error code=ERR_REQUIRE_ASYNC_MODULE\n");
+  });
+
+  it("keeps refusing require after the async module has already settled", async () => {
+    const result = await run(
+      {
+        "/app/package.json": JSON.stringify({ name: "app", type: "commonjs" }),
+        "/app/main.js": [
+          "const helper = require('./helper.mjs');",
+          "helper.done.then((value) => {",
+          "  console.log('settled=' + value);",
+          "  try { require('./late.mjs'); } catch (error) { console.log('second=' + error.code); }",
+          "});",
+        ].join("\n"),
+        "/app/helper.mjs": "export const done = import('./late.mjs').then((m) => m.value);",
+        "/app/late.mjs": "await Promise.resolve();\nexport const value = 'set';",
+      },
+      "main.js",
+    );
+
+    expect(result.stderr).toBe("");
+    // Node's rule is about the graph, not the timing: an already-evaluated async module is still refused.
+    expect(result.stdout).toBe("settled=set\nsecond=ERR_REQUIRE_ASYNC_MODULE\n");
+  });
+
+  it("reports a throw after the first await as the program failing", async () => {
+    const result = await run(
+      {
+        "/app/package.json": JSON.stringify({ name: "app", type: "module" }),
+        "/app/main.js": "await Promise.resolve();\nthrow new TypeError('late boom');",
+      },
+      "main.js",
+    );
+
+    expect(result.exitCode).toBe(1);
+    // A rejection from the entry's evaluation must reach stderr and the exit code, not disappear into an unhandled promise.
+    expect(result.stderr).toMatch(/late boom/);
+  });
+});
+
+describe("a module that binds a name the wrapper injects", () => {
+  it("keeps every export of a module that declares its own top-level `exports`", async () => {
+    // Vite's bundled chunk carries its own package.json as top-level vars, including `var exports = { ... }`. Real ESM has no
+    // `exports`, so that is an ordinary local and the module's exports are unaffected. Writing our exports into that name instead
+    // lost everything declared after the assignment, which is why the transform targets `__cjsExports`.
+    const result = await run(
+      {
+        "/app/package.json": JSON.stringify({ name: "app", type: "module" }),
+        "/app/main.js": "import { before, after } from './chunk.js';\nconsole.log('before=' + before + ' after=' + after);",
+        "/app/chunk.js": [
+          "export const before = 'kept';",
+          "var exports = { metadata: true };",
+          "export const after = 'also-kept';",
+        ].join("\n"),
+      },
+      "main.js",
+    );
+
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("before=kept after=also-kept\n");
+  });
+});
+
+describe("transformEsm", () => {
+  it("reports top-level await instead of refusing it", () => {
+    const result = transformEsm("await Promise.resolve(1);", { url: "file:///app/x.js" });
+    expect(result.hasTopLevelAwait).toBe(true);
+    // The await itself is left where it is: the loader decides how to evaluate it, the transform only says that it is there.
+    expect(result.code).toContain("await Promise.resolve(1);");
+  });
+
+  it("reports `for await` at module scope as top-level await", () => {
+    // There is no AwaitExpression node for this form, so a detector that only looked for one would call this module synchronous.
+    const result = transformEsm("for await (const x of []) { void x; }", { url: "file:///app/x.js" });
+    expect(result.hasTopLevelAwait).toBe(true);
+  });
+
+  it("does not report await inside an async function", () => {
     const result = transformEsm("export const go = async () => { await Promise.resolve(1); };", {
       url: "file:///app/x.js",
     });
-    expect(result.code).toContain("exports.go");
+    expect(result.code).toContain("__esmExports.go");
+    expect(result.hasTopLevelAwait).toBe(false);
   });
 
   it("reports the imported specifiers it saw", () => {

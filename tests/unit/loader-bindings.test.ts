@@ -30,6 +30,19 @@ describe("the module wrapper omits a binding a module declares for itself", () =
     expect(declaresOwnBinding("var Buffer = require('safe-buffer').Buffer", "Buffer")).toBe(false);
   });
 
+  it("ignores a declaration inside a nested scope, which cannot collide with a parameter", () => {
+    // The first version matched anywhere in the file. Vite's bundled chunk declares `const exports = []` inside two ordinary
+    // functions, and that stripped the binding for the whole module.
+    expect(declaresOwnBinding("function f() { const Buffer = 1; return Buffer; }", "Buffer")).toBe(false);
+    expect(declaresOwnBinding("if (x) {\n  const Buffer = 1;\n}", "Buffer")).toBe(false);
+    // The destructuring form needs its braces, so it is tested against the whole line; a nested one is still rejected because that
+    // line is read at a depth other than zero.
+    expect(declaresOwnBinding("function f() { const { Buffer } = require('node:buffer'); }", "Buffer")).toBe(false);
+    // ...while a top-level one, before or after a nested block, still counts.
+    expect(declaresOwnBinding("function f() { const Buffer = 1; }\nconst Buffer = 2;", "Buffer")).toBe(true);
+    expect(declaresOwnBinding("const Buffer = 2;\nfunction f() { let Buffer = 1; }", "Buffer")).toBe(true);
+  });
+
   it("does not match a different name or a mention inside a string", () => {
     expect(declaresOwnBinding("const other = 1;", "Buffer")).toBe(false);
     expect(declaresOwnBinding("console.log('const Buffer = 1');", "Buffer")).toBe(false);

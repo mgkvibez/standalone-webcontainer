@@ -17,6 +17,7 @@ import { path as nodePath } from "../shims/path.js";
 import { transformEsm } from "./esm.js";
 import type { FsShim } from "../shims/fs.js";
 import { ProcessRefusal } from "./refusal.js";
+import type { RequireFunction } from "../shims/module.js";
 
 /** Thrown for a resolver failure; `code` matches Node so callers can branch. */
 export class ModuleNotFoundError extends Error {
@@ -26,6 +27,23 @@ export class ModuleNotFoundError extends Error {
     super(`Cannot find module '${specifier}' from '${fromDir}'`);
     // Node reports `Error` with code MODULE_NOT_FOUND, and a program that logs `error.name` or compares it sees that, so the
     // class name is kept for debugging only. The differential caught this: 11 of 14 module cases matched before the fix.
+    this.name = "Error";
+  }
+}
+
+/**
+ * `require()` reaching a module whose own evaluation is asynchronous (top-level await).
+ *
+ * This is Node's `ERR_REQUIRE_ASYNC_MODULE`, and it is an ordinary error rather than a `ProcessRefusal` because it describes a
+ * language rule, not a capability this runtime lacks: real Node throws the same thing for the same program. A program is
+ * entitled to catch it, and when it does, the run is a normal run. The name stays `Error` and the `code` carries the identity,
+ * which is what user code actually branches on.
+ */
+export class AsyncModuleRequireError extends Error {
+  readonly code = "ERR_REQUIRE_ASYNC_MODULE";
+
+  constructor(id: string) {
+    super(`require() cannot be used on an ESM graph with top-level await. Use import() instead. (${id})`);
     this.name = "Error";
   }
 }
@@ -40,6 +58,13 @@ export interface ModuleRecord {
   readonly id: string;
   exports: unknown;
   loaded: boolean;
+  /**
+   * Set only for a module whose own body has top-level await: the pending evaluation. Its `exports` are filled as the body
+   * progresses, so a caller must await this before reading them. `require` refuses such a record; `import()` awaits it.
+   */
+  evaluation?: Promise<void>;
+  /** True when the module needs asynchronous evaluation. Read by `require` to produce Node's refusal. */
+  asyncModule?: boolean;
 }
 
 const EXTENSIONS: readonly string[] = [".js", ".cjs", ".json"];
@@ -81,9 +106,49 @@ export function declaresOwnBinding(source: string, name: string): boolean {
     .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
     .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
     .replace(/`(?:[^`\\]|\\.)*`/g, "``");
+
   const direct = new RegExp(`\\b(?:const|let|class)\\s+${name}\\b`);
-  const destructured = new RegExp(`\\b(?:const|let)\\s*(?:\\{[^}]*\\b${name}\\b[^}]*\\}|\\[[^\\]]*\\b${name}\\b[^\\]]*\\])`, "s");
-  return direct.test(scrubbed) || destructured.test(scrubbed);
+  // `s` so a destructuring pattern split across lines is one match; the newline test below is what distinguishes that shape.
+  const destructured = new RegExp(
+    `\\b(?:const|let)\\s*(?:\\{[^}]*\\b${name}\\b[^}]*\\}|\\[[^\\]]*\\b${name}\\b[^\\]]*\\])`,
+    "s",
+  );
+
+  // Cheap exit: with no candidate anywhere, the scope walk below cannot change the answer. This matters, because the front-end
+  // lane's modules are megabytes of bundled code and this is asked once per injected name.
+  if (!direct.test(scrubbed) && !destructured.test(scrubbed)) return false;
+
+  // Only a declaration at the module's OWN brace depth collides with a parameter. A `const Buffer` inside a function is a binding in
+  // a different scope and shadowing it is legal, but the first version of this function matched anywhere in the file: vite's
+  // bundled chunk declares `const exports = []` inside two ordinary functions, which stripped the binding for the whole module and
+  // turned its top-level `var exports` into `undefined` at the moment the ES-module prelude ran.
+  //
+  // Two shapes have to be told apart WITHOUT a parser. The non-destructuring pattern is tested against the part of the line before its
+  // first brace, so `function f() { const Buffer = 1 }` on one line is not a top-level declaration while `const Buffer = {}` is. The
+  // destructuring pattern needs its braces, so it is tested against the whole line, which is correct because a top-level pattern
+  // starts on a depth-0 line and a nested one starts deeper.
+  let depth = 0;
+  for (const line of scrubbed.split("\n")) {
+    if (depth === 0) {
+      const brace = line.indexOf("{");
+      const beforeBrace = brace === -1 ? line : line.slice(0, brace);
+      if (direct.test(beforeBrace)) return true;
+      // A destructuring pattern opens the brace it is built from, so it is this module's own only if the match STARTS before the
+      // first brace on the line: `function f() { const { Buffer } = ... }` starts after it, and that binding belongs to `f`.
+      const pattern = destructured.exec(line);
+      if (pattern !== null && (brace === -1 || pattern.index < brace)) return true;
+    }
+    for (let index = 0; index < line.length; index += 1) {
+      const character = line[index];
+      if (character === "{") depth += 1;
+      else if (character === "}") depth = Math.max(0, depth - 1);
+    }
+  }
+
+  // Known and bounded: a destructuring pattern split across lines (`const {\n  Buffer,\n} = ...`) is not detected, because its name
+  // sits on a line whose depth is already 1. The result is a loud SyntaxError naming the file, which is the direction this function
+  // has always preferred: a missing shim is attributable, a wrongly dropped one is not.
+  return false;
 }
 
 /** The clock and timer surface a run exposes to user code (ADR-0013 amendment 2). */
@@ -299,8 +364,13 @@ export class CommonJsLoader {
     const prepared = prepareSource(typeof source === "string" ? source : source.toString());
     // ES modules are reduced to the same factory shape rather than dispatched differently, so both formats resolve
     // every specifier through this one loader (ADR-0012). The compile step below does not care which it got.
-    const code =
-      this.#moduleFormat(path) === "esm" ? transformEsm(prepared, { url: `file://${path}` }).code : prepared;
+    const transformed =
+      this.#moduleFormat(path) === "esm" ? transformEsm(prepared, { url: `file://${path}` }) : undefined;
+    const code = transformed === undefined ? prepared : transformed.code;
+    // Top-level await is the one property of a module that changes HOW it is compiled rather than what it compiles to: `await`
+    // in the factory body is a SyntaxError, so a module that needs it is wrapped in an async arrow and the loader holds the
+    // promise. Every other module keeps the synchronous path, including the stack-trace shape that path produces.
+    const asyncModule = transformed?.hasTopLevelAwait === true;
     const moduleDir = nodePath.dirname(path);
 
     // `new Function`'s parameter list IS the shim surface: user code sees exactly these names as free variables, and nothing else
@@ -325,6 +395,9 @@ export class CommonJsLoader {
     const bindings: ReadonlyArray<readonly [string, unknown]> = [
       ["exports", record.exports],
       ["require", requireFromHere],
+      // The transform's own specifier resolution. A module may declare its own `const require` (the createRequire pattern), which is
+      // in its temporal dead zone while the generated import prologue runs, so the prologue cannot use that name.
+      ["__require", requireFromHere],
       ["module", record],
       ["__filename", path],
       ["__dirname", moduleDir],
@@ -339,11 +412,38 @@ export class CommonJsLoader {
       ["clearInterval", runtimeGlobals.clearInterval],
       ["setImmediate", runtimeGlobals.setImmediate],
     ];
-    const injected = bindings.filter(([name]) => !declaresOwnBinding(code, name));
+    // For an ES module the transform reports its own lexical bindings, so the answer is a fact rather than an inference from
+    // generated text. CommonJS keeps the textual scan, because there is no parse to ask.
+    const declared = transformed === undefined ? null : new Set(transformed.topLevelBindings);
+    const base = bindings.filter(([name]) => {
+      if (declared !== null) return !declared.has(name);
+      return !declaresOwnBinding(code, name);
+    });
+    // The transformed prologue's own names are computed against this module's source (see EsmTransformResult.injected), so they cannot
+    // collide with it: they are bound unconditionally instead of being filtered. All three point at the same objects the base list
+    // exposes, so `record.exports` and the prologue's target cannot drift apart.
+    const generated: ReadonlyArray<readonly [string, unknown]> =
+      transformed === undefined
+        ? []
+        : [
+            [transformed.injected.exports, record.exports],
+            [transformed.injected.require, requireFromHere],
+            // Dynamic import's async half: only an async path can wait for a target whose own evaluation is asynchronous.
+            [
+              transformed.injected.loadModuleAsync,
+              (specifier: string): Promise<unknown> => this.importModule(specifier, moduleDir),
+            ],
+          ];
+    const injected: ReadonlyArray<readonly [string, unknown]> = [...base, ...generated];
+
+    // An async module's body is wrapped rather than rewritten: the transformed code is unchanged, only its execution context
+    // becomes awaitable. The wrapper returns the promise, so `factory` still has one call signature and the loader reads the
+    // difference from the returned value rather than from a second factory type.
+    const body = asyncModule ? `return (async () => {\n${code}\n})();` : code;
 
     let factory: (...args: unknown[]) => unknown;
     try {
-      factory = new Function(...injected.map(([name]) => name), code + "\n//# sourceURL=" + path) as (...args: unknown[]) => unknown;
+      factory = new Function(...injected.map(([name]) => name), body + "\n//# sourceURL=" + path) as (...args: unknown[]) => unknown;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // A SyntaxError while compiling a dependency is unattributable without its path: the bare message says which identifier
@@ -353,10 +453,56 @@ export class CommonJsLoader {
 
     // The entry module becomes `require.main` the first time anything is evaluated, which is the entry itself.
     if (this.#main === null) this.#main = record;
+
+    if (asyncModule) {
+      record.asyncModule = true;
+      const evaluation = factory.call(record.exports, ...injected.map(([, value]) => value)) as Promise<void>;
+      if (!(evaluation instanceof Promise)) {
+        // The wrapper above guarantees this. If it ever stops being true the module would look async and settle never, which is
+        // the kind of silence this project records instead of tolerating.
+        throw new TypeError(`${path}: an async module's factory must return its evaluation promise`);
+      }
+      record.evaluation = evaluation;
+      // `loaded` is bookkeeping for callers that inspect the cache; the promise is what settles. Both handlers are handled
+      // here so a rejection is not also reported as unhandled on this derived promise: the original still rejects, and the
+      // caller that awaits it sees the error.
+      void evaluation.then(
+        () => {
+          record.loaded = true;
+        },
+        () => undefined,
+      );
+      return record;
+    }
+
     factory.call(record.exports, ...injected.map(([, value]) => value));
 
     record.loaded = true;
     return record;
+  }
+
+  /**
+   * Load a module and wait for it if its evaluation is asynchronous.
+   *
+   * The only caller that needs this is dynamic import. Everything else either is synchronous by nature (`require`) or is the
+   * program entry, which the runtime awaits explicitly.
+   */
+  async loadFileAsync(path: string): Promise<ModuleRecord> {
+    const record = this.loadFile(path);
+    if (record.evaluation !== undefined) await record.evaluation;
+    return record;
+  }
+
+  /**
+   * `import(specifier)` from a module in `fromDir`.
+   *
+   * The namespace shape here is deliberately the loader's module object rather than a constructed ESM namespace: that is what
+   * this runtime already returned for dynamic import, and changing the shape is a separate decision with its own evidence.
+   */
+  async importModule(specifier: string, fromDir: string): Promise<unknown> {
+    const resolution = this.resolve(specifier, fromDir);
+    if (resolution.kind === "builtin") return this.#deps.builtins[resolution.name];
+    return (await this.loadFileAsync(resolution.path)).exports;
   }
 
   /** Runtime-provided globals; set by the Runtime before any load. */
@@ -366,11 +512,44 @@ export class CommonJsLoader {
     this.#runtimeContext = context;
   }
 
+  /** The builtin names this loader serves, which is what `module.builtinModules` and `isBuiltin` must answer from. */
+  builtinNames(): readonly string[] {
+    return Object.keys(this.#deps.builtins);
+  }
+
+  /**
+   * A `require` bound to the directory of one file, which is what `createRequire` produces.
+   *
+   * Node accepts a filename or a file URL and resolves relative specifiers against that file's directory. That is the whole contract,
+   * and it is the one an ES module depends on when it writes `const require = createRequire(import.meta.url)`.
+   */
+  createRequire(fromPath: string): RequireFunction {
+    const fromDir = nodePath.dirname(fromPath);
+    const bound = ((specifier: string): unknown => this.require(specifier, fromDir)) as RequireFunction;
+    Object.defineProperty(bound, "main", { get: () => this.#main, enumerable: false, configurable: false });
+    Object.defineProperty(bound, "cache", { get: () => this.#cache, enumerable: false, configurable: false });
+    Object.defineProperty(bound, "resolve", {
+      // Node answers with the builtin's own name for a builtin, and a path otherwise.
+      value: (specifier: string): string => {
+        const resolution = this.resolve(specifier, fromDir);
+        return resolution.kind === "builtin" ? resolution.name : resolution.path;
+      },
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
+    return bound;
+  }
+
   /** `require` from a given directory, mirroring Node's signature. */
   require(specifier: string, fromDir: string): unknown {
     const resolution = this.resolve(specifier, fromDir);
     if (resolution.kind === "builtin") return this.#deps.builtins[resolution.name];
-    return this.loadFile(resolution.path).exports;
+    const record = this.loadFile(resolution.path);
+    // Node refuses this even when the module has already settled, because the *graph* needs async evaluation. Measured against
+    // node v20.20.2: error.name === "Error", error.code === "ERR_REQUIRE_ASYNC_MODULE".
+    if (record.asyncModule === true) throw new AsyncModuleRequireError(record.id);
+    return record.exports;
   }
 
   getCache(): ReadonlyMap<string, ModuleRecord> {

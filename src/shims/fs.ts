@@ -119,6 +119,14 @@ export interface FsShim {
     mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
     readdir(path: string): Promise<string[]>;
     unlink(path: string): Promise<void>;
+    stat(path: string): Promise<StatsShim>;
+    /** No symlinks exist in this VFS, so `lstat` is `stat`. Documented rather than silently aliased. */
+    lstat(path: string): Promise<StatsShim>;
+    /** Normalises and confirms existence. There is nothing to resolve, because no path is a link. */
+    realpath(path: string): Promise<string>;
+    /** Existence only: Node's mode argument is accepted and ignored, because there are no permission bits here. */
+    access(path: string): Promise<void>;
+    rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
     watch(path: string, options?: WatchOptions): WatchAsyncIterator;
   };
 }
@@ -294,6 +302,48 @@ const createAbsoluteFsShim = (vfs: FileSystemPort, watches?: WatchSourcePort): F
         throw toNodeError(error, "unlink", path);
       }
     },
+    async stat(path) {
+      // The port's promise forms resolve from the sync call, and its doc says so: in a Worker the sync call already blocks, so
+      // there is nothing to gain from a second implementation that could drift from this one.
+      try {
+        return asStats(vfs.statSync(path));
+      } catch (error) {
+        throw toNodeError(error, "stat", path);
+      }
+    },
+    async lstat(path) {
+      return this.stat(path);
+    },
+    async realpath(path) {
+      // Existence and a normalised path are all this VFS can honestly offer: nothing here is a symbolic link, so there is no chain to
+      // follow. A missing path still fails the way Node fails, because callers branch on that.
+      await this.stat(path);
+      return path;
+    },
+    async access(path) {
+      await this.stat(path);
+    },
+    async rm(path, rmOptions) {
+      const recursive = rmOptions?.recursive === true;
+      const force = rmOptions?.force === true;
+      try {
+        // `kind` is the port's word for it; `isDirectory()` is Node's, and it exists only on the shim's Stats.
+        const stats = vfs.statSync(path);
+        if (stats.kind === "dir") {
+          if (!recursive) throw toNodeError(new Error("EISDIR"), "rm", path);
+          for (const entry of vfs.readdirSync(path)) {
+            await this.rm(`${path === "/" ? "" : path}/${entry}`, { recursive: true, force: true });
+          }
+          vfs.rmdirSync(path);
+          return;
+        }
+        vfs.unlinkSync(path);
+      } catch (error) {
+        // `force: true` is Node's "missing is fine", and vite passes it for cache directories that may never have existed.
+        if (force && (error as { code?: string }).code === "ENOENT") return;
+        throw error;
+      }
+    },
   },
 });
 
@@ -333,6 +383,11 @@ export const createFsShim = (
       mkdir: (path, mkdirOptions) => inner.promises.mkdir(at(path), mkdirOptions),
       readdir: (path) => inner.promises.readdir(at(path)),
       unlink: (path) => inner.promises.unlink(at(path)),
+      stat: (path) => inner.promises.stat(at(path)),
+      lstat: (path) => inner.promises.lstat(at(path)),
+      realpath: (path) => inner.promises.realpath(at(path)),
+      access: (path) => inner.promises.access(at(path)),
+      rm: (path, rmOptions) => inner.promises.rm(at(path), rmOptions),
     },
   };
 };
