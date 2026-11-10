@@ -171,3 +171,32 @@ global object, and the event loop all holding at once. Differential suite 16/16 
 
 Next, per the agreed sequence: the dependency optimizer, where Vite passes esbuild plugins and the service model differs most (native esbuild runs a
 process, the WASM build runs in-thread). `fixture-01` is still untouched and still red.
+
+## The plugin round trip
+
+The dependency optimizer passes esbuild **plugins**, and a plugin is a round trip from the compiler back into JavaScript mid-build. Native
+esbuild makes that trip through a service process; the WASM build makes it inside the caller. That is the one place where the substitution itself,
+rather than the runtime, could change behaviour, so it was measured on both sides before anything touches Vite.
+
+| where | call | time |
+|---|---|---|
+| plain Node, `browser` entry, `worker:false` | `build()` with `onResolve` + `onLoad` | 215 ms |
+| this runtime, same program | same | 181 ms |
+
+Both produce the same bundle, including the virtual namespace comment:
+
+```
+// virt:virtual:dep
+var virtual_dep_default = "from-plugin";
+
+// app/entry.js
+console.log(virtual_dep_default);
+```
+
+`npx tsx tools/measure-esbuild-wasm.ts --plugin` is that measurement. Two callbacks, both returning values through the in-thread service, on our
+scheduler: the plugin model survives the substitution.
+
+**What this does not prove**, and the next thing to measure: this build's plugin returns contents from memory and touches no files. Vite's
+dependency optimizer plugins **read package files**, which is exactly the `fs` bridge the Go host does not have yet (`syscall.Write` on fd 1 was
+the first symptom). So the order is: the `fs`/fd bridge into the wasm host first, then `optimizeDeps`, then the dev server. Building `optimizeDeps`
+before the bridge would measure a boundary we already know about rather than the dep optimizer.
