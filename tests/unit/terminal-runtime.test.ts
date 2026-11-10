@@ -73,11 +73,17 @@ describe("a program's view of the terminal", () => {
       });
     `);
 
-    const result = await runtime.run("/app/main.js", { terminal });
+    const running = runtime.run("/app/main.js", { terminal });
+    // End of input once the program has had time to attach its reader. The run no longer ends by itself here: a waiting reader is
+    // a live handle, which is the whole point of the case above.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    terminal.end();
+    const result = await running;
 
     expect(result.stdout).toContain("got:hello from the keyboard");
     expect(result.stdout).toContain("raw:false");
     expect(result.stdout).toContain("rawAfter:true");
+    expect(result.exitCode).toBe(0);
   });
 
   it("stops delivering a finished program's signals once the run is over", async () => {
@@ -108,5 +114,138 @@ describe("a program's view of the terminal", () => {
     terminal.resize(140, 50);
     const second = await runtime.run("/app/main.js", { terminal });
     expect(second.stdout).toContain("cols:140");
+  });
+});
+
+/**
+ * Interactive programs: a program that waits, a user who answers, and an exit that means what it says.
+ *
+ * These three properties are one story, and each was broken in a way that only showed up together. Stdin was not a live handle,
+ * so a program whose only job was to answer a question exited before it could be asked. Waiting for input was counted against
+ * the runaway guard, so a genuinely interactive program would have been killed five seconds in. And `process.exit` called from
+ * a callback or an input handler escaped as an uncaught exception with the wrong exit code, because only the top-level body
+ * was guarded.
+ */
+describe("a program that waits for input", () => {
+  it("stays alive while it waits, and exits when input ends", async () => {
+    const { runtime } = stage(`
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", (chunk) => {
+        console.log("heard:" + String(chunk).trim());
+      });
+      process.stdin.on("end", () => {
+        console.log("ended");
+      });
+    `);
+    const terminal = createTerminal();
+
+    const running = runtime.run("/app/main.js", { terminal });
+    // The program has no timers and no pending work: only the reader keeps it alive. Give the drain a turn to notice that,
+    // then answer. If stdin were not a live handle the run would already have finished with empty output.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    terminal.write("hello\n");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    terminal.end();
+
+    const result = await running;
+
+    expect(result.stdout).toContain("heard:hello");
+    expect(result.stdout).toContain("ended");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("does not run out the runaway guard while it waits", async () => {
+    const { runtime } = stage(`
+      process.stdin.on("data", (chunk) => {
+        console.log("late:" + String(chunk).trim());
+        process.exit(0);
+      });
+    `);
+    // A 5 ms ceiling on WORKING time: without idle exclusion the program is stopped long before the answer arrives 120 ms from
+    // now. That is the bug a user on a slower machine would have met instead of a test.
+    const terminal = createTerminal();
+    const running = runtime.run("/app/main.js", { terminal, workCeilingMs: 5 });
+
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    terminal.write("answer\n");
+
+    const result = await running;
+
+    expect(result.stdout).toContain("late:answer");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("reports the code when a program exits from a stdin handler", async () => {
+    const { runtime } = stage(`
+      process.stdin.on("data", () => {
+        process.exit(7);
+      });
+    `);
+    const terminal = createTerminal();
+    const running = runtime.run("/app/main.js", { terminal });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    terminal.write("quit\n");
+
+    const result = await running;
+
+    // Not 1, and not an "Uncaught ProcessExit": the program chose 7, and the run has to agree.
+    expect(result.exitCode).toBe(7);
+    expect(result.stderr).not.toContain("Uncaught");
+  });
+
+  it("reports the code when a program exits from a timer callback", async () => {
+    const { runtime } = stage(`
+      setTimeout(() => {
+        process.exit(3);
+      }, 5);
+      setTimeout(() => {
+        console.log("must-not-run");
+      }, 20);
+    `);
+
+    const result = await runtime.run("/app/main.js");
+
+    expect(result.exitCode).toBe(3);
+    // Immediate means immediate: a timer queued before the exit does not get to run afterwards.
+    expect(result.stdout).not.toContain("must-not-run");
+    expect(result.stderr).not.toContain("Uncaught");
+  });
+
+  it("reports the code when a program exits from a signal handler", async () => {
+    const { runtime } = stage(`
+      process.stdin.on("data", () => {});
+      process.on("SIGWINCH", () => {
+        console.log("resized");
+        process.exit(4);
+      });
+    `);
+    const terminal = createTerminal();
+    const running = runtime.run("/app/main.js", { terminal });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    terminal.resize(120, 40);
+
+    const result = await running;
+
+    // The signal listener is invoked by the terminal, outside the scheduler: before the guard existed this escaped as an
+    // uncaught exception that killed the page's handler instead of ending the program with its own code.
+    expect(result.stdout).toContain("resized");
+    expect(result.exitCode).toBe(4);
+    expect(result.stderr).not.toContain("Uncaught");
+  });
+
+  it("lets the program exit after it pauses stdin", async () => {
+    const { runtime } = stage(`
+      const onData = () => { console.log("never"); };
+      process.stdin.on("data", onData);
+      process.stdin.off("data", onData);
+      console.log("unsubscribed");
+    `);
+    const terminal = createTerminal();
+
+    // Nothing is waiting any more, so the run settles instead of hanging on a reader that cannot receive anything.
+    const result = await runtime.run("/app/main.js", { terminal });
+
+    expect(result.stdout).toContain("unsubscribed");
+    expect(result.exitCode).toBe(0);
   });
 });

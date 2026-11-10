@@ -68,6 +68,7 @@ export class Container {
   /** Partial lines per `sessionId:stream`, so a chunk boundary never invents a newline. */
   readonly #pending = new Map<string, string>();
   readonly #listeners = new Set<() => void>();
+  readonly #chunks = new Set<(event: { sessionId: string; stream: "stdout" | "stderr"; text: string }) => void>();
   #nextPid = 1;
   #nextSession = 1;
   #queue: Promise<void> = Promise.resolve();
@@ -95,6 +96,18 @@ export class Container {
   onChange(listener: () => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
+  }
+
+  /**
+   * Every chunk a program writes, exactly as it wrote it, before it is split into scrollback lines.
+   *
+   * Separate from `onChange` because the terminal pane needs the raw stream: scrollback deliberately holds whole lines, so a
+   * program that prints a prompt and waits leaves its prompt in a pending buffer and the pane would show nothing until the user
+   * pressed Enter. This is the tap that makes an interactive program visible while it is waiting.
+   */
+  onChunk(listener: (event: { sessionId: string; stream: "stdout" | "stderr"; text: string }) => void): () => void {
+    this.#chunks.add(listener);
+    return () => this.#chunks.delete(listener);
   }
 
   createSession(name?: string): Session {
@@ -385,6 +398,8 @@ export class Container {
         // The program gets a terminal sized like the session, so `process.stdout.columns` matches the window the user sees.
         terminal: { columns: session.columns, rows: session.rows },
         onOutput: (stream, text) => {
+          // The raw tap first, so an interactive pane sees the text before the line splitter holds back a partial line.
+          for (const listener of this.#chunks) listener({ sessionId: session.id, stream, text });
           // Live output: the terminal sees it while the process runs, and the record keeps the same text.
           this.#append(session, stream, text);
           if (stream === "stdout") process.stdout += text;

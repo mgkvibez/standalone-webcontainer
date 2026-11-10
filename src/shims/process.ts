@@ -105,6 +105,19 @@ export interface ProcessOptions {
   readonly ticks?: TickQueue;
   /** The attached terminal, if any. Without one every tty question answers "no" rather than pretending. */
   readonly terminal?: Terminal | null;
+  /**
+   * The input a program sees, when it has to differ from the terminal's own.
+   *
+   * The runtime passes a guarded wrapper so that `process.exit` called from a `data` handler ends the run, instead of throwing
+   * out of whoever delivered the keystroke. It is an option rather than something the shim builds because the shim has no
+   * scheduler to stop: only the run knows how to end itself.
+   */
+  readonly stdin?: TerminalInput | null;
+  /**
+   * Called when a listener the runtime invokes throws `process.exit`, so the run can end with that code instead of the throw
+   * escaping into whoever happened to call the listener (a resize, a keystroke, a worker message).
+   */
+  readonly onExit?: (code: number) => void;
 }
 
 /**
@@ -164,7 +177,7 @@ export const createProcessShim = (options: ProcessOptions = {}): ProcessShim => 
     },
     stdout,
     stderr,
-    stdin: terminal === null ? null : terminal.stdin,
+    stdin: options.stdin ?? (terminal === null ? null : terminal.stdin),
     on: (event, listener) => {
       // Only signals the terminal can actually deliver are wired. Anything else is accepted to keep chaining code working, but
       // it is never fired and never claimed: a listener that never runs is better than a listener that runs at the wrong time,
@@ -172,7 +185,20 @@ export const createProcessShim = (options: ProcessOptions = {}): ProcessShim => 
       if (terminal !== null && (event === "SIGWINCH" || event === "SIGINT")) {
         const existing = signalRegistrations.get(event) ?? new Map<() => void, () => void>();
         if (!existing.has(listener)) {
-          const unsubscribe = terminal.on(event, listener);
+          // The listener is invoked by the terminal, which knows nothing about exits. Catching here is what keeps
+          // `process.exit` inside a SIGWINCH handler from surfacing as an uncaught exception in the page.
+          const guard = (): void => {
+            try {
+              listener();
+            } catch (error) {
+              if (error instanceof ProcessExit && options.onExit !== undefined) {
+                options.onExit(error.code);
+                return;
+              }
+              throw error;
+            }
+          };
+          const unsubscribe = terminal.on(event, guard);
           existing.set(listener, unsubscribe);
           signalRegistrations.set(event, existing);
         }

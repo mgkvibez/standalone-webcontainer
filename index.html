@@ -48,6 +48,12 @@
         </div>
         <div id="terminal-body">
           <div id="scrollback" aria-live="polite"></div>
+          <!-- Raw mode: shown only while a program with a terminal is running. The line prompt is hidden then, because the
+               program owns the keyboard; there is no line discipline in front of it to edit what you type. -->
+          <div id="raw-pane" hidden>
+            <div id="raw-screen"></div>
+            <div id="raw-hint" class="muted">typing into the program · <button id="raw-close" type="button">stop</button></div>
+          </div>
           <form id="prompt">
             <span id="prompt-label">/ $</span>
             <input id="command" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Command" />
