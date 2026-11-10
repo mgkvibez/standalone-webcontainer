@@ -14,6 +14,24 @@
  *   differs, and quietly ignoring a flag is how a fixture stops testing what it says it tests.
  */
 
+/**
+ * Which manager's vocabulary produced a plan.
+ *
+ * The installer is the same either way: the pnpm profile declares npm-style hoisted `node_modules` and no pnpm lockfile, so a
+ * pnpm install is the npm install with a deviation record attached. Naming the manager on the plan is what lets the detail carry
+ * that record without the executor re-parsing the command.
+ */
+export type PackageManager = "npm" | "pnpm";
+
+/**
+ * The mandatory disclosure for the pnpm profile (Phase 6 R2, section 2.3).
+ *
+ * Part of the contract, not a log line: it is the difference between "passed under a declared profile" and "passed while
+ * pretending". A supported pnpm command must never read as if pnpm's storage engine ran.
+ */
+export const PNPM_RESOLUTION_DEVIATION =
+  "pnpm-resolution profile: package.json install, npm-style hoisted node_modules, no pnpm-lock.yaml read or written";
+
 /** A dependency spec passed straight to `npm install`, which we do not support adding ad hoc. */
 export interface InstallPlan {
   readonly kind: "install";
@@ -21,6 +39,18 @@ export interface InstallPlan {
   readonly ci: boolean;
   /** `--production` / `--omit=dev`. */
   readonly omitDev: boolean;
+  /** Which manager asked. `npm` unless the command was pnpm. */
+  readonly manager: PackageManager;
+}
+
+/**
+ * `pnpm run` with no script name, which pnpm answers by listing the scripts and exiting 0.
+ *
+ * A plan of its own rather than an empty script name: "list what there is" and "run nothing" are different requests, and the
+ * executor would have to guess which one a blank name meant.
+ */
+export interface ListScriptsPlan {
+  readonly kind: "list-scripts";
 }
 
 export interface RunScriptPlan {
@@ -61,7 +91,7 @@ export interface InvalidPlan {
   readonly restriction?: Restriction;
 }
 
-export type CommandPlan = InstallPlan | RunScriptPlan | NodePlan | ExecPlan | InvalidPlan;
+export type CommandPlan = InstallPlan | RunScriptPlan | NodePlan | ExecPlan | ListScriptsPlan | InvalidPlan;
 
 /** Install flags whose effect on the tree we understand. Anything else must be named in the plan. */
 const KNOWN_INSTALL_FLAGS: readonly string[] = [
@@ -89,6 +119,7 @@ export function parseStepCommand(command: string): CommandPlan {
   const rest = tokens.slice(1);
 
   if (program === "npm") return parseNpm(rest);
+  if (program === "pnpm") return parsePnpm(rest);
   if (program === "npx") return parseNpx(rest);
   if (program === "node") {
     const entry = rest[0];
@@ -156,6 +187,140 @@ function isVersionedSpec(spec: string): boolean {
   return body.includes("@");
 }
 
+/**
+ * The pnpm profile's policy id. Stable, because a fixture author reads it in the refusal.
+ */
+const PNPM_POLICY = "pnpm-resolution";
+
+/**
+ * Builds a refused pnpm command carrying the approved wording from the contract's D-4 table.
+ *
+ * The message is verbatim rather than assembled: the contract fixes the sentence fixtures and humans see, and a paraphrase here
+ * would drift from what the fixtures were told to expect. The structured fields still describe the same thing, so an evidence
+ * bundle can group refusals without parsing English.
+ */
+function pnpmRefusal(operation: string, reason: string, alternative: string): CommandPlan {
+  const message = `pnpm ${operation}: intentionally not supported: ${reason} (instead: ${alternative})`;
+  const restriction = createRestriction({
+    policy: PNPM_POLICY,
+    operation: `pnpm ${operation}`,
+    reason,
+    alternative,
+    message,
+  });
+  return { kind: "invalid", reason: message, restriction };
+}
+
+/** The supported alternative, stated once because every refusal repeats it. */
+const PNPM_SUPPORTED_FORMS = "the four supported forms are install, i, run, and an installed binary";
+
+/**
+ * `pnpm`, as a command vocabulary only (Phase 6 R2, D-1 to D-4).
+ *
+ * Supported: `pnpm install` / `pnpm i` (with `--prod` or `--production`), `pnpm run <script> [-- args]`, `pnpm run` with no name
+ * (list and exit 0), `pnpm test`, and `pnpm <bin>` for an installed binary. Everything else is refused by name with the approved
+ * wording, and flagged as a restriction rather than a harness fault: this boundary is a decision, not a gap to file as a bug.
+ *
+ * What is deliberately NOT here: `pnpm-lock.yaml` is never read or written, and the tree is npm-style and hoisted. The deviation
+ * record on the install plan is how a run states that instead of implying otherwise (section 2.3, D-3).
+ */
+function parsePnpm(rest: readonly string[]): CommandPlan {
+  const subcommand = rest[0];
+  if (subcommand === undefined) return { kind: "invalid", reason: "pnpm: a subcommand is required" };
+  const args = rest.slice(1);
+
+  if (subcommand === "install" || subcommand === "i") return parsePnpmInstall(args);
+  if (subcommand === "run" || subcommand === "run-script") {
+    if (args.length === 0) return { kind: "list-scripts" };
+    return parseRunScript(args);
+  }
+  if (subcommand === "test") return { kind: "run-script", script: "test", args: splitForwarded(args) };
+
+  if (subcommand === "add") {
+    return pnpmRefusal(
+      "add <pkg>",
+      "dependency installation is limited to package.json, so a new package cannot be added at run time",
+      "declare it in package.json",
+    );
+  }
+  if (subcommand === "remove" || subcommand === "uninstall" || subcommand === "rm") {
+    return pnpmRefusal(
+      "remove",
+      "the installer only materialises package.json",
+      "remove the entry and reinstall",
+    );
+  }
+  if (subcommand === "update" || subcommand === "up" || subcommand === "upgrade") {
+    return pnpmRefusal("update", "installs are exact, so there is no range to advance", "change the version in package.json");
+  }
+  if (subcommand === "dlx") {
+    return pnpmRefusal("dlx", "registry fetches are disabled by policy", "declare the package and install it");
+  }
+
+  // Subcommands whose meaning depends on pnpm's own storage engine or workspace model. Refused as a group because the reason is
+  // the same for all of them: this profile is a command vocabulary, not an engine.
+  const outsideProfile = [
+    "store",
+    "link",
+    "publish",
+    "patch",
+    "patch-commit",
+    "workspace",
+    "workspaces",
+    "recursive",
+    "filter",
+    "deploy",
+    "prune",
+    "import",
+    "rebuild",
+    "setup",
+    "env",
+  ];
+  const withoutFlags = args.filter((token) => !token.startsWith("-"));
+  if (outsideProfile.includes(subcommand) || outsideProfile.some((name) => withoutFlags.includes(name))) {
+    return pnpmRefusal(subcommand, "outside this profile", PNPM_SUPPORTED_FORMS);
+  }
+
+  // Anything else is a binary name: pnpm also runs local bins, and resolution decides whether it exists. A missing binary is then
+  // the project's problem, exactly as a bare `vite` is, rather than a harness limitation.
+  return { kind: "exec", bin: subcommand, args };
+}
+
+/**
+ * `pnpm install`, which is the npm install under a declared profile.
+ *
+ * Flags are strict on purpose: the approved surface is `--prod`/`--production` and nothing else, so `--frozen-lockfile` is refused
+ * by name (we cannot verify a lockfile we do not parse) and an unrecognised flag is refused rather than ignored, because ignoring
+ * one would change the tree while the fixture still claimed to test it.
+ */
+function parsePnpmInstall(args: readonly string[]): CommandPlan {
+  let omitDev = false;
+  for (const token of args) {
+    if (token === "--prod" || token === "--production") {
+      omitDev = true;
+      continue;
+    }
+    if (token === "--frozen-lockfile" || token === "--lockfile-only") {
+      return pnpmRefusal(
+        "--frozen-lockfile",
+        "pnpm-lock.yaml is not parsed, so it cannot be verified",
+        "use package-lock.json, which is verified",
+      );
+    }
+    if (token.startsWith("-")) {
+      return pnpmRefusal(token, "outside this profile", PNPM_SUPPORTED_FORMS);
+    }
+    // A positional argument is a package name, which is `pnpm add` spelled differently, so it gets the same approved wording
+    // (the contract's D-4 table covers `pnpm install <pkg>` with the `add <pkg>` message, placeholder included).
+    return pnpmRefusal(
+      "add <pkg>",
+      "dependency installation is limited to package.json, so a new package cannot be added at run time",
+      "declare it in package.json",
+    );
+  }
+  return { kind: "install", ci: false, omitDev, manager: "pnpm" };
+}
+
 function parseNpm(rest: readonly string[]): CommandPlan {
   const subcommand = rest[0];
   if (subcommand === undefined) return { kind: "invalid", reason: "npm: a subcommand is required" };
@@ -196,7 +361,7 @@ function parseInstall(ci: boolean, args: readonly string[]): CommandPlan {
   if (omitDev && includeDev) {
     return { kind: "invalid", reason: "npm install: --production and --include=dev contradict each other" };
   }
-  return { kind: "install", ci, omitDev };
+  return { kind: "install", ci, omitDev, manager: "npm" };
 }
 
 function parseRunScript(args: readonly string[]): CommandPlan {

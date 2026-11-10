@@ -14,7 +14,7 @@
 
 import type { RegistryClient } from "../npm/install.js";
 import type { FixtureStep } from "./definition.js";
-import { parseStepCommand } from "./command.js";
+import { parseStepCommand, PNPM_RESOLUTION_DEVIATION } from "./command.js";
 import type { SchedulerEvidence } from "../runtime/scheduler.js";
 import { createRestriction, describeRestriction, type Restriction } from "./restriction.js";
 import { ProjectError, readPackageScripts, resolveBin } from "./scripts.js";
@@ -62,6 +62,9 @@ export function createStepExecutor(options: StepExecutorOptions): ExecuteStep {
     if (plan.kind === "install") {
       return runInstall(plan, index, root, options);
     }
+    if (plan.kind === "list-scripts") {
+      return runListScripts(index, root, options);
+    }
     if (plan.kind === "node") {
       return runNode(plan, index, root, options);
     }
@@ -79,6 +82,8 @@ interface InstallPlanLike {
   readonly kind: "install";
   readonly ci: boolean;
   readonly omitDev: boolean;
+  /** Absent means npm. Only pnpm attaches a deviation record. */
+  readonly manager?: "npm" | "pnpm";
 }
 
 async function runInstall(
@@ -121,6 +126,9 @@ async function runInstall(
 
   const summary = [`installed ${report.packages.length} package(s)`];
   for (const warning of report.warnings) summary.push(`warning: ${warning}`);
+  // The mandatory disclosure (Phase 6 R2, 2.3): a pnpm command must never read as if pnpm's storage engine ran. It goes in the
+  // detail because that is what evidence carries, and it is unconditional: not a warning, not a qualification on failure only.
+  if (plan.manager === "pnpm") summary.push(PNPM_RESOLUTION_DEVIATION);
   return {
     termination: "ok",
     detail: summary.join("\n"),
@@ -192,6 +200,33 @@ async function runNode(
  *
  * Arguments after `--` are appended, which is what npm does: `npm run dev -- --port 3000` runs `vite --port 3000`.
  */
+/**
+ * `pnpm run` with no script name: list the scripts and exit 0, which is what pnpm answers.
+ *
+ * The rendering is ours, not a copy of pnpm's: pnpm groups lifecycle scripts separately and its wording moves between versions.
+ * What the contract fixes is the behaviour (list, exit 0), so the format here states plainly what it is rather than imitating a
+ * layout we would then have to keep in step.
+ */
+function runListScripts(index: number, root: string, options: StepExecutorOptions): StepExecution {
+  let scripts: Readonly<Record<string, string>>;
+  try {
+    scripts = readPackageScripts(options.runtime, root);
+  } catch (error) {
+    if (error instanceof ProjectError) return projectFailure(index, `pnpm error ${error.message}`);
+    return harnessFault(index, message(error));
+  }
+
+  const names = Object.keys(scripts).sort();
+  // No scripts is not an error: pnpm lists nothing and exits 0, and a fixture asserting on that should see the same agreement.
+  const lines = names.length === 0 ? ["no scripts are defined in package.json"] : names.map((name) => `${name}: ${scripts[name]}`);
+  const detail = lines.join("\n");
+  return {
+    termination: "ok",
+    detail,
+    record: { index, exitCode: 0, stdout: `${detail}\n`, stderr: "" },
+  };
+}
+
 async function runScript(
   plan: { readonly kind: "run-script"; readonly script: string; readonly args: readonly string[] },
   index: number,
@@ -239,6 +274,9 @@ async function runScript(
         options,
         depth + 1,
       );
+    case "list-scripts":
+      // `pnpm run` with no name lists scripts instead of running one, so a script defined as that would recurse into a listing.
+      return harnessFault(index, `script "${plan.script}" is "pnpm run", which lists scripts rather than running one`);
     case "install":
       // A script that installs is a script whose install step belongs in the fixture, not hidden inside a run step:
       // the install budget and the run budget are different, and swallowing one inside the other would falsify both.

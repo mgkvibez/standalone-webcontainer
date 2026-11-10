@@ -2,8 +2,8 @@
 
 > **Naming.** "R2" here is milestone 2 of Phase 6, not the ruling `P0-2`. See `docs/decisions/NUMBERING.md`.
 
-Status: **contract approved with amendments** (owner decisions below). Implementation not started. No pnpm support is implemented, `fixture-10.json` is untouched, and nothing here changes a
-classification. Baseline `ec9b6ea`, 511 tests.
+Status: **implemented** (Nov 10 2026) against the approved contract and the four owner decisions. `fixture-10.json` is untouched and
+nothing here changes a classification, per D-1. Implementation notes are in section 6. Baseline `ec9b6ea`, 511 tests.
 
 ## 1. Why this cannot be an alias
 
@@ -148,3 +148,38 @@ Bounded to the command layer plus a deviation record, with no runtime change:
 
 Estimated blast radius: one source file, one detail string, one test file, one ADR amendment. The installer and runtime are
 untouched.
+
+## 6. Implementation notes (Nov 10 2026)
+
+What landed, and the two places where this document left a choice open.
+
+**Where it lives.** `parsePnpm` and `parsePnpmInstall` in `src/harness/command.ts`; `PNPM_RESOLUTION_DEVIATION` exported from the
+same file so the string has one home; `runListScripts` and the deviation append in `src/harness/execute.ts`. No change to the
+installer or the runtime, as section 5 predicted.
+
+**The plan carries the manager.** `InstallPlan` gained `manager: "npm" | "pnpm"`, so the executor attaches the deviation without
+re-parsing the command. Two existing exact-shape assertions were updated to include it; that is the only churn outside the new code.
+
+**`pnpm run` with no name** needed a plan kind of its own (`list-scripts`), because "list what there is" and "run nothing" are
+different requests and a blank script name would force the executor to guess. It lists sorted `name: command` lines and exits 0.
+
+**Choice 1: unknown flags refuse with the four-part shape, not section 2.2's one-liner.** Section 2.2 lists
+`pnpm <flag>: not interpreted by this harness` while D-4 requires every refusal to name the operation, the reason, the
+intentionality and the alternative. Those disagree. D-4 is later and explicitly revises 2.2, so an unlisted flag now refuses as
+`pnpm <flag>: intentionally not supported: outside this profile (instead: the four supported forms are install, i, run, and an
+installed binary)`. Section 2.2's wording is therefore superseded. If the one-liner was the intent, this is a one-line change per
+flag.
+
+**Choice 2: an approved message needed a way through the renderer.** `describeRestriction` prefixes the policy name
+(`<policy> policy blocked <operation>: <reason>`), which cannot produce D-4's sentence. Rather than churn every existing refusal's
+wording, `Restriction` gained an optional `message` used verbatim when present, with the structured fields still required and still
+validated. The pnpm refusals set it; nothing else does, so every existing message is unchanged.
+
+**The listing format is ours.** pnpm groups lifecycle scripts separately and its layout moves between versions. The contract fixes
+the behaviour (list, exit 0), not the rendering, so the listing says what it is instead of imitating a format we would then have to
+keep in step.
+
+**Tests.** One per supported form (install, both production spellings, script with `--` forwarding, `test`, no-name listing, an
+installed binary), one per refused operation with the approved wording asserted verbatim, the lockfile refusal, an unlisted flag,
+and two executor cases that fail if the deviation record ever appears for npm or disappears for pnpm (mutation-checked both ways).
+`fixture-10` remains unscored, per D-1.
