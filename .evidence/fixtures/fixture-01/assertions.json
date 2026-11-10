@@ -5,7 +5,7 @@
     "state": "failed",
     "passed": false,
     "stepAvailable": true,
-    "detail": "expected status 200 from http://localhost:3000/, observed 404"
+    "detail": "expected status 200 from http://localhost:3000/, observed 503"
   },
   {
     "index": 1,
@@ -13,6 +13,6 @@
     "state": "failed",
     "passed": false,
     "stepAvailable": true,
-    "detail": "body of http://localhost:3000/ did not contain \"<div id=\\\"root\\\">\"; observed \"No preview server is listening on port 3000. Start one with server.listen(3000).\""
+    "detail": "body of http://localhost:3000/ did not contain \"<div id=\\\"root\\\">\"; observed \"No project runtime is loaded.\""
   }
 ]

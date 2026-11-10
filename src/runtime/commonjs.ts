@@ -50,6 +50,35 @@ export class AsyncModuleRequireError extends Error {
   }
 }
 
+/**
+ * A static `import` reaching a module whose own evaluation is asynchronous (top-level await).
+ *
+ * Node supports this: a module with top-level await is legal, and importing it waits for it, through async module records. This runtime does not
+ * implement async module records, so it refuses, and because that is a scope limit rather than a language rule it gets its own code instead of
+ * borrowing `ERR_REQUIRE_ASYNC_MODULE` from the `require()` path, which real Node throws for the same program and this one must keep throwing.
+ *
+ * Both ends are named: the module is the one that has to change, and the importer is the only place the reader can act.
+ */
+export class TopLevelAwaitInNonEntryError extends Error {
+  readonly code = "TLA_IN_NON_ENTRY";
+
+  constructor(moduleId: string, importer: string) {
+    // The code leads the message, unlike Node's `Error [CODE]:` stack form, because this refusal is printed as a stack by the runner and a reader
+    // scanning stderr needs the identity in the text. Node's own code keeps Node's shape; this one is ours.
+    super(
+      `TLA_IN_NON_ENTRY: ${moduleId} has a top-level await, and ${importer} imports it statically. Top-level await is supported in the entry ` +
+        "module only; move the await inside a function, or reach that module with import() from an async context.",
+    );
+    this.name = "Error";
+  }
+}
+
+/** How a load differ when the caller cannot wait: a static `import` edge refuses an async module instead of starting it. */
+export interface LoadFileOptions {
+  /** Set to the importing file's id when the caller is a static `import` edge, so an async module is refused with both ends named. */
+  readonly refuseAsync?: string;
+}
+
 export interface LoaderDeps {
   readonly fs: FsShim;
   /** Builtin module table: name -> the object user code receives. */
@@ -422,9 +451,13 @@ export class CommonJsLoader {
   }
 
   /** Load a module by absolute path, evaluating it once and caching the record. */
-  loadFile(path: string): ModuleRecord {
+  loadFile(path: string, options: LoadFileOptions = {}): ModuleRecord {
     const cached = this.#cache.get(path);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      // A cached async module is refused before it is handed back, so a second import edge reports the same thing the first one did.
+      if (cached.asyncModule === true && options.refuseAsync !== undefined) throw new TopLevelAwaitInNonEntryError(cached.id, options.refuseAsync);
+      return cached;
+    }
 
     // Refuse a native addon as a refusal, not as a parse error. Before this, `require("./x.node")` read the binary as
     // JavaScript and failed with "binary is not defined", which reads as a bug in this loader rather than a capability
@@ -466,6 +499,7 @@ export class CommonJsLoader {
     // in the factory body is a SyntaxError, so a module that needs it is wrapped in an async arrow and the loader holds the
     // promise. Every other module keeps the synchronous path, including the stack-trace shape that path produces.
     const asyncModule = transformed?.hasTopLevelAwait === true;
+    if (asyncModule && options.refuseAsync !== undefined) throw new TopLevelAwaitInNonEntryError(path, options.refuseAsync);
     const moduleDir = nodePath.dirname(path);
 
     // `new Function`'s parameter list IS the shim surface: user code sees exactly these names as free variables, and nothing else
@@ -538,6 +572,12 @@ export class CommonJsLoader {
             [
               transformed.injected.loadModuleAsync,
               (specifier: string): Promise<unknown> => this.importModule(specifier, moduleDir),
+            ],
+            // Static import edges get their own resolver so a module with top-level await is refused by name, with the importer named too, rather
+            // than reported as a `require()` failure that the file it came from never actually used.
+            [
+              transformed.injected.importSync,
+              (specifier: string): unknown => this.importSync(specifier, moduleDir, path),
             ],
           ];
     const injected: ReadonlyArray<readonly [string, unknown]> = [...base, ...generated];
@@ -651,6 +691,20 @@ export class CommonJsLoader {
   }
 
   /** `require` from a given directory, mirroring Node's signature. */
+  /**
+   * A STATIC `import` edge: resolve and evaluate, but refuse a module that awaits at its top level.
+   *
+   * Separate from `require` because the two are different rules. `require()` of an async module is Node's `ERR_REQUIRE_ASYNC_MODULE`, thrown by
+   * real Node for the same program; a static `import` of one is legal in Node and refused here only because async module records are not
+   * implemented. The importer is passed through unmodified so the message can name both files.
+   */
+  importSync(specifier: string, fromDir: string, importer: string): unknown {
+    const resolution = this.resolve(specifier, fromDir);
+    if (resolution.kind === "builtin") return this.#deps.builtins[resolution.name];
+    // Refused during the load, before the body runs, so a module that awaits at its top level never executes on a path that cannot wait for it.
+    return this.loadFile(resolution.path, { refuseAsync: importer }).exports;
+  }
+
   require(specifier: string, fromDir: string): unknown {
     const resolution = this.resolve(specifier, fromDir);
     if (resolution.kind === "builtin") return this.#deps.builtins[resolution.name];

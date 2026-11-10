@@ -63,6 +63,14 @@ export interface EsmTransformResult {
   readonly injected: {
     readonly exports: string;
     readonly require: string;
+    /**
+     * The resolver a generated STATIC import edge uses.
+     *
+     * It is a separate binding from `require` because the two are different language rules: `require()` of a module with top-level await is
+     * Node's `ERR_REQUIRE_ASYNC_MODULE`, which real Node throws for the same program, while a static `import` of one is legal in Node and only
+     * refused here, where async module records are not implemented. One message cannot honestly describe both.
+     */
+    readonly importSync: string;
     readonly loadModuleAsync: string;
   };
 }
@@ -269,21 +277,21 @@ export function transformEsm(source: string, options: EsmTransformOptions): EsmT
 
       const needsModule = defaultLocal !== null && named.length > 0;
       const moduleVar = needsModule ? temp() : null;
-      if (moduleVar !== null) lines.push(`const ${moduleVar} = __esmRequire(${quote(source_)});`);
-      else if (list.length === 0) lines.push(`__esmRequire(${quote(source_)});`);
+      if (moduleVar !== null) lines.push(`const ${moduleVar} = __esmImportSync(${quote(source_)});`);
+      else if (list.length === 0) lines.push(`__esmImportSync(${quote(source_)});`);
 
       if (defaultLocal !== null) {
         lines.push(
           needsModule
             ? `const ${defaultLocal} = __esmInterop(${moduleVar as string});`
-            : `const ${defaultLocal} = __esmInterop(__esmRequire(${quote(source_)}));`,
+            : `const ${defaultLocal} = __esmInterop(__esmImportSync(${quote(source_)}));`,
         );
       }
       if (namespaceLocal !== null) {
-        lines.push(`const ${namespaceLocal} = __esmRequire(${quote(source_)});`);
+        lines.push(`const ${namespaceLocal} = __esmImportSync(${quote(source_)});`);
       }
       if (named.length > 0) {
-        const source2 = moduleVar ?? `__esmRequire(${quote(source_)})`;
+        const source2 = moduleVar ?? `__esmImportSync(${quote(source_)})`;
         const bound = moduleVar === null ? temp() : moduleVar;
         if (moduleVar === null) lines.push(`const ${bound} = ${source2};`);
         for (const { imported, local } of named) {
@@ -331,7 +339,7 @@ export function transformEsm(source: string, options: EsmTransformOptions): EsmT
       if (from !== undefined) {
         // export { a, b as c } from "x": bind the source module once, then copy each name across.
         const moduleVar = temp();
-        assignments.push(`const ${moduleVar} = __esmRequire(${quote(from)});`);
+        assignments.push(`const ${moduleVar} = __esmImportSync(${quote(from)});`);
         for (const specifier of specifiers) {
           if (!isNode(specifier)) continue;
           const imported = nameOf(specifier["local"], "re-export");
@@ -360,7 +368,7 @@ export function transformEsm(source: string, options: EsmTransformOptions): EsmT
         start: node.start,
         end: node.end,
         text:
-          `const ${moduleVar} = __esmRequire(${quote(value)}); ` +
+          `const ${moduleVar} = __esmImportSync(${quote(value)}); ` +
           `for (const __k of Object.keys(${moduleVar})) { if (__k !== "default" && __k !== "__esModule") __esmExports[__k] = ${moduleVar}[__k]; }`,
       });
       return;
@@ -412,6 +420,7 @@ export function transformEsm(source: string, options: EsmTransformOptions): EsmT
     const internals = [
       "__esmExports",
       "__esmRequire",
+      "__esmImportSync",
       "__esmInterop",
       "__esmImportMeta",
       "__esmDynamicImport",
@@ -436,6 +445,7 @@ export function transformEsm(source: string, options: EsmTransformOptions): EsmT
       injected: {
         exports: renamed("__esmExports"),
         require: renamed("__esmRequire"),
+        importSync: renamed("__esmImportSync"),
         loadModuleAsync: renamed("__esmLoadModuleAsync"),
       },
     };

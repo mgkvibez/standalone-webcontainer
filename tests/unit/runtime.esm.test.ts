@@ -257,6 +257,81 @@ describe("top-level await", () => {
     expect(result.stdout).toBe("value=set-after-await\n");
   });
 
+  it("waits for an entry whose body is suspended on a TIMER, not just on a microtask", async () => {
+    // This is the shape that deadlocked. `await Promise.resolve()` settles inside the microtask queue, so it worked while a timer did not: the
+    // runner awaited a promise whose only resolver was a scheduler timer that nothing was running. The run ended at its timeout having printed
+    // nothing, which reads like a hang rather than a missing pump.
+    const result = await run(
+      {
+        "/app/package.json": JSON.stringify({ name: "app", type: "module" }),
+        "/app/main.js": "console.log('before');\nawait new Promise((resolve) => setTimeout(resolve, 5));\nconsole.log('after');",
+      },
+      "main.js",
+    );
+
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("before\nafter\n");
+  });
+
+  it("runs timers the entry scheduled after its last await before the program is judged", async () => {
+    const result = await run(
+      {
+        "/app/package.json": JSON.stringify({ name: "app", type: "module" }),
+        "/app/main.js": [
+          "await Promise.resolve();",
+          "setTimeout(() => console.log('timer-after-await'), 1);",
+          "console.log('body-done');",
+        ].join("\n"),
+      },
+      "main.js",
+    );
+
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("body-done\ntimer-after-await\n");
+  });
+
+  it("refuses a STATIC import of an async module with a code that names both ends", async () => {
+    const result = await run(
+      {
+        "/app/package.json": JSON.stringify({ name: "app", type: "module" }),
+        "/app/main.js": "import { value } from './late.js';\nconsole.log('value=' + value);",
+        "/app/late.js": "console.log('late-body-ran');\nexport const value = await Promise.resolve('x');",
+      },
+      "main.js",
+    );
+
+    expect(result.exitCode).toBe(1);
+    // Node supports this import through async module records, which this runtime does not implement. So the code is ours, not Node's, and the
+    // message has to carry both file names: the module is what must change, the importer is where the reader can act.
+    expect(result.stderr).toContain("TLA_IN_NON_ENTRY");
+    expect(result.stderr).toContain("/app/late.js");
+    expect(result.stderr).toContain("/app/main.js");
+    // Refused BEFORE evaluation: a module that cannot be waited for must not run its first statements and then fail.
+    expect(result.stdout).toBe("");
+  });
+
+  it("refuses a static import of an async module that is already in the cache", async () => {
+    // The second edge must report what the first one did, or a module reached twice would silently succeed on the second path.
+    const result = await run(
+      {
+        "/app/package.json": JSON.stringify({ name: "app", type: "module" }),
+        "/app/main.js": [
+          "try { await import('./late.js'); } catch (error) { console.log('dynamic=' + (error && error.code)); }",
+          "import { later } from './second.js';",
+          "console.log('value=' + later);",
+        ].join("\n"),
+        "/app/second.js": "import { value } from './late.js';\nexport const later = value;",
+        "/app/late.js": "export const value = await Promise.resolve('x');",
+      },
+      "main.js",
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("TLA_IN_NON_ENTRY");
+    expect(result.stderr).toContain("/app/second.js");
+  });
+
   it("refuses a synchronous require of an async module with Node's code", async () => {
     const result = await run(
       {

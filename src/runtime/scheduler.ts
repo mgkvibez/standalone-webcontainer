@@ -267,6 +267,53 @@ export class Scheduler {
     this.#idleStart = null;
   }
 
+  /**
+   * Runs the timer queue while an asynchronous ENTRY body is still evaluating.
+   *
+   * Node waits for an entry module's evaluation before the program counts as started, and a body suspended at an `await` is frequently waiting on
+   * work only this queue can perform. Measured: an entry whose body is `await new Promise((resolve) => setTimeout(resolve, 5))` deadlocked here,
+   * because the runner awaited a promise whose only resolver was a timer nothing would run, and the run ended at its timeout with no output at all.
+   *
+   * Deliberately not memoized. `drain` caches its evidence because it is the accounting for the whole execution, and this stops as soon as the
+   * body settles, so caching here would hide the timers the body's own last statements scheduled. The runner still calls `drain` afterwards and
+   * that call does the normal accounting.
+   *
+   * Termination follows Node rather than a guess: the loop stops when the body has settled and nothing is queued, when a guard fires, or when the
+   * queue is empty and the body is still suspended after the real event loop has had a turn. That last case is Node's own behaviour, where a
+   * process exits with an unresolved entry promise once its loop is empty.
+   */
+  async drainWhile(evaluation: Promise<void>): Promise<void> {
+    let settled = false;
+    let rejection: { error: unknown } | undefined;
+    void evaluation.then(
+      () => {
+        settled = true;
+      },
+      (error: unknown) => {
+        settled = true;
+        rejection = { error };
+      },
+    );
+
+    for (;;) {
+      if (this.#aborted) break;
+      const stop = await this.#drainPass();
+      // A pass that ended on a guard ended this loop too: continuing would run exactly the work the guard exists to stop.
+      if (stop !== "queue-empty") break;
+      await drainContinuations();
+      if (settled && this.#queue.length === 0) break;
+      if (this.#queue.length > 0) continue;
+      // Nothing of ours is queued and the body is still suspended. One real turn lets work that is not a timer (a dynamic import settling, an
+      // outside handle) make progress; if neither that nor a new timer appears, this queue has nothing left to offer.
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+      if (this.#queue.length === 0) break;
+    }
+
+    if (rejection !== undefined) throw rejection.error;
+  }
+
   async drain(): Promise<SchedulerEvidence> {
     if (this.#evidence !== null) return this.#evidence;
 

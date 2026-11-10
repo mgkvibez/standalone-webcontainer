@@ -68,7 +68,7 @@ corpus is reproducible and a live registry is the product.
 
 | Fixture | Verdict | Cause | Runnable today? |
 |---|---|---|---|
-| 01 Vite dev server | RUNTIME_INCOMPATIBILITY | installs from the frozen vite@5.4.21 snapshot (8 packages), `npm run dev` resolves the binary, and the ESM loader stops at **top-level await** (ADR-0012) in vite's `dist/node/cli.js` — see `npm-run-and-vite.md` | one decision away |
+| 01 Vite dev server | RUNTIME_INCOMPATIBILITY | the loader no longer stops it: entry top-level await runs (ADR-0012 amendment) and vite's one such module is its launcher. It now stops in the install, on `SNAPSHOT_MISSING: esbuild-wasm` — the snapshot was captured from vite's own graph and does not hold our `esbuild` substitution — see `npm-run-and-vite.md` | a snapshot rebuild away |
 | 02 | RUNTIME_INCOMPATIBILITY | no files; no packages | no |
 | 03 shadcn CLI | RUNTIME_INCOMPATIBILITY | no files; `npx` is refused by design | no |
 | 04 core surface | **PASS, 6/6** | fs, http, streams, timers, EventEmitter | yes |
