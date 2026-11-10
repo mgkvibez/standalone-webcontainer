@@ -99,19 +99,36 @@ function newPreviewId(used = new Set<string>()): string {
 
 const describeError = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
+/** The save reached both keys, but another tab wrote the index at the same time and the list could not be confirmed. */
+const UNCONFIRMED_INDEX = "saved, but another tab wrote the project list at the same time; reload if a project is missing";
+
 /**
- * The next free project number, derived from the ids actually present rather than from the count.
+ * A project id that cannot collide with one another tab chooses.
  *
- * Counting was wrong once a project could be deleted or created by another tab: three projects did not imply `project-3` was free,
- * and a collision would have made one project's key overwrite another's.
+ * Numbered ids were derived from the ids a tab could see, so two tabs creating a project in the same instant both picked
+ * `project-4`: the later write replaced the earlier project outright, key and all. A random id removes that class by
+ * construction, and it costs one `crypto.randomUUID` that is already used for preview ids. The loop guards the impossible
+ * case (a candidate that is already in memory) rather than a likely one.
  */
-const nextIdFor = (projects: readonly Project[]): number => {
-  let highest = 0;
-  for (const project of projects) {
-    const match = /^project-(\d+)$/.exec(project.id);
-    if (match?.[1] !== undefined) highest = Math.max(highest, Number(match[1]));
-  }
-  return highest + 1;
+const mintProjectId = (used: ReadonlySet<string>): string => {
+  let id: string;
+  do {
+    id = `project-${globalThis.crypto.randomUUID().replaceAll("-", "").toLowerCase()}`;
+  } while (used.has(id));
+  return id;
+};
+
+/**
+ * The next free default name, derived from the names present.
+ *
+ * A numbered id used to supply this (`project 2` for `project-2`), which no longer exists now that ids are random. Names are
+ * display-only, so the first unused number is enough; duplicate names were already possible through `renameProject`.
+ */
+const nextDefaultName = (projects: readonly Project[]): string => {
+  const used = new Set(projects.map((project) => project.name));
+  let number = 1;
+  while (used.has(`project ${number}`)) number += 1;
+  return `project ${number}`;
 };
 
 const describeRemoved = (removed: readonly Project[]): string =>
@@ -130,7 +147,6 @@ export class ProjectStore {
   readonly #storage: StorageLike;
   #projects: Project[];
   #activeId: string;
-  #nextId = 1;
   #lastError: string | null = null;
   #lastNotice: string | null = null;
   /**
@@ -138,12 +154,16 @@ export class ProjectStore {
    * the project's own serialization, not the whole file, so a comparison is a string compare with no re-serialisation.
    */
   #written = new Map<string, string>();
+  /**
+   * Projects this tab deleted whose removal the index does not reflect yet. Adoption reads the index, which still names them, so
+   * without this a save would read its own pending deletion back and resurrect the project it just removed.
+   */
+  readonly #removed = new Set<string>();
 
   private constructor(storage: StorageLike, projects: Project[], activeId: string) {
     this.#storage = storage;
     this.#projects = projects;
     this.#activeId = activeId;
-    this.#nextId = nextIdFor(projects);
   }
 
   /**
@@ -287,17 +307,16 @@ export class ProjectStore {
   }
 
   create(name: string): Project {
-    const id = `project-${this.#nextId++}`;
     const project: Project = {
-      id,
-      previewId: newPreviewId(new Set(this.#projects.map((project) => project.previewId))),
-      name: name.trim() === "" ? `project ${this.#nextId - 1}` : name.trim(),
+      id: mintProjectId(new Set(this.#projects.map((existing) => existing.id))),
+      previewId: newPreviewId(new Set(this.#projects.map((existing) => existing.previewId))),
+      name: name.trim() === "" ? nextDefaultName(this.#projects) : name.trim(),
       files: { "/index.js": 'console.log("hello from a new project");\n' },
       dirs: [],
       updatedAt: Date.now(),
     };
     this.#projects.push(project);
-    this.#activeId = id;
+    this.#activeId = project.id;
     this.persist();
     return project;
   }
@@ -311,6 +330,8 @@ export class ProjectStore {
 
   remove(id: string): void {
     if (this.#projects.length <= 1) return;
+    if (!this.#projects.some((project) => project.id === id)) return;
+    this.#removed.add(id);
     this.#projects = this.#projects.filter((project) => project.id !== id);
     if (this.#activeId === id) this.#activeId = this.#projects[0]?.id ?? this.#activeId;
     this.persist();
@@ -434,12 +455,17 @@ export class ProjectStore {
   persist(): void {
     try {
       this.#clearNotice();
+      // Before this save writes the index: pick up a project created elsewhere whose event has not arrived yet, so this write
+      // does not replace the list with one that omits it.
+      this.#adoptUnseenFromIndex();
       const live = new Set(this.#projects.map((project) => project.id));
 
-      // Deleted projects: their keys go first (deletion frees quota), and the index written below stops naming them. A failure
-      // here is not fatal, since the index is the authority, so it is left to the outer catch like any other write.
-      for (const id of [...this.#written.keys()]) {
-        if (live.has(id)) continue;
+      // Deleted projects: their keys go first, which frees the quota and makes the absence unambiguous to another tab (a project
+      // left out of the list but still on disk is a lost list, not a deletion). `#removed` is the record of the intent: iterating
+      // `#written` instead missed every project loaded from storage, whose record then survived a deletion forever.
+      const gone = new Set<string>(this.#removed);
+      for (const id of this.#written.keys()) if (!live.has(id)) gone.add(id);
+      for (const id of gone) {
         this.#storage.removeItem?.(projectKey(id));
         this.#written.delete(id);
       }
@@ -455,12 +481,84 @@ export class ProjectStore {
       }
 
       // Index LAST: another tab reading it must never find an id whose project key has not been written yet.
-      const index: StoredIndex = { version: 2, activeId: this.#activeId, order: this.#projects.map((project) => project.id) };
-      this.#storage.setItem(INDEX_KEY, JSON.stringify(index));
-      this.#lastError = null;
+      const confirmed = this.#writeIndex();
+      if (confirmed) this.#removed.clear();
+      this.#lastError = confirmed ? null : UNCONFIRMED_INDEX;
     } catch (error) {
       this.#lastError = `could not save: ${describeError(error)}`;
     }
+  }
+
+  /**
+   * Write the index, then read it back and repair it if another tab's save landed in between.
+   *
+   * The index is one key listing every project, so two saves that interleave their read and their write leave one tab's projects
+   * out of the list: the later write replaces the whole order. That is not a number collision, it is a lost list, and reading
+   * the index immediately before writing it closes only most of the window. Confirming after the write closes the rest: a tab
+   * that lost the race sees its own id missing, adopts whatever the other tab added, and writes again.
+   *
+   * Three attempts, not a loop and not a lock: two tabs would have to lose every attempt in a row to still disagree, and a
+   * bounded number keeps a storage object that lies (a fake, or a browser under a quota failure) from spinning a keystroke.
+   */
+  #writeIndex(): boolean {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const mine = this.#projects.map((project) => project.id);
+      // Union, not replacement. A list arriving from storage may name a project this tab has not heard about yet, and its record
+      // exists, so this write must not be the one that forgets it. An id whose record is gone is a deletion and is left out.
+      const order = [...mine];
+      for (const id of this.#readIndexOrder() ?? []) {
+        if (order.includes(id)) continue;
+        if (this.#readProject(id) === null) continue;
+        order.push(id);
+      }
+      const index: StoredIndex = { version: 2, activeId: this.#activeId, order };
+      this.#storage.setItem(INDEX_KEY, JSON.stringify(index));
+
+      const stored = this.#readIndexOrder();
+      // Unreadable or absent: the write itself succeeded, and there is nothing to compare against. Report the write, not a guess.
+      if (stored === null) return true;
+      const present = new Set(stored);
+      if (mine.every((id) => present.has(id))) return true;
+      this.#adoptUnseenFromIndex();
+    }
+    return false;
+  }
+
+  #readIndexOrder(): string[] | null {
+    try {
+      const raw = this.#storage.getItem(INDEX_KEY);
+      if (raw === null) return null;
+      const parsed = JSON.parse(raw) as StoredIndex;
+      if (parsed.version !== 2 || !Array.isArray(parsed.order)) return null;
+      return parsed.order.filter((id): id is string => typeof id === "string");
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Adopt projects another tab created whose `storage` event has not arrived here yet.
+   *
+   * `storage` events are asynchronous, so a save can run before this tab has heard about a project created a millisecond ago,
+   * and the index it is about to write would omit that project. Additions only: dropping a project whose key is briefly missing
+   * would risk destroying something a save failure left unsaved, while adopting one can only surface a project that exists.
+   * Deletions stay the event's job, where they are already tested.
+   */
+  #adoptUnseenFromIndex(): void {
+    const order = this.#readIndexOrder();
+    if (order === null) return;
+    const adopted: string[] = [];
+    for (const id of order) {
+      if (this.#removed.has(id)) continue;
+      if (this.#projects.some((project) => project.id === id)) continue;
+      const project = this.#readProject(id);
+      if (project === null) continue;
+      this.#projects.push(project);
+      this.#written.set(project.id, JSON.stringify(project));
+      adopted.push(project.name);
+    }
+    if (adopted.length === 1) this.#lastNotice = `${adopted[0]} added in another tab`;
+    if (adopted.length > 1) this.#lastNotice = `${adopted.length} projects added in another tab`;
   }
 
   /**
@@ -514,21 +612,38 @@ export class ProjectStore {
       changed = true;
     }
 
-    // Projects another tab deleted: drop them here too, but never leave the page with no project at all.
-    const survivors = this.#projects.filter((project) => wanted.has(project.id));
-    if (survivors.length !== this.#projects.length && survivors.length > 0) {
-      const removed = this.#projects.filter((project) => !wanted.has(project.id));
-      for (const project of removed) this.#written.delete(project.id);
-      this.#projects = survivors;
+    // A project this tab holds but the arriving list does not name. The list is one key and a save replaces it whole, so absence
+    // is ambiguous: either another tab deleted the project (which removes its own key) or a stale save wrote a list it did not know
+    // about. The key decides. Without this the loser of a simultaneous create had its project dropped from memory by the arriving
+    // list, which is the same loss in a quieter form.
+    const orphaned: Project[] = [];
+    const deleted: Project[] = [];
+    const kept = this.#projects.filter((project) => {
+      if (wanted.has(project.id)) return true;
+      if (this.#readProject(project.id) !== null) {
+        orphaned.push(project);
+        return true;
+      }
+      deleted.push(project);
+      return false;
+    });
+    if (deleted.length > 0 && kept.length > 0) {
+      for (const project of deleted) this.#written.delete(project.id);
+      this.#projects = kept;
       changed = true;
-      this.#lastNotice = `${describeRemoved(removed)} deleted in another tab`;
+      this.#lastNotice = `${describeRemoved(deleted)} deleted in another tab`;
+    }
+    // Repair the list rather than accept it: the project's record is on disk and only the list lost track of it.
+    if (orphaned.length > 0) {
+      this.#writeIndex();
+      changed = true;
+      this.#lastNotice = `restored ${describeRemoved(orphaned)} to the saved list`;
     }
 
     if (!this.#projects.some((project) => project.id === this.#activeId) && this.#projects[0] !== undefined) {
       this.#activeId = this.#projects[0].id;
       changed = true;
     }
-    if (changed) this.#nextId = nextIdFor(this.#projects);
     return changed;
   }
 
@@ -539,7 +654,6 @@ export class ProjectStore {
     if (mineIndex === -1) {
       this.#projects.push(theirs);
       this.#written.set(theirs.id, JSON.stringify(theirs));
-      this.#nextId = nextIdFor(this.#projects);
       this.#lastNotice = `${theirs.name} added in another tab`;
       return true;
     }

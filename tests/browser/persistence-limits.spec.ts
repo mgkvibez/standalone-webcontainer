@@ -140,6 +140,51 @@ test("a project one tab creates reaches the other, and neither loses anything", 
   await context.close();
 });
 
+test("two tabs creating at the same instant both keep their project", async ({ browser }) => {
+  const context = await browser.newContext();
+  const first = await context.newPage();
+  const second = await context.newPage();
+  await boot(first);
+  await boot(second);
+
+  // Neither tab waits for the other's storage event, so both create from a list that predates the other's write. The index is a
+  // single key naming every project, so the later save used to replace the whole order with one that did not know about the other
+  // project: its key stayed on disk, named by nothing, and the project was gone on the next load.
+  const create = (page: Page, name: string): Promise<string> =>
+    page.evaluate((projectName) => {
+      const store = (window as unknown as { __store: { create(name: string): { id: string } } }).__store;
+      return store.create(projectName).id;
+    }, name);
+
+  const [idA, idB] = await Promise.all([create(first, "instant A"), create(second, "instant B")]);
+  expect(new Set([idA, idB]).size).toBe(2);
+
+  // Convergence is eventual, not instantaneous: the repair is driven by the storage event, which is asynchronous by design. The
+  // promise is that the two tabs agree afterwards, so that is what is asserted, with a deadline rather than a snapshot.
+  const names = (): Promise<string[]> =>
+    first.evaluate(() => {
+      const raw = localStorage.getItem("swc.projects.v2.index") ?? "{}";
+      const index = JSON.parse(raw) as { order?: string[] };
+      return (index.order ?? []).map((id) => {
+        const record = JSON.parse(localStorage.getItem(`swc.projects.v2.project.${id}`) ?? "{}") as {
+          project?: { name?: string };
+        };
+        return record.project?.name ?? "";
+      });
+    });
+
+  await expect.poll(names, { timeout: 5000 }).toEqual(expect.arrayContaining(["instant A", "instant B"]));
+  console.log(`names in storage after two simultaneous creates: ${JSON.stringify(await names())}`);
+
+  // The claim that matters: a page that loads afterwards sees both, so neither project was orphaned.
+  const third = await context.newPage();
+  await boot(third);
+  await expect(third.locator("#project-select")).toContainText("instant A");
+  await expect(third.locator("#project-select")).toContainText("instant B");
+
+  await context.close();
+});
+
 test("an edit to the same project in another tab is adopted and reported, not silently overwritten", async ({ browser }) => {
   const context = await browser.newContext();
   const first = await context.newPage();

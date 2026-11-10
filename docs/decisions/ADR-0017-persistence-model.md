@@ -41,8 +41,10 @@ Rules that make it correct, each with the failure it prevents:
 4. **Last write wins, per project, and is announced.** A newer version from another tab replaces the local one and sets a notice
    (`<name> changed in another tab`). Merging file-level would be a different, larger feature; the failure being fixed is the
    *silence*, not the resolution order.
-5. **Project numbers come from the ids present, not from a count.** With deletion (and other tabs creating projects), counting
-   produced an id that already existed, whose key would overwrite another project's.
+5. **Project ids are random, and names come from the names present.** ~~Project numbers come from the ids present, not from a
+   count.~~ Counting produced an id that already existed, whose key would overwrite another project's; deriving the number from the
+   ids present fixed that only within one tab, because two tabs saw the same ids. Superseded by the amendment below: ids are
+   `project-` plus 128 random bits, and a default name takes the first free `project N`.
 6. **One corrupt project costs one project.** Load parses each project under its own `try`; the first version wrapped the whole loop
    and a single unreadable record silently reseeded the entire workspace. Partial loads are reported (`some saved projects could not
    be read`).
@@ -59,11 +61,12 @@ Migration is read-through: `load()` prefers the v2 index, falls back to the v1 k
 - The ~4.94 M character ceiling still applies **per project**. A project larger than that still fails to save, and still says so. The
   measurement in `docs/audit/persistence-limits.md` remains the honest statement of the limit; this ADR only stops one project's
   size from costing the others.
-- **Known limit: simultaneous creation can still collide on an id.** Two tabs creating a project in the same instant both derive
-  the next number from the ids they can see, so both may choose `project-4`. The later write wins and the earlier project is
-  replaced by it, with the notice raised. This is rarer than the loss it replaces (a whole workspace versus one project created in
-  the same instant as another), and fixing it properly needs a cross-tab lock, which is the Web Locks row of the option table and
-  was deliberately deferred. Recorded here rather than discovered later.
+- **Simultaneous creation no longer loses a project.** The first version of this ADR accepted that limit: two tabs creating in the
+  same instant derived the next number from the ids they could see, so both chose `project-4` and the later write replaced the
+  earlier project outright. Three changes remove the class instead of documenting it: ids are random rather than derived from a
+  shared list, the index write is a union with what is already stored rather than a replacement, and a tab that receives a list
+  missing one of its own projects repairs the list instead of dropping the project. Convergence is eventual, because it is driven
+  by the `storage` event, so the tests assert agreement within a deadline rather than instantaneous agreement.
 - IndexedDB and OPFS stay deferred. If a project must exceed the ceiling, or files must be streamed rather than read whole, that
   milestone reopens the question with the asynchronous call-site cost measured rather than estimated.
 
@@ -78,6 +81,10 @@ Migration is read-through: `load()` prefers the v2 index, falls back to the v1 k
 | A project created in another tab appears here, with a notice | same file |
 | Another tab's newer version is adopted, with a notice | same file |
 | A tab's own values are a no-op, not a notice | same file |
+| Two tabs creating from lists that predate each other keep both projects | same file, "two tabs creating at the same instant" |
+| A stale save that drops this tab's project from the list is repaired, not obeyed | same file, "puts back a project the arriving list had lost" |
+| A project deleted in a later session has its record removed | same file, "removes the record of a project deleted in a later session" |
+| The same, in a real browser across two pages | `tests/browser/persistence-limits.spec.ts` — "two tabs creating at the same instant" |
 | A project deleted in another tab disappears, but never the last one | same file |
 | Project ids stay unique after a deletion | same file |
 | Two real tabs converge, and both projects survive | `tests/browser/persistence-limits.spec.ts` |
@@ -86,3 +93,33 @@ Migration is read-through: `load()` prefers the v2 index, falls back to the v1 k
 
 The pre-fix numbers (including the clobbered `["playground","made in tab B"]`) are kept in `docs/audit/persistence-limits.md`,
 because a decision record should show what it was decided against.
+
+## Amendment (2026-11-10): the simultaneous-create limit is closed, and closing it found two more defects
+
+Written after the browser lane measured the limit this ADR had accepted. Decisions 1-4 and 6-7 stand; decision 5 is superseded.
+
+| Defect | How it showed | Fix | Test |
+|---|---|---|---|
+| Two tabs creating at the same instant lost a project | A two-page browser test lost `instant A`: the later save replaced the whole index with one that did not name it | random ids; the index write is a union with what is stored; a tab repairs a list that omits its own project | browser "two tabs creating at the same instant"; unit "keeps both projects when each tab creates from a list that predates the other" |
+| A project deleted in a later session kept its record forever | The deletion loop walked what this store had written, which is empty after a load, so the record survived and its quota was never freed | the loop acts on recorded intent (`#removed`) plus anything no longer live | unit "removes the record of a project deleted in a later session" |
+| A stale save could remove a live project from the list | The arriving list was treated as authority, so a project whose record was still on disk was dropped from memory | the record decides: present means repair the list, absent means deletion | unit "puts back a project the arriving list had lost" |
+
+The first fix needed a guard of its own: adoption reads the index, which still names a project this tab just deleted, so without
+tracking pending deletions a save resurrected the project it had just removed. An existing test caught that, not review.
+
+The second is the one worth noting for what it says about the first version of this ADR: it recorded that "deleting a project frees
+its quota immediately" as a consequence, and that was true only for a project created in the same session. A record on disk that no
+list names is invisible, so nothing repaired it and nothing reported it.
+
+Two boundaries are stated rather than implied. Deletion is inferred from a missing record and not from a missing list entry, so a
+storage object that cannot `removeItem` cannot express a deletion. And convergence is eventual: in the microseconds where one tab has
+written its record and not yet its index, another tab reading that index sees a shorter list, which is why the write repairs and the
+tests poll.
+
+## Evidence for the amendment
+
+| Claim | Test |
+|---|---|
+| A mutation removing the pre-write adoption fails the race test, and only that test | mutation run, recorded in PR #42 |
+| A mutation trusting the write without reading it back fails the repair test, and only that test | same |
+| Both mutations reverted, 989 unit tests pass | `npm run verify` |
