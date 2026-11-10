@@ -34,6 +34,7 @@ import {
 import { compareVersions, isRangeExpression, maxSatisfying } from "./semver-range.js";
 import { DEFAULT_TAR_LIMITS, extractTarball, stripTopLevelDirectory, type TarLimits } from "./tarball.js";
 import { computeIntegrity, sha512Base64 } from "./digest.js";
+import { resolvedRange, substitutionFor, SubstitutionError, type SubstitutionUse } from "./substitutions.js";
 
 export interface PackumentVersion {
   readonly name: string;
@@ -128,6 +129,13 @@ export interface InstallReport {
    * know whether a lockfile was actually used, and inferring it from "did anything get fetched" is guesswork.
    */
   readonly usedLockfile: boolean;
+  /**
+   * Every substitution this install applied, in the order it applied them.
+   *
+   * Empty is the ordinary answer. A non-empty list means the tree does not contain the package someone asked for, and a reader is
+   * entitled to know that without diffing tarballs: the reason travels with the record.
+   */
+  readonly substitutions: readonly SubstitutionUse[];
 }
 
 export class InstallError extends Error {
@@ -456,6 +464,7 @@ export async function installDependencies(
     }
   }
 
+  const substitutions: SubstitutionUse[] = [];
   const queue: Request[] = [...initial];
   interface ResolvedEntry {
     readonly placement: Placement;
@@ -496,8 +505,39 @@ export async function installDependencies(
             `${request.name}: lockfile pins ${stale.version}, which does not satisfy "${request.range}"; re-resolved`,
           );
         }
-        const packument = await fetchPackument(request.name);
-        chosen = chooseVersion(packument, request.range, request.name);
+        const substitution = substitutionFor(request.name);
+        // Only the substitute's packument is fetched. Asking for the requested package's versions first would be a wasted round trip,
+        // and on the offline lanes it would be a guaranteed miss for a package whose bytes are never served anyway.
+        const lookupName = substitution?.substitute ?? request.name;
+        const packument = await fetchPackument(lookupName);
+        const range = substitution === undefined ? request.range : resolvedRange(substitution, request.range);
+        try {
+          chosen = chooseVersion(packument, range, lookupName);
+        } catch (error) {
+          // A substitution that cannot honour the caller's range is a broken table, not a version conflict in the user's project.
+          if (substitution === undefined) throw error;
+          throw new SubstitutionError(
+            "SUBSTITUTE_NO_MATCH",
+            `${substitution.substitute} has no version satisfying "${request.range}" (rule "${substitution.rule}"), which ${request.name}@${request.range} needs`,
+          );
+        }
+        if (substitution !== undefined) {
+          substitutions.push({
+            requested: substitution.requested,
+            substitute: substitution.substitute,
+            rule: substitution.rule,
+            requestedRange: request.range,
+            version: chosen.version,
+            reason: substitution.reason,
+            ...(substitution.initHook === undefined ? {} : { initHook: substitution.initHook }),
+          });
+          warnings.push(
+            `${request.name}@${request.range} is served by ${substitution.substitute}@${chosen.version}: ${substitution.reason}`,
+          );
+          // The tree keeps the requested name, because Node resolves by directory: a caller writing `require('esbuild')` looks in
+          // node_modules/esbuild and must find the substitute there. The substitute's own package.json still says what it is.
+          chosen = { ...chosen, name: request.name };
+        }
       }
 
       // Applied to the chosen version regardless of where it came from, because a lockfile written by a local
@@ -651,7 +691,7 @@ export async function installDependencies(
     options.vfs.writeFileSync(joinPath(root, "package-lock.json"), serializeLockfile(lockfile));
   }
 
-  return { packages, warnings, lockfile, usedLockfile: locked !== null };
+  return { packages, warnings, lockfile, usedLockfile: locked !== null, substitutions };
 }
 
 /** Human-readable platform description, used in the messages that refuse or skip a package. */

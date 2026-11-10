@@ -185,6 +185,22 @@ const HOST_GLOBALS: RuntimeGlobals = {
   setImmediate: (callback: (...args: never[]) => void, ...args: unknown[]) => setTimeout(callback, 0, ...args),
 };
 
+/**
+ * Builtins that would have to spawn a native process, which this runtime cannot do and a browser cannot acquire.
+ *
+ * Kept as a named set rather than an inline comparison so the next member (a worker thread that must be a real OS thread, say) is a row
+ * here instead of a condition in two places.
+ */
+const NATIVE_PROCESS_BUILTINS: ReadonlySet<string> = new Set(["child_process"]);
+
+/** The package a file belongs to, for a diagnostic that names an owner rather than a directory. */
+function packageNameOf(dir: string): string | null {
+  // The LAST match, because a nested conflict puts one package inside another's node_modules and the innermost one is the owner.
+  const matches = [...dir.matchAll(/node_modules\/((?:@[^/]+\/)?[^/]+)/g)];
+  const last = matches[matches.length - 1];
+  return last?.[1] ?? null;
+}
+
 export class CommonJsLoader {
   readonly #deps: LoaderDeps;
   readonly #cache = new Map<string, ModuleRecord>();
@@ -248,6 +264,22 @@ export class CommonJsLoader {
   /** Resolve a specifier to an absolute VFS path, or return a builtin name. */
   resolve(specifier: string, fromDir: string): { kind: "builtin"; name: string } | { kind: "file"; path: string } {
     const bare = specifier.startsWith("node:") ? specifier.slice(5) : specifier;
+    // A builtin that needs a native process is refused on purpose, with evidence, instead of reported as a missing module: "Cannot find
+    // module 'child_process'" reads as a defect in this loader, and the honest statement is that the runtime cannot spawn a process.
+    if (NATIVE_PROCESS_BUILTINS.has(bare)) {
+      const owner = packageNameOf(fromDir);
+      const frame = new Error().stack?.split("\n").slice(1).find((line) => !line.includes("commonjs.ts"))?.trim();
+      throw new ProcessRefusal({
+        code: "NATIVE_PROCESS_EXEC_REFUSED",
+        capability: "native process spawn",
+        message:
+          `Cannot load ${bare}: this runtime cannot spawn a native process${owner === null ? "" : `, which ${owner} needs`}. ` +
+          "A package that needs one must ship a WASM build or be replaced through a substitution." +
+          (frame === undefined ? "" : ` (${frame})`),
+        subject: `${bare} required from ${fromDir}`,
+      });
+    }
+
     if (Object.prototype.hasOwnProperty.call(this.#deps.builtins, bare)) {
       return { kind: "builtin", name: bare };
     }
