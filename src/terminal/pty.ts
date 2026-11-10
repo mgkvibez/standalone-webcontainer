@@ -53,6 +53,14 @@ export interface TerminalInput {
   pause(): this;
   destroy(): this;
   readonly listeners: (event: "data" | "end") => number;
+  /**
+   * Whether a program is still waiting on this input, which is what keeps its event loop alive.
+   *
+   * In Node, `process.stdin.on("data")` is a ref'd handle: a program whose only job is to answer a question stays running instead
+   * of exiting at the end of its first turn. Without this fact the scheduler saw an empty queue and ended the program before the
+   * user could type anything. `pause()` and end-of-input both clear it, because nothing is waiting any more.
+   */
+  readonly live: () => boolean;
 }
 
 export interface TerminalSize {
@@ -118,6 +126,10 @@ export const createTerminal = (options: { readonly columns?: number; readonly ro
     for (const listener of [...listeners]) listener();
   };
 
+  // A program that has attached a reader, or explicitly resumed, is waiting on input: that is a live handle. Attaching a data
+  // listener implies flowing, exactly as it does in Node.
+  let reading = false;
+
   const input: TerminalInput = {
     isTTY: true,
     get readable() {
@@ -127,8 +139,10 @@ export const createTerminal = (options: { readonly columns?: number; readonly ro
       return raw;
     },
     on(event: "data" | "end", listener: InputListener | EndListener): TerminalInput {
-      if (event === "data") dataListeners.add(listener as InputListener);
-      else endListeners.add(listener as EndListener);
+      if (event === "data") {
+        dataListeners.add(listener as InputListener);
+        reading = true;
+      } else endListeners.add(listener as EndListener);
       // A reader that attaches late still gets what was typed earlier, flushed in one chunk in arrival order.
       if (event === "data" && pending.length > 0) {
         const flushed = pending.join("");
@@ -152,8 +166,12 @@ export const createTerminal = (options: { readonly columns?: number; readonly ro
       return input.on("end", onEnd);
     },
     off(event: "data" | "end", listener: InputListener | EndListener): TerminalInput {
-      if (event === "data") dataListeners.delete(listener as InputListener);
-      else endListeners.delete(listener as EndListener);
+      if (event === "data") {
+        dataListeners.delete(listener as InputListener);
+        // No reader left means nothing is waiting, so the program may exit. Node's own streams keep flowing after the last data
+        // listener is removed; that quirk would leave a program hanging forever with nobody listening, so it is not copied.
+        if (dataListeners.size === 0) reading = false;
+      } else endListeners.delete(listener as EndListener);
       return input;
     },
     setRawMode(mode: boolean): TerminalInput {
@@ -166,17 +184,24 @@ export const createTerminal = (options: { readonly columns?: number; readonly ro
       return input;
     },
     resume(): TerminalInput {
+      if (!ended) reading = true;
       return input;
     },
     pause(): TerminalInput {
+      // Node unrefs stdin on pause: the program is no longer waiting for a reader, so it may now exit.
+      reading = false;
       return input;
     },
     destroy(): TerminalInput {
       ended = true;
+      reading = false;
       dataListeners.clear();
       endListeners.clear();
       pending.length = 0;
       return input;
+    },
+    live(): boolean {
+      return !ended && reading;
     },
     listeners(event: "data" | "end"): number {
       return event === "data" ? dataListeners.size : endListeners.size;

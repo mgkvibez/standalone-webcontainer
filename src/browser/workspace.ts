@@ -13,6 +13,8 @@ import { basicSetup } from "codemirror";
 import { EditorView } from "@codemirror/view";
 import { javascript } from "@codemirror/lang-javascript";
 import { oneDark } from "@codemirror/theme-one-dark";
+import type { Terminal as XtermTerminal } from "@xterm/xterm";
+import type { FitAddon as XtermFitAddon } from "@xterm/addon-fit";
 
 import type { Container } from "../container/container.js";
 import { basename, dirname } from "../container/commands.js";
@@ -54,6 +56,9 @@ export function createWorkspace(options: WorkspaceOptions): Workspace {
   const scrollback = element<HTMLDivElement>("scrollback");
   const promptLabel = element<HTMLSpanElement>("prompt-label");
   const commandInput = element<HTMLInputElement>("command");
+  const terminalBody = element<HTMLDivElement>("terminal-body");
+  const rawPane = element<HTMLDivElement>("raw-pane");
+  const rawScreen = element<HTMLDivElement>("raw-screen");
   const processList = element<HTMLDivElement>("processes");
   const processSummary = element<HTMLSpanElement>("process-summary");
   const saveState = element<HTMLSpanElement>("save-state");
@@ -231,6 +236,133 @@ export function createWorkspace(options: WorkspaceOptions): Workspace {
     scrollback.scrollTop = scrollback.scrollHeight;
   };
 
+  /**
+   * Raw mode: while a program owns the keyboard, an xterm.js pane replaces the line prompt.
+   *
+   * The prompt collects a whole line before anything runs, which is the right shape for `ls` and the wrong shape for a program
+   * that asks a question. Rather than teach the prompt to stream (a line editor is exactly what readline does better), the pane
+   * appears only while a process is alive and hands every keystroke straight to the program's stdin. There is no echo and no
+   * erase handling here, because the runtime has no line discipline: the program sees the bytes the user typed.
+   *
+   * xterm.js is here for one reason: a terminal shows escape sequences as colours and layout, and hand-rolling that parser would
+   * be a second emulator with its own bugs. It is given the program's raw stream from `container.onChunk`, not the scrollback,
+   * because scrollback holds whole lines and would hide a prompt the program is waiting behind.
+   */
+  let raw: { term: XtermTerminal; fit: XtermFitAddon; sessionId: string; processId: number } | null = null;
+  let fitting = false;
+  let opening = false;
+
+  /**
+   * xterm.js is loaded the first time a program actually takes the keyboard.
+   *
+   * It is about a third of the page bundle, and most visits never open an interactive program, so paying for it at boot would be a
+   * cost with no benefit. The editor is not deferred: it is on screen immediately.
+   */
+  const loadXterm = async (): Promise<{ Terminal: typeof XtermTerminal; FitAddon: typeof XtermFitAddon } | null> => {
+    try {
+      const [mod, fitMod] = await Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")]);
+      await import("@xterm/xterm/css/xterm.css");
+      return { Terminal: mod.Terminal, FitAddon: fitMod.FitAddon };
+    } catch (error) {
+      // A failed chunk fetch must not eat the keystroke: the scrollback still shows the program's output.
+      console.error("terminal pane failed to load", error);
+      return null;
+    }
+  };
+
+  const closeRaw = (): void => {
+    if (raw === null) return;
+    const { term } = raw;
+    raw = null;
+    term.dispose();
+    rawScreen.replaceChildren();
+    rawPane.hidden = true;
+    terminalBody.classList.remove("raw");
+    commandInput.focus();
+  };
+
+  const fitRaw = (): void => {
+    if (raw === null || fitting) return;
+    fitting = true;
+    try {
+      raw.fit.fit();
+      // The program is told the size the pane actually rendered at, which is what makes process.stdout.columns true.
+      if (raw.term.cols > 0 && raw.term.rows > 0) {
+        container.resizeSession(raw.sessionId, raw.term.cols, raw.term.rows);
+      }
+    } finally {
+      fitting = false;
+    }
+  };
+
+  const openRaw = async (process: ProcessRecord): Promise<void> => {
+    if (raw !== null || opening) return;
+    opening = true;
+    const loaded = await loadXterm();
+    opening = false;
+    // The program may have finished while the chunk was in flight, in which case there is nothing to type into.
+    if (loaded === null || raw !== null) return;
+    const running = container.running();
+    if (running === undefined || running.pid !== process.pid) return;
+
+    terminalBody.classList.add("raw");
+    rawPane.hidden = false;
+
+    const { Terminal, FitAddon } = loaded;
+    const term = new Terminal({
+      convertEol: true,
+      cursorBlink: true,
+      fontSize: 13,
+      fontFamily: getComputedStyle(document.body).fontFamily,
+      scrollback: 2_000,
+      theme: { background: "#00000000" },
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    term.open(rawScreen);
+    raw = { term, fit, sessionId: process.sessionId, processId: process.pid };
+
+    // Keystrokes go to the program, not to the prompt. `onData` fires for printable keys and for control characters alike,
+    // which is what a program in raw mode expects to receive.
+    term.onData((data) => {
+      if (raw === null) return;
+      container.write(raw.sessionId, data);
+    });
+
+    // Whatever the program has already printed (usually its first prompt) comes before the live stream.
+    if (process.stdout !== "") term.write(process.stdout);
+    if (process.stderr !== "") term.write(process.stderr);
+
+    fitRaw();
+    term.focus();
+  };
+
+  // A resize is the window's, not the program's: report it so the program hears SIGWINCH, and re-fit so the pane matches.
+  const rawResize = new ResizeObserver(() => fitRaw());
+  rawResize.observe(rawScreen);
+
+  container.onChunk((event) => {
+    if (raw === null || event.sessionId !== raw.sessionId) return;
+    raw.term.write(event.text);
+  });
+
+  element<HTMLButtonElement>("raw-close").addEventListener("click", () => closeRaw());
+
+  /** Follows the process table: the pane exists exactly as long as a program does. */
+  const syncRawMode = (): void => {
+    const running = container.running();
+    if (running === undefined) {
+      closeRaw();
+      return;
+    }
+    if (raw === null) void openRaw(running);
+    else if (raw.processId !== running.pid) {
+      // A different program took the session: start its stream clean rather than mixing two programs' output.
+      closeRaw();
+      void openRaw(running);
+    }
+  };
+
   const renderSessions = (): void => {
     sessionTabs.replaceChildren();
     for (const candidate of container.sessions()) {
@@ -295,6 +427,7 @@ export function createWorkspace(options: WorkspaceOptions): Workspace {
     renderSessions();
     renderScrollback();
     renderProcesses();
+    syncRawMode();
     promptLabel.textContent = `${session().cwd} $`;
     markSaved();
   };
@@ -327,6 +460,13 @@ export function createWorkspace(options: WorkspaceOptions): Workspace {
   });
 
   element<HTMLFormElement>("prompt").addEventListener("submit", (event) => {
+    // A program owns the keyboard while the pane is open, so a stray Enter (xterm not yet focused, focus moved by a click) must
+    // not submit the hidden prompt and start a second program on top of the first. That failure looked like a pane that refused to
+    // close, because the program it restarted was waiting for input of its own.
+    if (raw !== null) {
+      event.preventDefault();
+      return;
+    }
     event.preventDefault();
     const line = commandInput.value;
     commandInput.value = "";
@@ -341,6 +481,8 @@ export function createWorkspace(options: WorkspaceOptions): Workspace {
     renderScrollback();
     renderProcesses();
     renderSessions();
+    // Never inside `refresh`: a running program reports changes mid-run, and that is exactly when the pane must appear.
+    syncRawMode();
   });
 
   // ---------------------------------------------------------------- topbar + explorer actions

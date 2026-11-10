@@ -69,6 +69,14 @@ export interface RunOptions {
    * input survive the exit of the program that was reading them.
    */
   readonly terminal?: Terminal;
+  /**
+   * Ceiling on real time spent WORKING, in milliseconds. Time spent waiting for input or a watcher is excluded, so this bounds
+   * a spinning program rather than a patient one.
+   *
+   * Exposed for two reasons: a host may want a tighter bound than the default, and the exclusion itself is only observable with a
+   * small one. Passing nothing keeps the scheduler's default.
+   */
+  readonly workCeilingMs?: number;
 }
 
 /**
@@ -231,6 +239,56 @@ export class InProcessRuntime implements Runtime {
     const cwd = options.cwd ?? "/";
     const ticks = new TickQueue();
     const terminal = options.terminal ?? null;
+    /**
+     * `process.exit` is immediate in Node, and it is called from places this runtime does not control: a timer callback, or a
+     * stdin handler that runs while the queue is idle. Both routes land here, record the code, and stop the scheduler, so no
+     * timer queued before the exit still runs and the run reports the program's code rather than an uncaught exception.
+     */
+    let exitRequested: number | undefined;
+    const requestExit = (code: number): void => {
+      if (exitRequested !== undefined) return;
+      exitRequested = code;
+      scheduler.abort();
+    };
+
+    /**
+     * Wraps stdin's listeners so an exit thrown from one stays inside the run.
+     *
+     * Input is delivered by the caller (`terminal.write`), which is not a scheduler callback: without this wrapper a
+     * `process.exit` inside a `data` handler escaped into whoever delivered the keystroke, which in the browser is a worker
+     * message handler that has no idea a program just ended.
+     */
+    const guardedStdin = (input: NonNullable<typeof terminal>["stdin"]): typeof input => {
+      const wrappers = new WeakMap<object, object>();
+      const wrap = (listener: unknown): unknown => {
+        if (typeof listener !== "function") return listener;
+        const existing = wrappers.get(listener as object);
+        if (existing !== undefined) return existing;
+        const wrapper = (...args: unknown[]): unknown => {
+          try {
+            return (listener as (...inner: unknown[]) => unknown)(...args);
+          } catch (error) {
+            if (error instanceof ProcessExit) {
+              requestExit(error.code);
+              return undefined;
+            }
+            throw error;
+          }
+        };
+        wrappers.set(listener as object, wrapper);
+        return wrapper;
+      };
+      return new Proxy(input, {
+        get(target, property, receiver) {
+          if (property === "on" || property === "once" || property === "off") {
+            return (event: string, listener: unknown) => (target[property] as (e: string, l: unknown) => unknown)(event, wrap(listener));
+          }
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+        },
+      });
+    };
+
     const processShim: ProcessShim = createProcessShim({
       argv: options.argv !== undefined ? [...options.argv] : ["node", entryPath],
       cwd,
@@ -239,6 +297,8 @@ export class InProcessRuntime implements Runtime {
       stderr,
       ticks,
       terminal,
+      stdin: terminal === null ? null : guardedStdin(terminal.stdin),
+      onExit: requestExit,
     });
 
     // One scheduler per execution, created before any user code runs: its construction is the wall-clock baseline both
@@ -255,12 +315,26 @@ export class InProcessRuntime implements Runtime {
         : isWatchable(this.#vfs)
           ? createCountedWatchSource(createLocalWatchSource(this.#vfs))
           : undefined;
-    const scheduler = new Scheduler({ keepAlive: counted?.open ?? ((): number => 0) }, (error: unknown) => {
-      // Node would kill the process. Killing the run would make one bad callback look like a broken harness, so the error
-      // is reported on stderr and draining continues deterministically.
-      const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
-      stderr.write(`Uncaught ${message}\n`);
-    });
+    const scheduler = new Scheduler(
+      {
+        // A watcher and a waiting reader are both ref'd handles: either one keeps the loop alive, exactly as in Node. Without
+        // the second term a program that only reads stdin exited before its first question could be answered.
+        keepAlive: () => (counted?.open() ?? 0) + (terminal?.stdin.live() === true ? 1 : 0),
+        ...(options.workCeilingMs === undefined ? {} : { maxRealMs: options.workCeilingMs }),
+      },
+      (error: unknown) => {
+        if (error instanceof ProcessExit) {
+          // `process.exit` from a callback is not an uncaught exception: it is the program choosing its exit code, and nothing
+          // queued before it may run.
+          requestExit(error.code);
+          return;
+        }
+        // Node would kill the process. Killing the run would make one bad callback look like a broken harness, so the error
+        // is reported on stderr and draining continues deterministically.
+        const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+        stderr.write(`Uncaught ${message}\n`);
+      },
+    );
 
     const consoleShim = {
       log: (...args: unknown[]) => {
@@ -406,6 +480,9 @@ export class InProcessRuntime implements Runtime {
         exitCode = 1;
       }
     }
+
+    // An exit requested from a callback or an input handler replaces the default code, and never looks like a clean run.
+    if (exitRequested !== undefined) exitCode = exitRequested;
 
     // The program is over; its signal listeners go with it. The terminal stays (the caller owns it) but nothing from this run
     // is still attached to it, so the next resize cannot re-enter a scheduler that has already drained.

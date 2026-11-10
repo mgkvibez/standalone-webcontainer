@@ -383,3 +383,46 @@ button.primary {
 #save-state.error {
   color: var(--err);
 }
+
+/* Raw terminal mode: the program owns the keyboard, so the line prompt steps aside. */
+/* `display: flex` beats the `hidden` attribute's default, so a hidden pane would still paint. Hiding has to be explicit. */
+#raw-pane[hidden] {
+  display: none;
+}
+
+#raw-pane {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+#raw-screen {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 8px;
+}
+
+#raw-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 12px 6px;
+  font-size: 11px;
+}
+
+#raw-close {
+  padding: 1px 8px;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* While a program has the keyboard, the scrollback and prompt are not shown: two views of one stream would disagree. */
+#terminal-body.raw #scrollback,
+#terminal-body.raw #prompt {
+  display: none;
+}

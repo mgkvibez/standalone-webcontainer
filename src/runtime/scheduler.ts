@@ -48,7 +48,12 @@ export type SchedulerStop =
   | "callback-limit"
   | "real-time-limit"
   /** Every timer left is unref'd, so nothing keeps the loop alive: Node exits here and the timers never fire. */
-  | "no-refs-left";
+  | "no-refs-left"
+  /**
+   * Something outside the queue ended the program (`process.exit` from an input handler, or a kill). Node's exit is immediate:
+   * no timer queued before it may still run, so this stops the pass rather than draining the remainder.
+   */
+  | "aborted";
 
 export interface SchedulerEvidence {
   readonly stop: SchedulerStop;
@@ -56,6 +61,8 @@ export interface SchedulerEvidence {
   readonly virtualElapsedMs: number;
   /** Real milliseconds the queue actually consumed. Reported separately, and never presented as virtual. */
   readonly realElapsedMs: number;
+  /** Of `realElapsedMs`, the part spent waiting for an outside handle (input, a watcher). Excluded from the runaway guard. */
+  readonly idleMs: number;
   readonly callbacks: number;
   /** Entries still pending when draining stopped. */
   readonly deferred: number;
@@ -120,6 +127,14 @@ export class Scheduler {
   #unrefPending = 0;
   /** Totals across every drain pass, so the callback guard bounds the WHOLE execution rather than one pass. */
   #callbacks = 0;
+  #aborted = false;
+  /**
+   * Real milliseconds spent waiting for an outside handle rather than running code.
+   *
+   * The real-time guard exists to catch a program that spins, and a program waiting for a keystroke is not spinning. Counting
+   * that wait would have killed every interactive program five seconds after it asked its first question.
+   */
+  #idleWaitMs = 0;
   #callbackErrors = 0;
   #evidence: SchedulerEvidence | null = null;
   readonly #onCallbackError: ((error: unknown) => void) | undefined;
@@ -135,6 +150,16 @@ export class Scheduler {
     this.#onCallbackError = onCallbackError;
     this.#keepAlive = limits.keepAlive;
     this.#keepAlivePollMs = limits.keepAlivePollMs ?? DEFAULT_KEEP_ALIVE_POLL_MS;
+  }
+
+  /**
+   * End this execution from outside the queue. Idempotent, and safe to call from a callback or from an input handler.
+   *
+   * The scheduler is not told why, because it does not need to know: it stops the pass, leaves pending work unrun, and reports
+   * `aborted`. Whoever asked decides what the exit code means.
+   */
+  abort(): void {
+    this.#aborted = true;
   }
 
   /** Virtual elapsed scheduled time, from 0. What `performance.now()` reports. */
@@ -214,13 +239,17 @@ export class Scheduler {
         // real-time guard end a program that watches forever rather than exiting behind its back.
         const outstanding = this.#keepAlive === undefined ? 0 : this.#keepAlive();
         if (outstanding > 0) {
-          if (Date.now() - this.#realStart > this.#maxRealMs) {
+          if (Date.now() - this.#realStart - this.#idleWaitMs > this.#maxRealMs) {
             stop = "real-time-limit";
             break;
           }
+          const waitedFrom = Date.now();
           await new Promise((resolve) => {
             setTimeout(resolve, this.#keepAlivePollMs);
           });
+          // Waiting for the outside world is not the program working, so it does not count against the runaway guard. Without
+          // this, every interactive program died five seconds after asking its first question.
+          this.#idleWaitMs += Date.now() - waitedFrom;
           continue;
         }
         break;
@@ -231,6 +260,7 @@ export class Scheduler {
       stop,
       virtualElapsedMs: this.#virtual,
       realElapsedMs: Date.now() - this.#realStart,
+      idleMs: this.#idleWaitMs,
       callbacks: this.#callbacks,
       deferred: this.#queue.length,
       intervalsTruncated: this.#intervalsTruncated,
@@ -249,6 +279,10 @@ export class Scheduler {
     let stop: SchedulerStop = "queue-empty";
 
     while (true) {
+      if (this.#aborted) {
+        stop = "aborted";
+        break;
+      }
       const next = this.#earliest();
       if (next === undefined) {
         stop = "queue-empty";
@@ -275,7 +309,7 @@ export class Scheduler {
         stop = "callback-limit";
         break;
       }
-      if (Date.now() - this.#realStart > this.#maxRealMs) {
+      if (Date.now() - this.#realStart - this.#idleWaitMs > this.#maxRealMs) {
         stop = "real-time-limit";
         break;
       }
@@ -324,6 +358,7 @@ export class Scheduler {
         stop: "queue-empty",
         virtualElapsedMs: this.#virtual,
         realElapsedMs: 0,
+      idleMs: 0,
         callbacks: 0,
         deferred: this.#queue.length,
         intervalsTruncated: this.#intervalsTruncated,
