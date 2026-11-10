@@ -384,6 +384,11 @@ button.primary {
   color: var(--err);
 }
 
+/* Another tab changed something here. Not an error: nothing was lost on this side, but the view changed underneath the user. */
+#save-state.notice {
+  color: var(--warn);
+}
+
 /* Raw terminal mode: the program owns the keyboard, so the line prompt steps aside. */
 /* `display: flex` beats the `hidden` attribute's default, so a hidden pane would still paint. Hiding has to be explicit. */
 #raw-pane[hidden] {

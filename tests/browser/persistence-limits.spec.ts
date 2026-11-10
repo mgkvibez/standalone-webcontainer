@@ -91,49 +91,126 @@ test("surfaces a save failure instead of dropping the project silently", async (
   });
 });
 
-test("measures what two tabs do to each other", async ({ browser }) => {
-  // ONE context, two pages. `browser.newPage()` would give each page its own context and therefore its own storage, which makes the
-  // first version of this test measure nothing at all: two isolated tabs agreeing perfectly.
+/**
+ * The two-tab behaviour AFTER ADR-0017.
+ *
+ * This test used to measure silent loss: tab B rewrote the whole map from its own stale copy and tab A's project vanished from
+ * storage. Those numbers are kept in docs/audit/persistence-limits.md as the reason for the change. What is asserted now is the
+ * behaviour the change was for, because a test that only prints a bad outcome does not stop it coming back.
+ */
+test("a project one tab creates reaches the other, and neither loses anything", async ({ browser }) => {
+  // ONE context, two pages: `browser.newPage()` would give each page its own storage and the tabs would agree perfectly while
+  // sharing nothing (that mistake is recorded in the audit doc).
   const context = await browser.newContext();
   const first = await context.newPage();
   await boot(first);
-
-  // A second tab, opened before anything changes, so it holds a copy of the state from that moment.
   const second = await context.newPage();
   await boot(second);
 
-  // Tab A creates a project. Tab B knows nothing about it.
   first.on("dialog", (dialog) => void dialog.accept("made in tab A"));
   await first.click("#new-project");
   await expect(first.locator("#project-select")).toContainText("made in tab A");
 
-  // The hazard is a STALE VIEW, not a stale store: localStorage is shared, but tab B keeps its own copy of the map in memory and
-  // only reads storage at boot. So B's picker does not offer A's project while storage already contains it.
-  const bOffersA = ((await second.locator("#project-select").textContent()) ?? "").includes("made in tab A");
+  // The storage event carries it: tab B was holding a copy from before the change.
+  await expect(second.locator("#project-select")).toContainText("made in tab A");
+  await expect(second.locator("#save-state")).toHaveText(/added in another tab/);
 
-  // Tab B now saves its own state, which is the whole map as B remembers it.
+  // Now the other tab saves too. Under the old layout this is where A's project disappeared.
   second.on("dialog", (dialog) => void dialog.accept("made in tab B"));
   await second.click("#new-project");
-  // Proof the second tab really saved, so a dialog that silently returned null cannot look like a tab-collision result.
   await expect(second.locator("#project-select")).toContainText("made in tab B");
 
-  const after = await first.evaluate(() => {
-    const raw = localStorage.getItem("swc.projects.v1") ?? "{}";
-    const parsed = JSON.parse(raw) as { projects?: { name?: string }[] };
-    return (parsed.projects ?? []).map((project) => project.name ?? "");
+  const names = await first.evaluate(() => {
+    const raw = localStorage.getItem("swc.projects.v2.index") ?? "{}";
+    const index = JSON.parse(raw) as { order?: string[] };
+    return (index.order ?? []).map((id) => {
+      const record = JSON.parse(localStorage.getItem(`swc.projects.v2.project.${id}`) ?? "{}") as {
+        project?: { name?: string };
+      };
+      return record.project?.name ?? "";
+    });
   });
+  console.log(`names in storage after both tabs saved: ${JSON.stringify(names)}`);
 
-  console.log(
-    `tab B offered tab A's project: ${bOffersA}; names in storage after B saved: ${JSON.stringify(after)}`,
-  );
-
-  // Measured, not endorsed: B saves the whole map as it remembers it, so A's project is dropped from storage without a warning to
-  // either tab. The numbers go in the report; "it is lost" is deliberately NOT asserted, because pinning it as a passing
-  // expectation would freeze a defect as the contract.
-  expect(bOffersA).toBe(false);
-  // What must hold either way: storage stays parseable and holds a project, so a tab collision degrades rather than bricks.
-  expect(after.length).toBeGreaterThan(0);
-  expect(after).toContain("made in tab B");
+  // Both survive, which is the whole point: a save costs one project rather than the whole map.
+  expect(names).toContain("made in tab A");
+  expect(names).toContain("made in tab B");
+  await expect(first.locator("#project-select")).toContainText("made in tab B");
 
   await context.close();
+});
+
+test("an edit to the same project in another tab is adopted and reported, not silently overwritten", async ({ browser }) => {
+  const context = await browser.newContext();
+  const first = await context.newPage();
+  await boot(first);
+  const second = await context.newPage();
+  await boot(second);
+
+  // Each tab edits the SAME project through the rename path, which is the realistic collision.
+  first.on("dialog", (dialog) => void dialog.accept("renamed in tab A"));
+  await first.click("#rename-project");
+  await expect(second.locator("#project-select")).toContainText("renamed in tab A");
+
+  // Last write wins per project, which is the documented rule; the part that matters is that the other tab is told.
+  await expect(second.locator("#save-state")).toHaveText(/changed in another tab/);
+
+  // Both tabs now show the same name, so they cannot drift apart while both stay open.
+  await expect(first.locator("#project-select")).toContainText("renamed in tab A");
+  await expect(second.locator("#project-select")).toContainText("renamed in tab A");
+
+  await context.close();
+});
+
+test("migrates a workspace saved under the old single key, and keeps the projects", async ({ page }) => {
+  await page.goto("/");
+  // Seed the legacy layout exactly as an existing user would have it, then reload so the app boots against it.
+  await page.evaluate(() => {
+    localStorage.clear();
+    localStorage.setItem(
+      "swc.projects.v1",
+      JSON.stringify({
+        version: 1,
+        activeId: "project-2",
+        projects: [
+          {
+            id: "project-1",
+            previewId: "a".repeat(32),
+            name: "old one",
+            files: { "/index.js": 'console.log("from the old layout");\n' },
+            dirs: [],
+            updatedAt: 1,
+          },
+          {
+            id: "project-2",
+            previewId: "b".repeat(32),
+            name: "old two",
+            files: { "/index.js": 'console.log("second");\n' },
+            dirs: [],
+            updatedAt: 2,
+          },
+        ],
+      }),
+    );
+  });
+  await page.reload();
+
+  // Both projects survive the migration, and the one that was active is still active.
+  await expect(page.locator("#project-select")).toContainText("old one");
+  await expect(page.locator("#project-select")).toContainText("old two");
+  await expect(page.locator("#project-select")).toHaveValue("project-2");
+
+  // The new layout is what is on disk now, and the legacy key is gone rather than left to be migrated twice.
+  const migrated = await page.evaluate(() => ({
+    legacy: localStorage.getItem("swc.projects.v1"),
+    index: localStorage.getItem("swc.projects.v2.index"),
+    second: localStorage.getItem("swc.projects.v2.project.project-2"),
+  }));
+  expect(migrated.legacy).toBeNull();
+  expect(migrated.index).toContain("project-2");
+  expect(migrated.second).toContain("second");
+
+  // The migrated project still runs: migration that loads but breaks execution would be worse than no migration.
+  await page.click("#run-file");
+  await expect(page.locator("#scrollback")).toContainText("second", { timeout: 20_000 });
 });

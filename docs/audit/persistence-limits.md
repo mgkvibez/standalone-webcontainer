@@ -61,6 +61,21 @@ tab. Tab A still shows the project in its own memory, so from A's side nothing a
 
 This is the last-write-wins consequence of "the whole map is one key", not a bug in any single function.
 
+## Outcome (same day): ADR-0017
+
+The owner chose **one key per project plus a `storage` listener** (ADR-0017). The measurements above are kept as written, because a
+decision record should show what it was decided against; this section states what changed and how each finding now reads.
+
+| Finding | After ADR-0017 | Test |
+|---|---|---|
+| A save rewrote every project | A save rewrites the changed project and the small index only | unit: write counts per key |
+| ~4.94 M chars capped the whole workspace | The ceiling is now per project: one large project no longer costs the others | measurement unchanged, blast radius narrowed |
+| Two tabs silently deleted each other's projects | A change reaches the other tab, which adopts it and says `changed in another tab`; both projects survive concurrent saves | browser: two tabs converging |
+| A failed save leaves memory ahead of storage | Unchanged, and still reported. A project larger than the ceiling still fails loudly | browser: quota fill test |
+
+The browser spec now asserts the fixed behaviour (a project created in one tab appears in the other; a same-project edit is adopted
+and announced) instead of printing a loss, and it also migrates a real v1 workspace and runs a program afterwards.
+
 ## What a fix has to address
 
 Any of these must handle: per-project granularity (so a save is not a whole-map rewrite), a cross-tab channel, and the fact that
