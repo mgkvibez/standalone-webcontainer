@@ -13,6 +13,35 @@ class MemoryStorage implements StorageLike {
   removeItem(key: string): void { this.values.delete(key); }
 }
 
+/**
+ * Storage that lets a test be the other tab: when armed, the next index write is followed by a whole-list write from a tab whose
+ * view predates it, which is the interleaving a read-then-write cannot prevent on its own.
+ */
+class RivalStorage extends MemoryStorage {
+  readonly rivalId = "project-0123456789abcdef0123456789abcdef";
+  #armed: string | null = null;
+
+  armRival(name: string): void {
+    this.#armed = name;
+    this.setItem(projectKey(this.rivalId), JSON.stringify({
+      version: 2,
+      project: { id: this.rivalId, previewId: "b".repeat(32), name, files: {}, dirs: [], updatedAt: 1 },
+    }));
+  }
+
+  override setItem(key: string, value: string): void {
+    super.setItem(key, value);
+    if (key !== INDEX_KEY || this.#armed === null) return;
+    const name = this.#armed;
+    this.#armed = null;
+    // The stale tab's write: its own order, which does not know about the project that was just saved.
+    const stale = JSON.parse(value) as { activeId: string; order: string[] };
+    const order = stale.order.filter((id) => id !== this.rivalId).slice(0, 1);
+    super.setItem(INDEX_KEY, JSON.stringify({ version: 2, activeId: order[0], order: [...order, this.rivalId] }));
+    void name;
+  }
+}
+
 /** The preview ids as they actually sit in storage under the v2 layout, in index order. */
 const readStoredPreviewIds = (storage: StorageLike): string[] => {
   const index = JSON.parse(storage.getItem(INDEX_KEY) ?? "{}") as { order?: string[] };
@@ -97,6 +126,35 @@ describe("ProjectStore persistence layout (ADR-0017)", () => {
 
     expect(storage.getItem(projectKey(doomed.id))).toBeNull();
     expect(JSON.parse(storage.getItem(INDEX_KEY) ?? "{}").order).toEqual([store.projects()[0]!.id]);
+  });
+
+  it("removes the record of a project deleted in a later session, so its quota is actually freed", () => {
+    const storage = new MemoryStorage();
+    const first = loadWith(storage, 2);
+    const doomed = first.projects()[1]!;
+
+    // A different session, so this store never wrote that record itself. The old deletion loop walked what this store had written,
+    // which is empty after a load, so the record stayed on disk forever and the quota it held was never freed.
+    const later = ProjectStore.load(storage);
+    later.remove(doomed.id);
+
+    expect(storage.getItem(projectKey(doomed.id))).toBeNull();
+    expect(JSON.parse(storage.getItem(INDEX_KEY) ?? "{}").order).not.toContain(doomed.id);
+  });
+
+  it("puts back a project the arriving list had lost, instead of dropping it", () => {
+    const storage = new MemoryStorage();
+    const mine = loadWith(storage, 2);
+    const kept = mine.projects()[1]!;
+
+    // A stale save from another tab: its list does not name this project, but this project's own record is still on disk. Absence
+    // from the list is not a deletion; the missing record is, and this one is present.
+    storage.setItem(INDEX_KEY, JSON.stringify({ version: 2, activeId: mine.projects()[0]!.id, order: [mine.projects()[0]!.id] }));
+
+    expect(mine.handleExternalChange(INDEX_KEY)).toBe(true);
+    expect(mine.projects().map((project) => project.id)).toContain(kept.id);
+    expect(mine.lastNotice).toMatch(/restored/);
+    expect(JSON.parse(storage.getItem(INDEX_KEY) ?? "{}").order).toContain(kept.id);
   });
 
   it("reloads the projects and the selection from the v2 layout", () => {
@@ -187,15 +245,76 @@ describe("ProjectStore persistence layout (ADR-0017)", () => {
     expect(mine.projects().length).toBeGreaterThan(0);
   });
 
-  it("keeps a project number free by looking at the ids present, not at how many there are", () => {
+  it("mints an id no other project has, even after a removal has freed a number", () => {
     const storage = new MemoryStorage();
     const store = loadWith(storage, 3);
     store.remove(store.projects()[1]!.id);
     const created = store.create("after removal");
 
-    // Counting would have produced project-3 here, which already exists, overwriting that project's key.
+    // A numbered id derived from what this tab can see was the defect: two tabs in the same instant both chose the free number,
+    // and the later write replaced the earlier project's key. Ids are random now, so a number nothing can see cannot be reused.
     const ids = store.projects().map((project) => project.id);
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).toContain(created.id);
+    expect(created.id).toMatch(/^project-[a-f0-9]{32}$/);
+  });
+
+  it("gives an unnamed project the first free default name", () => {
+    const storage = new MemoryStorage();
+    const store = loadWith(storage, 1);
+    expect(store.create("").name).toBe("project 1");
+    expect(store.create("").name).toBe("project 2");
+    // An empty name must not produce a duplicate of one already in use, which is what a raw count would do after a rename.
+    store.renameProject(store.projects()[1]!.id, "project 2");
+    expect(store.create("").name).toBe("project 1");
+  });
+});
+
+describe("ProjectStore two tabs creating at the same instant", () => {
+  const loadWith = (storage: StorageLike, count: number): ProjectStore => {
+    const store = ProjectStore.load(storage);
+    for (let index = 1; index < count; index += 1) store.create(`project ${index + 1}`);
+    return store;
+  };
+
+  /**
+   * The failure this pins: a tab holds a stale list, creates a project, and writes the index, which is one key naming every
+   * project. Before the fix that write replaced the whole order with one that omitted the project the other tab had just made,
+   * so that project became an orphaned key: still on disk, named by nothing, gone on the next load.
+   */
+  it("keeps both projects when each tab creates from a list that predates the other", () => {
+    const storage = new MemoryStorage();
+    const tabA = loadWith(storage, 1);
+    // Loaded BEFORE tab A creates anything, which is exactly the stale view the storage event has not yet corrected.
+    const tabB = ProjectStore.load(storage);
+
+    const fromA = tabA.create("from tab A");
+    const fromB = tabB.create("from tab B");
+
+    const order = JSON.parse(storage.getItem(INDEX_KEY) ?? "{}").order as string[];
+    expect(storage.getItem(projectKey(fromA.id))).not.toBeNull();
+    expect(storage.getItem(projectKey(fromB.id))).not.toBeNull();
+    expect(order).toContain(fromA.id);
+    expect(order).toContain(fromB.id);
+
+    // And the next load sees both, which is the claim that matters: nothing was orphaned.
+    const reloaded = ProjectStore.load(storage);
+    expect(reloaded.projects().map((project) => project.name)).toEqual(expect.arrayContaining(["from tab A", "from tab B"]));
+    expect(tabB.lastNotice ?? tabA.lastNotice).toMatch(/added in another tab/);
+  });
+
+  it("repairs the list when another tab writes the index after this tab did", () => {
+    const storage = new RivalStorage();
+    const store = loadWith(storage, 1);
+    // Armed here: the next index write is followed by a stale tab's whole-list write, which omits the project this tab is saving.
+    storage.armRival("rival project");
+
+    const mine = store.create("mine");
+
+    const order = JSON.parse(storage.getItem(INDEX_KEY) ?? "{}").order as string[];
+    expect(order).toContain(mine.id);
+    expect(order).toContain(storage.rivalId);
+    expect(storage.getItem(projectKey(storage.rivalId))).not.toBeNull();
+    expect(store.lastError).toBeNull();
   });
 });

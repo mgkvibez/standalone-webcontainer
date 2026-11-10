@@ -72,6 +72,7 @@ decision record should show what it was decided against; this section states wha
 | ~4.94 M chars capped the whole workspace | The ceiling is now per project: one large project no longer costs the others | measurement unchanged, blast radius narrowed |
 | Two tabs silently deleted each other's projects | A change reaches the other tab, which adopts it and says `changed in another tab`; both projects survive concurrent saves | browser: two tabs converging |
 | A failed save leaves memory ahead of storage | Unchanged, and still reported. A project larger than the ceiling still fails loudly | browser: quota fill test |
+| Two tabs creating a project at the same instant still lost one | Closed the same day: random ids, a union index write, and a repair when an arriving list omits a live project. This was the residual the ADR had accepted, and closing it found two more defects (see the ADR-0017 amendment) | browser: "two tabs creating at the same instant" (asserts convergence, because the repair is driven by the asynchronous event) |
 
 The browser spec now asserts the fixed behaviour (a project created in one tab appears in the other; a same-project edit is adopted
 and announced) instead of printing a loss, and it also migrates a real v1 workspace and runs a program afterwards.
