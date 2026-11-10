@@ -148,8 +148,14 @@ export function createWorkspace(options: WorkspaceOptions): Workspace {
   };
 
   const markSaved = (): void => {
-    saveState.textContent = store.lastError ?? "saved";
-    saveState.className = store.lastError === null ? "muted" : "error";
+    // A change from another tab is reported in the same place as a save, because it is the same question: is what I am looking at
+    // what is stored? "saved" would be a lie while another tab has just changed a project here.
+    saveState.textContent = store.lastError ?? store.lastNotice ?? "saved";
+    saveState.className = store.lastError !== null
+      ? "error"
+      : store.lastNotice !== null
+      ? "notice"
+      : "muted";
   };
 
   const scheduleSave = (): void => {
@@ -595,6 +601,26 @@ export function createWorkspace(options: WorkspaceOptions): Workspace {
   if (first !== undefined) openFile(first);
   refresh();
   commandInput.focus();
+
+  // Another tab changed storage. Reconcile, then re-render.
+  //
+  // Without this listener the measured failure was silent data loss: each tab held the whole map, read storage only at boot, and
+  // rewrote it from its own stale copy, so the second tab to save deleted the first tab's project with no notice to either
+  // (docs/audit/persistence-limits.md). ADR-0017 splits the map per project and adds this listener, so a change now arrives here
+  // instead of being overwritten.
+  window.addEventListener("storage", (event) => {
+    const wasActive = store.activeId();
+    if (!store.handleExternalChange(event.key)) return;
+
+    // If this tab's project was the one removed, the editor is showing a project that no longer exists. Fall back to "no file
+    // open" rather than trying to keep a file from a project whose files are gone.
+    if (store.activeId() !== wasActive) {
+      openPath = null;
+      openFileLabel.textContent = "no file open";
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "" } });
+    }
+    refresh();
+  });
 
   return {
     refresh,
