@@ -107,3 +107,36 @@ ours by nature: fd 1 is the process's stdout, which this runtime already owns. T
 wasm host `fs.writeSync`/`fs.write` bound to the running program's stdout and stderr, then re-run the same measurement.
 
 `docs` note: `fixture-01` is untouched and still red. Nothing here classifies it.
+
+## The global object, measured twice
+
+The first run inside the runtime did not fail in esbuild, it failed in the **scope** the Go runtime was given:
+
+```
+panic: syscall/js: call of Value.Invoke on undefined
+  syscall/js.Value.New -> syscall.Write(0x1, ...) -> main.runService
+```
+
+`Value.New` is the JS `Object` constructor reached through the Go runtime's global. The in-thread service assembles that global by copying
+`self`'s properties into a fresh object, so a `self` carrying eight timers yields a world with no `Object` in it. Reproduced exactly, outside
+our code, in plain Node:
+
+| `self` given to `esbuild-wasm` | result |
+|---|---|
+| the eight-global object our runtime was lending | `panic: syscall/js: call of Value.Invoke on undefined` |
+| the realm's real global object | `let x = 1;` |
+
+So the runtime now lends a described realm surface (`src/runtime/realm-globals.ts`): `Object`, `Function`, `Array`, the error constructors, the
+binary-data types, `Math`, `JSON`, `Reflect`, `Promise`, `Map`/`Set`, `URL`, `atob`/`btoa`, `structuredClone`, `queueMicrotask`, and the web
+primitives already relied on. `self` is that surface merged with what the runtime owns, which is what a browser's global object is. The list is
+curated on purpose: what is here is what a program may see, and Node-only globals stay absent.
+
+## Where it stops now
+
+With the realm surface in place the panic is gone and the service boots, but `initialize()`'s promise **never settles**: the run ends at ~100 ms
+with exit 0, no stdout and no stderr. Measured against the obvious explanation by appending a chain of 60 timers to the program: identical
+result, so it is not the loop emptying while work is pending, it is the Go service's readiness signal never arriving through our scheduler.
+
+That is our defect, not esbuild's: the service drives itself with `setTimeout` and microtask turns, and the virtual clock collapses that
+interleaving. Next step is a differential case for it (`npm run diff:event-loop`) rather than a patch: the same program run in real Node against
+the same package gives a transform in 233 ms, so Node is available as the judge.

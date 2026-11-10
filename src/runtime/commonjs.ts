@@ -18,6 +18,7 @@ import { transformEsm } from "./esm.js";
 import type { FsShim } from "../shims/fs.js";
 import { ProcessRefusal } from "./refusal.js";
 import { INIT_HOOKS } from "./init-hooks.js";
+import { createRealmGlobals } from "./realm-globals.js";
 import type { RequireFunction } from "../shims/module.js";
 
 /** Thrown for a resolver failure; `code` matches Node so callers can branch. */
@@ -169,17 +170,6 @@ export interface RuntimeGlobals {
    * name for its global is the one lying about the context it provides.
    */
   readonly self: unknown;
-  /**
-   * Realm-level globals a browser has and a package may build a scope from.
-   *
-   * Injected rather than reached for, so the runtime's global object is one described thing instead of whatever the host happens to have. A
-   * package that assembles its own scope by enumerating `self` (the in-thread service inside `esbuild-wasm` does exactly that) gets a browser's
-   * surface rather than eight timer entries.
-   */
-  readonly WebAssembly: unknown;
-  readonly TextEncoder: unknown;
-  readonly TextDecoder: unknown;
-  readonly crypto: unknown;
 }
 
 export interface RuntimeContext {
@@ -204,10 +194,6 @@ const HOST_GLOBALS: RuntimeGlobals = {
   clearInterval: (handle: Parameters<typeof clearInterval>[0]) => clearInterval(handle),
   setImmediate: (callback: (...args: never[]) => void, ...args: unknown[]) => setTimeout(callback, 0, ...args),
   self: globalThis,
-  WebAssembly,
-  TextEncoder,
-  TextDecoder,
-  crypto: globalThis.crypto,
 };
 
 /**
@@ -251,6 +237,8 @@ export class CommonJsLoader {
   #main: ModuleRecord | null = null;
   /** Entry files whose package needs startup before use: resolved path -> what to run. */
   #initQueue: InitQueue = new Map();
+  /** Computed once: the realm's constructors are the same for every module this loader compiles. */
+  readonly #realmBindings: ReadonlyArray<readonly [string, unknown]> = Object.entries(createRealmGlobals());
   /** Directory -> format, because deciding from `type` means reading package.json on every require otherwise. */
   readonly #formats = new Map<string, "esm" | "cjs">();
 
@@ -518,18 +506,22 @@ export class CommonJsLoader {
       ["clearTimeout", runtimeGlobals.clearTimeout],
       ["clearInterval", runtimeGlobals.clearInterval],
       ["setImmediate", runtimeGlobals.setImmediate],
-      // The browser's own name for its global, and the realm-level constructors a package that builds a scope by enumerating it expects. These
-      // are what makes `esbuild-wasm`'s in-thread service possible; without them it throws `self is not defined` before the first transform.
+      // The browser's own name for its global, and the realm-level constructors a global object is expected to have. Both are load-bearing: the
+      // in-thread service inside `esbuild-wasm` copies `self`'s properties into the scope its Go runtime runs in, and that runtime then reaches
+      // for `Object` through it.
       ["self", runtimeGlobals.self],
-      ["WebAssembly", runtimeGlobals.WebAssembly],
-      ["TextEncoder", runtimeGlobals.TextEncoder],
-      ["TextDecoder", runtimeGlobals.TextDecoder],
-      ["crypto", runtimeGlobals.crypto],
+      ...this.#realmBindings,
     ];
     // For an ES module the transform reports its own lexical bindings, so the answer is a fact rather than an inference from
     // generated text. CommonJS keeps the textual scan, because there is no parse to ask.
     const declared = transformed === undefined ? null : new Set(transformed.topLevelBindings);
-    const base = bindings.filter(([name]) => {
+    const seen = new Set<string>();
+    const unique = bindings.filter(([name]) => {
+      if (seen.has(name)) return false;
+      seen.add(name);
+      return true;
+    });
+    const base = unique.filter(([name]) => {
       if (declared !== null) return !declared.has(name);
       return !declaresOwnBinding(code, name);
     });
