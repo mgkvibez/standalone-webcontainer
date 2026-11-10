@@ -71,13 +71,46 @@ esbuild
  * consequence, and the reason this recorder mirrors the stub's shape instead of inventing one: `self.fs = {}` (and any smaller-than-the-stub object)
  * makes the Go runtime panic at `syscall.init`, while the stub's own object boots fine. The object Go receives is a contract, not a bag of names.
  */
+/**
+ * `--build` runs a real bundle from files on disk and prints what came back.
+ *
+ * It exists because "the build produced no output" is a result the other modes cannot distinguish from a build that never ran: this mode reports the
+ * output file count, the byte length and the full text, or the compiler's own error list.
+ */
+const BUILD = `
+const esbuild = require("esbuild");
+esbuild
+  .build({ entryPoints: ["/app/entry.ts"], bundle: true, write: false, format: "esm" })
+  .then(
+    (result) => {
+      const files = result.outputFiles || [];
+      console.log("BUILD:files=" + files.length + ";bytes=" + files.map((file) => file.text.length).join(","));
+      console.log("TEXT:" + JSON.stringify(files.length === 0 ? "" : files[0].text));
+    },
+    (error) => {
+      const errors = error && error.errors ? error.errors.map((item) => item.text) : [String(error)];
+      console.log("BUILD_FAILED:" + JSON.stringify(errors));
+    },
+  );
+`;
+
 const SYSCALLS = `
 const seen = new Map();
+const trace = [];
+let traceOn = false;
 function note(name, args) {
   const entry = seen.get(name) || { calls: 0, shapes: new Set() };
   entry.calls += 1;
   entry.shapes.add(args.map((arg) => (typeof arg === "number" ? "number" : typeof arg)).join(","));
   seen.set(name, entry);
+  if (!traceOn) return -1;
+  const shown = args.map((arg) => (typeof arg === "string" ? arg : typeof arg === "number" ? String(arg) : typeof arg));
+  trace.push(name + "(" + shown.join(",") + ")");
+  return trace.length - 1;
+}
+function outcome(token, label, error) {
+  if (!traceOn || token < 0) return;
+  trace[token] = trace[token] + " -> " + (error ? "error " + (error.code || error.message) : label);
 }
 const enosys = () => {
   const error = new Error("not implemented");
@@ -101,36 +134,147 @@ const fs = {
     return buf.length;
   },
   write(fd, buf, offset, length, position, callback) {
-    note("write", Array.prototype.slice.call(arguments));
+    const token = note("write", Array.prototype.slice.call(arguments));
     if (offset !== 0 || length !== buf.length || position !== null) {
       callback(enosys());
       return;
     }
     const n = this.writeSync(fd, buf);
+    outcome(token, n + " bytes to fd " + fd);
     callback(null, n);
   },
 };
-// Filesystem members delegate to the runtime's own fs shim, which is the point of the measurement: if the Go host only ever asks for the async
-// forms, then the host object is a thin adapter over a shim that already exists, and the fd layer nobody needs never has to be built. (Backticks are
-// banned in this string: it is itself a template literal.)
+// The members a real build needs, implemented just far enough that the build can run to completion: the point is to hear the NEXT requirement from
+// the Go host rather than to guess it. Everything else stays ENOSYS, because mirroring the stub's shape is what makes it boot at all.
+// (Backticks are banned in this string: it is itself a template literal.)
+const shim0 = require("fs");
+let traceRequested = false;
+try { traceRequested = shim0.existsSync("/app/.trace"); } catch (error) { traceRequested = false; }
+traceOn = traceRequested;
 const shim = require("fs");
-for (const name of ["chmod", "chown", "close", "fchmod", "fchown", "fstat", "fsync", "ftruncate", "lchown", "link", "lstat", "mkdir",
-  "open", "read", "readdir", "readlink", "rename", "rmdir", "stat", "symlink", "truncate", "unlink", "utimes"]) {
+const handles = new Map();
+let nextFd = 3;
+const toBytes = (value) => (typeof value === "string" ? new TextEncoder().encode(value) : value);
+// Node's Stats shape, field for field: Go side setStat reads dev, ino, mode, nlink, uid, gid, rdev, size, blksize, blocks and the three *Ms values
+// with .Int(), so a partial object does not degrade, it panics. mode is the load-bearing one: os.FileInfo.IsDir is mode&S_IFMT == S_IFDIR.
+const statsOf = (path) => {
+  const stats = shim.statSync(path);
+  const directory = stats.isDirectory();
+  return {
+    dev: 1,
+    ino: 1,
+    mode: (directory ? 0o040000 : 0o100000) | 0o644,
+    nlink: 1,
+    uid: 0,
+    gid: 0,
+    rdev: 0,
+    size: stats.size,
+    blksize: 4096,
+    blocks: Math.ceil(stats.size / 512),
+    atimeMs: stats.mtimeMs,
+    mtimeMs: stats.mtimeMs,
+    ctimeMs: stats.mtimeMs,
+    birthtimeMs: stats.birthtimeMs,
+    isDirectory: () => directory,
+    isFile: () => !directory,
+  };
+};
+// Go's js Open is not POSIX open: fs_js.go calls open, then fstat(fd), and only asks for readdir when fstat says directory. So a directory must open.
+fs.open = function (path, flags, mode, callback) {
+  const token = note("open", Array.prototype.slice.call(arguments));
+  try {
+    const stats = shim.statSync(path);
+    const fd = nextFd;
+    nextFd += 1;
+    handles.set(fd, stats.isDirectory()
+      ? { directory: true, path: path, position: 0 }
+      : { bytes: toBytes(shim.readFileSync(path)), path: path, position: 0 });
+    outcome(token, "fd " + fd + (stats.isDirectory() ? " (directory)" : ""));
+    callback(null, fd);
+  } catch (error) {
+    outcome(token, "", error);
+    callback(error);
+  }
+};
+fs.fstat = function (fd, callback) {
+  const token = note("fstat", Array.prototype.slice.call(arguments));
+  const handle = handles.get(fd);
+  if (handle === undefined) { const missing = enosys(); outcome(token, "", missing); callback(missing); return; }
+  try {
+    const stats = statsOf(handle.path);
+    outcome(token, stats.isDirectory() ? "directory" : "file");
+    callback(null, stats);
+  } catch (error) {
+    outcome(token, "", error);
+    callback(error);
+  }
+};
+fs.read = function (fd, buffer, offset, length, position, callback) {
+  const token = note("read", Array.prototype.slice.call(arguments));
+  const handle = handles.get(fd);
+  if (handle === undefined || handle.bytes === undefined) { const missing = enosys(); outcome(token, "", missing); callback(missing); return; }
+  const from = position === null || position === undefined ? handle.position : position;
+  const slice = handle.bytes.subarray(from, Math.min(from + length, handle.bytes.length));
+  buffer.set(slice, offset);
+  if (position === null || position === undefined) handle.position = from + slice.length;
+  outcome(token, slice.length + " bytes");
+  callback(null, slice.length, buffer);
+};
+fs.close = function (fd, callback) {
+  const token = note("close", Array.prototype.slice.call(arguments));
+  handles.delete(fd);
+  outcome(token, "closed");
+  callback(null);
+};
+fs.stat = function (path, callback) {
+  const token = note("stat", Array.prototype.slice.call(arguments));
+  try {
+    const stats = statsOf(path);
+    outcome(token, stats.isDirectory() ? "directory" : "file");
+    callback(null, stats);
+  } catch (error) {
+    outcome(token, "", error);
+    callback(error);
+  }
+};
+fs.lstat = function (path, callback) {
+  const token = note("lstat", Array.prototype.slice.call(arguments));
+  try {
+    const stats = statsOf(path);
+    outcome(token, stats.isDirectory() ? "directory" : "file");
+    callback(null, stats);
+  } catch (error) {
+    outcome(token, "", error);
+    callback(error);
+  }
+};
+fs.readdir = function (path, options, callback) {
+  const token = note("readdir", Array.prototype.slice.call(arguments));
+  const done = typeof options === "function" ? options : callback;
+  try {
+    const names = shim.readdirSync(path);
+    outcome(token, names.length + " entries");
+    done(null, names);
+  } catch (error) {
+    outcome(token, "", error);
+    done(error);
+  }
+};
+for (const name of ["chmod", "chown", "fchmod", "fchown", "fsync", "ftruncate", "lchown", "link", "mkdir",
+  "readlink", "rename", "rmdir", "symlink", "truncate", "unlink", "utimes"]) {
   fs[name] = function () {
     const args = Array.prototype.slice.call(arguments);
-    note(name, args);
-    const callback = args[args.length - 1];
-    if (typeof shim[name] === "function") {
-      shim[name].apply(shim, args);
-      return;
-    }
-    callback(name === "fsync" ? null : enosys());
+    const token = note(name, args);
+    const missing = enosys();
+    outcome(token, "", missing);
+    args[args.length - 1](missing);
   };
 }
 self.fs = fs;
 const report = () => {
   const rows = Array.from(seen.entries()).sort((a, b) => b[1].calls - a[1].calls);
   console.log("SYSCALLS:" + rows.map(([name, entry]) => name + " x" + entry.calls + " (" + Array.from(entry.shapes).join(" | ") + ")").join("; "));
+  if (traceOn) for (const line of trace) console.log("TRACE:" + line);
 };
 
 const esbuild = require("esbuild");
@@ -141,7 +285,13 @@ esbuild
 setTimeout(report, 800);
 `;
 
-const PROGRAM = process.argv.includes("--syscalls") ? SYSCALLS : process.argv.includes("--plugin") ? PLUGIN : TRANSFORM;
+const PROGRAM = process.argv.includes("--syscalls")
+  ? SYSCALLS
+  : process.argv.includes("--build")
+    ? BUILD
+    : process.argv.includes("--plugin")
+      ? PLUGIN
+      : TRANSFORM;
 
 const heapMb = (): number => Math.round((process.memoryUsage().heapUsed / 1024 / 1024) * 10) / 10;
 const now = (): number => Number(process.hrtime.bigint() / 1000000n);
@@ -174,6 +324,8 @@ async function main(): Promise<void> {
   console.log(`esbuild.wasm in the VFS: ${(wasmBytes / 1024 / 1024).toFixed(1)} MB`);
 
   vfs.writeFileSync("/app/main.js", PROGRAM);
+  // The recorder is a program, and a program here is not handed this tool's argv, so the request crosses as a file it can see.
+  if (process.argv.includes("--trace")) vfs.writeFileSync("/app/.trace", "");
   // The program under measurement reads a real file through the host object, because a build that never touches the filesystem measures nothing.
   vfs.writeFileSync("/app/entry.ts", 'export const greeting: string = "hi";');
   const runStarted = now();
@@ -187,7 +339,13 @@ async function main(): Promise<void> {
 
   // Two modes, two expectations, and neither is "some output appeared": the transform must have compiled the type away, and the plugin build must
   // have taken the virtual module through both of its callbacks. Checking for the wrong one made this tool report a success as a failure.
-  if (process.argv.includes("--syscalls")) {
+  if (process.argv.includes("--build")) {
+    const produced = /BUILD:files=(\d+);bytes=([0-9,]+)/.exec(result.stdout);
+    if (produced === null || produced[1] === "0") {
+      console.error("FAILED: the build produced no output file");
+      process.exitCode = 1;
+    }
+  } else if (process.argv.includes("--syscalls")) {
     if (!result.stdout.includes("SYSCALLS:")) {
       console.error("FAILED: no syscall report");
       process.exitCode = 1;
