@@ -21,14 +21,14 @@ const step = (command: string): FixtureStep => ({
 
 describe("parseStepCommand", () => {
   it("reads a plain install, including npm's aliases", () => {
-    expect(parseStepCommand("npm install")).toEqual({ kind: "install", ci: false, omitDev: false });
-    expect(parseStepCommand("npm i")).toEqual({ kind: "install", ci: false, omitDev: false });
-    expect(parseStepCommand("npm ci")).toEqual({ kind: "install", ci: true, omitDev: false });
+    expect(parseStepCommand("npm install")).toEqual({ kind: "install", ci: false, omitDev: false, manager: "npm" });
+    expect(parseStepCommand("npm i")).toEqual({ kind: "install", ci: false, omitDev: false, manager: "npm" });
+    expect(parseStepCommand("npm ci")).toEqual({ kind: "install", ci: true, omitDev: false, manager: "npm" });
   });
 
   it("treats --production and --omit=dev as the same tree, and refuses contradictory flags", () => {
-    expect(parseStepCommand("npm install --production")).toEqual({ kind: "install", ci: false, omitDev: true });
-    expect(parseStepCommand("npm install --omit=dev")).toEqual({ kind: "install", ci: false, omitDev: true });
+    expect(parseStepCommand("npm install --production")).toEqual({ kind: "install", ci: false, omitDev: true, manager: "npm" });
+    expect(parseStepCommand("npm install --omit=dev")).toEqual({ kind: "install", ci: false, omitDev: true, manager: "npm" });
     const contradiction = parseStepCommand("npm install --production --include=dev");
     expect(contradiction.kind).toBe("invalid");
   });
@@ -388,5 +388,164 @@ describe("createStepExecutor", () => {
     const result = await executor(runtime)(step("node missing.js"), 0);
     expect(result.termination).toBe("error");
     expect(result.detail).toMatch(/Cannot find module/);
+  });
+});
+
+/**
+ * The pnpm profile (Phase 6 R2, D-1 to D-4): a command vocabulary, not an engine.
+ *
+ * Two properties carry the contract. First, a supported pnpm command must carry the mandatory deviation record, because "passed
+ * under a declared profile" and "passed while pretending" are different results. Second, every refusal states the approved
+ * wording rather than a paraphrase, and is classified as a restriction rather than a harness fault, because this boundary is a
+ * decision we made and not a gap someone should file as a bug.
+ */
+describe("the pnpm command vocabulary", () => {
+  const plan = (command: string): ReturnType<typeof parseStepCommand> => parseStepCommand(command);
+
+  it("treats install as the npm install under the profile", () => {
+    const parsed = plan("pnpm install");
+    expect(parsed.kind).toBe("install");
+    if (parsed.kind !== "install") throw new Error("expected install");
+    expect(parsed.manager).toBe("pnpm");
+    expect(parsed.omitDev).toBe(false);
+    expect(parsed.ci).toBe(false);
+  });
+
+  it("accepts both production spellings, as npm does", () => {
+    for (const command of ["pnpm i --prod", "pnpm install --production"]) {
+      const parsed = plan(command);
+      expect(parsed.kind === "install" && parsed.omitDev).toBe(true);
+    }
+  });
+
+  it("runs a script, with arguments forwarded after the separator", () => {
+    expect(plan("pnpm run build -- --port 3000")).toEqual({
+      kind: "run-script",
+      script: "build",
+      args: ["--port", "3000"],
+    });
+    expect(plan("pnpm test")).toEqual({ kind: "run-script", script: "test", args: [] });
+  });
+
+  it("lists scripts when run is given no name, rather than running nothing", () => {
+    expect(plan("pnpm run").kind).toBe("list-scripts");
+  });
+
+  it("runs an installed binary, as pnpm does", () => {
+    expect(plan("pnpm vite build")).toEqual({ kind: "exec", bin: "vite", args: ["build"] });
+  });
+
+  it("leaves npm plans marked as npm, so no deviation is claimed for them", () => {
+    const parsed = plan("npm install");
+    expect(parsed.kind === "install" && parsed.manager).toBe("npm");
+  });
+
+  it("refuses adding a dependency with the approved wording, as a restriction", () => {
+    for (const command of ["pnpm add left-pad", "pnpm install left-pad"]) {
+      const parsed = plan(command);
+      expect(parsed.kind).toBe("invalid");
+      if (parsed.kind !== "invalid") throw new Error("expected refusal");
+      // Verbatim from the contract's D-4 table: operation, intentionality, reason, alternative.
+      expect(parsed.reason).toBe(
+        "pnpm add <pkg>: intentionally not supported: dependency installation is limited to package.json, so a new package cannot be added at run time (instead: declare it in package.json)",
+      );
+      expect(parsed.restriction?.policy).toBe("pnpm-resolution");
+    }
+  });
+
+  it("refuses the other unsupported operations by name, each with an alternative", () => {
+    const refusals = [
+      ["pnpm remove left-pad", /pnpm remove: intentionally not supported/],
+      ["pnpm uninstall left-pad", /pnpm remove: intentionally not supported/],
+      ["pnpm update", /pnpm update: intentionally not supported/],
+      ["pnpm up", /pnpm update: intentionally not supported/],
+      ["pnpm dlx cowsay", /pnpm dlx: intentionally not supported/],
+      ["pnpm store path", /pnpm store: intentionally not supported/],
+      ["pnpm link", /pnpm link: intentionally not supported/],
+      ["pnpm publish", /pnpm publish: intentionally not supported/],
+      ["pnpm patch", /pnpm patch: intentionally not supported/],
+      ["pnpm workspace app test", /pnpm workspace: intentionally not supported/],
+    ] as const;
+    for (const [command, pattern] of refusals) {
+      const parsed = plan(command);
+      expect(parsed.kind).toBe("invalid");
+      if (parsed.kind !== "invalid") throw new Error("expected refusal");
+      expect(parsed.reason).toMatch(pattern);
+      // Every refusal is actionable: it says what to do instead.
+      expect(parsed.reason).toMatch(/\(instead: .+\)$/);
+      expect(parsed.restriction).toBeDefined();
+    }
+  });
+
+  it("refuses a lockfile it cannot verify instead of ignoring it", () => {
+    const parsed = plan("pnpm install --frozen-lockfile");
+    expect(parsed.kind).toBe("invalid");
+    if (parsed.kind !== "invalid") throw new Error("expected refusal");
+    expect(parsed.reason).toContain("pnpm-lock.yaml is not parsed");
+    expect(parsed.reason).toContain("use package-lock.json, which is verified");
+  });
+
+  it("refuses an unlisted flag rather than quietly changing the tree", () => {
+    const parsed = plan("pnpm install --shamefully-hoist");
+    expect(parsed.kind).toBe("invalid");
+    expect(parsed.kind === "invalid" && parsed.reason).toContain("intentionally not supported");
+  });
+});
+
+describe("the pnpm profile in the executor", () => {
+  const scripts = JSON.stringify({ scripts: { build: "node build.js", test: "node test.js" } });
+
+  const runtime = (): StepRuntime & { installs: number } => {
+    const calls = { installs: 0 };
+    return {
+      get installs() {
+        return calls.installs;
+      },
+      async install() {
+        calls.installs += 1;
+        return { packages: [{}], warnings: [], usedLockfile: true };
+      },
+      async run() {
+        return { stdout: "ok\n", stderr: "", exitCode: 0 };
+      },
+      readFileText(path: string) {
+        return path.endsWith("package.json") ? scripts : null;
+      },
+      readDirNames() {
+        return [];
+      },
+    };
+  };
+
+  const executor = (target: StepRuntime): ReturnType<typeof createStepExecutor> =>
+    createStepExecutor({ runtime: target, registry: { packument: async () => ({ versions: {} }) as never, tarball: async () => new Uint8Array() } });
+
+  it("carries the mandatory deviation record on a pnpm install", async () => {
+    const result = await executor(runtime())(step("pnpm install"), 0);
+    expect(result.termination).toBe("ok");
+    // The exact sentence from section 2.3, because it is the difference between a declared profile and a false claim.
+    expect(result.detail).toContain(
+      "pnpm-resolution profile: package.json install, npm-style hoisted node_modules, no pnpm-lock.yaml read or written",
+    );
+  });
+
+  it("does not claim the profile for an npm install", async () => {
+    const result = await executor(runtime())(step("npm install"), 0);
+    expect(result.detail).not.toContain("pnpm-resolution profile");
+  });
+
+  it("lists the scripts and exits 0, as pnpm does", async () => {
+    const result = await executor(runtime())(step("pnpm run"), 0);
+    expect(result.termination).toBe("ok");
+    expect(result.record?.exitCode).toBe(0);
+    expect(result.record?.stdout).toContain("build: node build.js");
+    expect(result.record?.stdout).toContain("test: node test.js");
+  });
+
+  it("reports a refused pnpm command as restricted, not as a bug of ours", async () => {
+    const result = await executor(runtime())(step("pnpm add left-pad"), 0);
+    expect(result.termination).toBe("restricted");
+    expect(result.detail).toContain("intentionally not supported");
+    expect(result.restriction?.policy).toBe("pnpm-resolution");
   });
 });
