@@ -6,7 +6,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "builtin command completed: added 68 package(s) from registry.npmjs.org",
-    "elapsedMs": 2161,
+    "elapsedMs": 2199,
     "record": {
       "index": 0,
       "exitCode": 0,
@@ -20,13 +20,13 @@
     "command": "node server.mjs",
     "state": "ran",
     "termination": "ok",
-    "detail": "process 1 exited with exit 1",
-    "elapsedMs": 49,
+    "detail": "process 1 exited 0 and left a server listening on port(s) 3200",
+    "elapsedMs": 155,
     "record": {
       "index": 1,
-      "exitCode": 1,
-      "stdout": "",
-      "stderr": "Error: Cannot find module 'node:zlib' from '/node_modules/body-parser/lib'\n    at CommonJsLoader.resolve (/app/conversations/6aa922ace403c62373d6c125/standalone-webcontainer/src/runtime/commonjs.ts:185:11)\n    at CommonJsLoader.require (/app/conversations/6aa922ace403c62373d6c125/standalone-webcontainer/src/runtime/commonjs.ts:349:29)\n    at requireFromHere (/app/conversations/6aa922ace403c62373d6c125/standalone-webcontainer/src/runtime/commonjs.ts:306:66)\n    at Object.eval (/node_modules/body-parser/lib/read.js:20:14)\n    at CommonJsLoader.loadFile (/app/conversations/6aa922ace403c62373d6c125/standalone-webcontainer/src/runtime/commonjs.ts:317:13)\n    at CommonJsLoader.require (/app/conversations/6aa922ace403c62373d6c125/standalone-webcontainer/src/runtime/commonjs.ts:351:17)\n    at requireFromHere (/app/conversations/6aa922ace403c62373d6c125/standalone-webcontainer/src/runtime/commonjs.ts:306:66)\n    at Object.eval (/node_modules/body-parser/lib/types/json.js:18:14)\n    at CommonJsLoader.loadFile (/app/conversations/6aa922ace403c62373d6c125/standalone-webcontainer/src/runtime/commonjs.ts:317:13)\n    at CommonJsLoader.require (/app/conversations/6aa922ace403c62373d6c125/standalone-webcontainer/src/runtime/commonjs.ts:351:17)\n"
+      "exitCode": 0,
+      "stdout": "listening on 3200\n",
+      "stderr": ""
     }
   }
 ]

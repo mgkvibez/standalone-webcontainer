@@ -14,6 +14,8 @@ import { EventEmitter } from "../shims/events.js";
 import {
   createServer,
   IncomingMessage,
+  METHODS,
+  STATUS_CODES,
   Server,
   ServerResponse,
   type RequestListener,
@@ -24,10 +26,20 @@ import { createFsShim, type FsShim } from "../shims/fs.js";
 import { createCountedWatchSource } from "../vfs/watch-iterator.js";
 import { createLocalWatchSource, type WatchableFileSystem } from "../process/local-watch.js";
 import type { WatchSourcePort } from "../vfs/port.js";
-import { Duplex, PassThrough, pipeline, Readable, Transform, Writable } from "../shims/stream.js";
+import { Duplex, PassThrough, pipeline, Readable, Stream, Transform, Writable } from "../shims/stream.js";
 import { path } from "../shims/path.js";
 import { createProcessShim, createSink, ProcessExit, type ProcessShim } from "../shims/process.js";
 import { createTtyShim } from "../shims/tty.js";
+import assertModule from "../shims/assert.js";
+import asyncHooks from "../shims/async-hooks.js";
+import crypto from "../shims/crypto.js";
+import https from "../shims/https.js";
+import net from "../shims/net.js";
+import querystring from "../shims/querystring.js";
+import stringDecoder from "../shims/string-decoder.js";
+import url from "../shims/url.js";
+import util from "../shims/util.js";
+import zlib from "../shims/zlib.js";
 import type { Terminal } from "../terminal/pty.js";
 import { TickQueue } from "./ticks.js";
 import {
@@ -365,14 +377,30 @@ export class InProcessRuntime implements Runtime {
         events: { EventEmitter },
         // ADR-0015's six classes plus pipeline. Real behaviour, not import-only stubs: fixture 4 fails on this import alone,
         // and a stub would turn four honest failures into four unexplained ones.
-        stream: { Readable, Writable, Duplex, Transform, PassThrough, pipeline },
+        // `require("stream")` IS the legacy Stream constructor in Node, with the modern classes attached to it. Packages written
+        // before Readable do `util.inherits(X, Stream)` and `Stream.call(this)`, so the module object itself must be callable.
+        stream: Object.assign(Stream, { Stream, Readable, Writable, Duplex, Transform, PassThrough, pipeline }),
         // Built from THIS run's terminal, so `tty.isatty(1)` answers about the terminal the program actually has rather than a
         // module-level guess. With no terminal every fd answers false, which is what Node reports for a pipe.
         tty: createTtyShim(terminal),
+        // The builtins a real dependency graph requires, found by auditing express's 68 packages rather than by guessing
+        // (tools/npm-audit-builtins.ts). Each is a real implementation or an honest refusal; see the file headers.
+        zlib,
+        util,
+        crypto,
+        querystring,
+        url,
+        string_decoder: stringDecoder,
+        assert: assertModule,
+        net,
+        https,
+        async_hooks: asyncHooks,
         // A per-runtime facade rather than the module itself: `createServer` must bind into THIS runtime's
         // registry and attach to THIS runtime's gateway, or a script's server would listen and never be
         // routable. Exported classes are passed through so `instanceof` still works for user code.
         http: {
+          METHODS,
+          STATUS_CODES,
           createServer: (handler?: RequestListener): Server => {
             const server = createServer(handler, { registry: this.#registry });
             this.#gateway.attach(server);
