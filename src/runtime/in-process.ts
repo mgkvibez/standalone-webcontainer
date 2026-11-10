@@ -35,6 +35,9 @@ import asyncHooks from "../shims/async-hooks.js";
 import crypto from "../shims/crypto.js";
 import https from "../shims/https.js";
 import net from "../shims/net.js";
+import { createModuleShim } from "../shims/module.js";
+import { createOsShim } from "../shims/os.js";
+import { createPerfHooksShim } from "../shims/perf-hooks.js";
 import querystring from "../shims/querystring.js";
 import stringDecoder from "../shims/string-decoder.js";
 import url from "../shims/url.js";
@@ -367,10 +370,18 @@ export class InProcessRuntime implements Runtime {
       cwd,
       ...(counted === undefined ? {} : { watches: counted.source }),
     });
-    const loader = new CommonJsLoader({
+    // One clock instance, because `perf_hooks.performance` and the `performance` global must be the same object: a package that
+    // measures itself would otherwise disagree with the scheduler its timers run on.
+    const virtualPerformance = createVirtualPerformance(scheduler);
+    // Annotated because the builtin table below closes over `loader` to reach `createRequire`, and inference cannot resolve a type
+    // from a value that mentions itself.
+    const loader: CommonJsLoader = new CommonJsLoader({
       fs: fsShim,
       builtins: {
         fs: fsShim,
+        // Node makes these the same object, and vite relies on that shape: `fs.promises.readFile` and `require('fs/promises').readFile`
+        // are called interchangeably across its chunks. One object, so they cannot diverge.
+        "fs/promises": fsShim.promises,
         path,
         process: processShim,
         buffer: { Buffer },
@@ -395,6 +406,16 @@ export class InProcessRuntime implements Runtime {
         net,
         https,
         async_hooks: asyncHooks,
+        // The front-end lane's first two modules, found by the same audit that ordered the express work, now extended to read ESM
+        // specifiers as well: `import { performance } from "node:perf_hooks"` was invisible to a scan that only matched require().
+        perf_hooks: createPerfHooksShim(virtualPerformance),
+        // `createRequire` is what a modern ES module opens with. Both members resolve through the loader rather than duplicating its
+        // table here, and the closures run long after the loader exists, so one source of truth is possible.
+        module: createModuleShim({
+          createRequire: (from) => loader.createRequire(from),
+          builtinNames: () => loader.builtinNames(),
+        }),
+        os: createOsShim({ platform: processShim.platform }),
         // A per-runtime facade rather than the module itself: `createServer` must bind into THIS runtime's
         // registry and attach to THIS runtime's gateway, or a script's server would listen and never be
         // routable. Exported classes are passed through so `instanceof` still works for user code.
@@ -418,7 +439,7 @@ export class InProcessRuntime implements Runtime {
       Buffer,
       globals: {
         Date: createVirtualDate(() => scheduler.now()),
-        performance: createVirtualPerformance(scheduler),
+        performance: virtualPerformance,
         setTimeout: ((fn: (...args: never[]) => void, delay?: number, ...args: unknown[]) =>
           scheduler.setTimeout(fn, delay ?? 0, ...args)) as RuntimeGlobals["setTimeout"],
         setInterval: ((fn: (...args: never[]) => void, delay?: number, ...args: unknown[]) =>
@@ -432,29 +453,53 @@ export class InProcessRuntime implements Runtime {
 
     let capturedRefusal: Refusal | undefined;
 
-    const execute = (): number => {
-      try {
-        loader.loadFile(path.resolve(entryPath));
-        return 0;
-      } catch (error) {
-        if (error instanceof ProcessExit) return error.code;
-        if (error instanceof ProcessRefusal) {
-          // Unhandled: it escaped evaluation, so it terminated the program and the step is a refusal, not a failure.
-          capturedRefusal = error.refusal;
-          stderr.write(`${error.stack ?? error.message}\n`);
-          return 1;
-        }
-        const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
-        stderr.write(`${message}\n`);
+    /** One place decides what an escaped error means, so a synchronous throw and an await rejection report identically. */
+    const programFailure = (error: unknown): number => {
+      if (error instanceof ProcessExit) return error.code;
+      if (error instanceof ProcessRefusal) {
+        // Unhandled: it escaped evaluation, so it terminated the program and the step is a refusal, not a failure.
+        capturedRefusal = error.refusal;
+        stderr.write(`${error.stack ?? error.message}\n`);
         return 1;
+      }
+      const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+      stderr.write(`${message}\n`);
+      return 1;
+    };
+
+    /**
+     * Load the entry module, and report an evaluation that is still in flight.
+     *
+     * A module whose body has top-level await cannot settle inside this call, so the promise comes back to the caller instead of
+     * being dropped. Everything else is finished before `execute` returns, exactly as before.
+     */
+    const execute = (): { code: number; evaluation?: Promise<void> | undefined } => {
+      try {
+        const record = loader.loadFile(path.resolve(entryPath));
+        return { code: 0, evaluation: record.evaluation };
+      } catch (error) {
+        return { code: programFailure(error) };
       }
     };
 
     // The program body, plus the tick drain that Node performs at the end of the turn. The flush is in `finally` so it
     // still runs when the body throws or calls process.exit, both of which leave queued ticks behind.
-    const runBody = (): number => {
+    //
+    // It is async because a top-level-await entry has to be waited for, not because ordinary programs became asynchronous: with
+    // no pending evaluation this function still runs start to finish in one synchronous turn, which is the ordering the
+    // event-loop differential pins.
+    const runBody = async (): Promise<number> => {
       try {
-        return execute();
+        const result = execute();
+        if (result.evaluation !== undefined) {
+          try {
+            await result.evaluation;
+          } catch (error) {
+            // A rejection here is a throw from the module's own body after its first await, so it is the program failing.
+            return programFailure(error);
+          }
+        }
+        return result.code;
       } finally {
         ticks.flushNow();
       }
@@ -470,7 +515,7 @@ export class InProcessRuntime implements Runtime {
       const timeout = new Promise<"timeout">((resolve) => {
         timer = setTimeout(() => resolve("timeout"), options.timeoutMs);
       });
-      const outcome = await Promise.race([Promise.resolve(runBody()), timeout]);
+      const outcome = await Promise.race([runBody(), timeout]);
       if (timer !== undefined) clearTimeout(timer);
       if (outcome === "timeout") {
         timedOut = true;
@@ -479,7 +524,7 @@ export class InProcessRuntime implements Runtime {
         exitCode = outcome;
       }
     } else {
-      exitCode = runBody();
+      exitCode = await runBody();
     }
 
     // The timer queue runs to termination BEFORE the output is read, and before the continuation drain: a callback that

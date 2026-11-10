@@ -187,6 +187,35 @@ export const MODULE_CASES: readonly ModuleCase[] = [
     entry: "main.js",
   },
   {
+    id: "tla-entry-settles",
+    question: "does an entry module that awaits finish before the process is judged?",
+    files: {
+      "main.mjs": "console.log('before');\nawait Promise.resolve();\nconsole.log('after');",
+    },
+    entry: "main.mjs",
+  },
+  {
+    id: "tla-export-through-import",
+    question: "does import() wait for a module whose exports are only set after an await?",
+    files: {
+      "main.mjs": "import('./late.mjs').then((m) => console.log('value=' + m.value));",
+      "late.mjs": "await Promise.resolve();\nexport const value = 'set-after-await';",
+    },
+    entry: "main.mjs",
+  },
+  {
+    id: "require-async-module-shape",
+    question: "what name and code does require() of a top-level-await module produce?",
+    files: {
+      "main.cjs": [
+        ERROR_FIELDS,
+        "try { require('./late.mjs'); } catch (error) { detail('tla', error); }",
+      ].join("\n"),
+      "late.mjs": "await Promise.resolve();\nexport const value = 'set';",
+    },
+    entry: "main.cjs",
+  },
+  {
     id: "require-main-fields",
     question: "does require.main, module.filename and module.id agree with themselves?",
     files: {
