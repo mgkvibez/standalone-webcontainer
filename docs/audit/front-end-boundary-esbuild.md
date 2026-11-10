@@ -317,6 +317,37 @@ optimizer's route and the only reachable one.
 | jsx automatic runtime | 145 B | 145 B | `d0e24a219796ff6c` |
 | plugin round trip, minified | 40 B | 40 B | `9bc28c70ffbc78ec` |
 | define and tree shaking | 60 B | 60 B | `998d621981d61eaf` |
+| bare specifier through `node_modules` | 1424 B | 1424 B | `b9e1fcfe2b4b40f6` |
 
 Each build job gets its own entry file. The jobs run in sequence through one program, so a shared path would hand every job the last job's source and
 report identical results as agreement, which is the kind of green that measures nothing.
+
+## The optimizer's core: a real package, resolved in JavaScript
+
+`optimizeDeps` prebundles dependencies: Vite hands esbuild a set of entry points and a plugin that resolves and loads files itself, then keeps the
+output. The question this slice had to answer is whether that shape works here, and the answer needed two runs that differ by one variable.
+
+| run | entry imports | result |
+|---|---|---|
+| `measure-esbuild-wasm.ts --deps-rel` | `./dep.ts` | builds, 109 B |
+| `measure-esbuild-wasm.ts --deps` | `is-odd` | `panic: JavaScript error: Bad read (while parsing "app/entry.ts")` |
+
+Relative resolution works and a bare specifier does not, with an installed `is-odd` in `node_modules` and the same plugin supplying every file's
+contents. The difference is what the resolver must read: a bare specifier needs the package's `package.json` **bytes** to look at `main`, `module` and
+`exports`, and bytes cannot cross into the Go side. The panic names `app/entry.ts` because that is the file being parsed when it happened, which reads
+like the entry is at fault; the entry is fine.
+
+**So resolution moves into JavaScript, which is where Vite already puts it.** Vite's dependency plugin resolves with Vite's resolver for the same
+reason, so this is not a workaround invented here. The runtime's own resolver is reachable from a program as
+`require("module").createRequire("/app/main.js").resolve("is-odd")` → `/app/node_modules/is-odd/index.js`; a bare `require.resolve` does not exist,
+which is worth knowing before writing the plugin.
+
+The parity job `build: bare specifier through node_modules` is the proof that this is enough. The entry imports `is-odd` (which itself imports
+`is-number`), the container resolves both in JavaScript and hands the files over, and native esbuild resolves the same package from the same mirrored
+bytes with its own resolver. Both emit **1424 identical bytes**, `b9e1fcfe2b4b40f6`. Agreement here means two things at once: our resolver picks the
+same files esbuild would, and the compiler is untouched by any of it.
+
+**What is still between this and a working `optimizeDeps`.** Not the compiler and not the filesystem. Vite 5's own code is ESM with top-level await
+(`dist/node/cli.js`), which ADR-0012 refuses, and the optimizer's orchestration around esbuild assumes a Node process with child processes, a cache
+directory and `chokidar`. This slice settles that the part which had to be ours, the resolver plus the compiler call, produces the same bytes as Node
+does.
