@@ -30,7 +30,8 @@ import type {
   RuntimeRunOutcome,
   Session,
 } from "./types.js";
-import { installDependencies, loadLockfile, readPackageManifest, type RegistryClient } from "../npm/install.js";
+import { installDependencies, loadLockfile, readPackageManifest, type PackageManifest, type RegistryClient } from "../npm/install.js";
+import { parseInstallSpec } from "../npm/spec.js";
 import { VFSNotFoundError } from "../vfs/errors.js";
 
 export interface ContainerOptions {
@@ -233,8 +234,24 @@ export class Container {
       this.#notify();
       return;
     }
-    if (flags.some((flag) => !["--omit=dev", "--production"].includes(flag))) {
-      this.#line(session, "stderr", "npm: only npm install/npm ci and --omit=dev are supported; package arguments and other flags are refused");
+    const requested: { name: string; range: string }[] = [];
+    for (const token of flags) {
+      if (token.startsWith("-")) continue;
+      try {
+        requested.push(parseInstallSpec(token));
+      } catch (error) {
+        this.#line(session, "stderr", `npm error: ${error instanceof Error ? error.message : String(error)}`);
+        this.#notify();
+        return;
+      }
+    }
+    if (flags.some((flag) => flag.startsWith("-") && !["--omit=dev", "--production"].includes(flag))) {
+      this.#line(session, "stderr", "npm: only --omit=dev and --production are supported; other flags are refused");
+      this.#notify();
+      return;
+    }
+    if (subcommand === "ci" && requested.length > 0) {
+      this.#line(session, "stderr", "npm error: npm ci installs exactly the lockfile and takes no package arguments");
       this.#notify();
       return;
     }
@@ -246,11 +263,26 @@ export class Container {
     }
     const root = "/";
     try {
-      const manifest = readPackageManifest({ readFileSync: (path) => {
+      const reader = { readFileSync: (path: string) => {
         const contents = this.#files.read(path);
         if (contents === null) throw new VFSNotFoundError(path);
         return contents;
-      } }, root);
+      } };
+      // `npm install <pkg>` has to work in a project with no manifest at all: that is fixture 8's shape and npm's own behaviour,
+      // and npm does not invent a package.json either. The manifest exists only in memory for this install.
+      let manifest: PackageManifest;
+      let manifestExists = true;
+      try {
+        manifest = readPackageManifest(reader, root);
+      } catch {
+        manifestExists = false;
+        manifest = { name: "project", version: "0.0.0", dependencies: {} };
+      }
+      if (requested.length > 0) {
+        const dependencies: Record<string, string> = { ...(manifest.dependencies ?? {}) };
+        for (const spec of requested) dependencies[spec.name] = spec.range;
+        manifest = { ...manifest, dependencies };
+      }
       const lockfile = loadLockfile({ readFileSync: (path) => {
         const contents = this.#files.read(path);
         if (contents === null) throw new VFSNotFoundError(path);
@@ -274,11 +306,15 @@ export class Container {
       if ((this.#files.projectId ?? "default") !== projectId) {
         throw new Error("active project changed while npm was installing; staged files were discarded");
       }
+      // npm saves a requested dependency into package.json when there is one, and leaves the tree alone when there is not.
+      if (requested.length > 0 && manifestExists) {
+        this.#files.write(`${root}package.json`, `${JSON.stringify(manifest, null, 2)}\n`);
+      }
       const lockText = staged.get(`${root}package-lock.json`);
       if (lockText !== undefined) this.#files.write(`${root}package-lock.json`, lockText);
       this.#dependencies.clear();
       for (const [path, contents] of staged) if (path.includes("/node_modules/")) this.#dependencies.set(path, contents);
-      this.#line(session, "stdout", `added ${report.packages.length} package(s) from the offline corpus`);
+      this.#line(session, "stdout", `added ${report.packages.length} package(s) from ${this.#registry.origin ?? "the registry"}`);
       for (const warning of report.warnings) this.#line(session, "stderr", `npm warning: ${warning}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

@@ -226,12 +226,36 @@ function matchesComparator(candidate: Version, comparator: Comparator): boolean 
   }
 }
 
+/**
+ * Split one alternative into comparator tokens, keeping `>= 1.2.3` together.
+ *
+ * npm accepts a space between an operator and its version: `>= 2.1.2 < 3` is a real range that real packages publish
+ * (`safer-buffer`, twice, inside an express install). Splitting on whitespace alone yields the token `>=`, which carries no
+ * version and parses to nothing, so the whole range became unsatisfiable and the installer reported NO_MATCHING_VERSION for a
+ * version that exists. An operator on its own therefore absorbs the token after it.
+ */
+function tokenize(alternative: string): readonly string[] {
+  const raw = alternative.trim().split(/\s+/).filter((token) => token !== "");
+  const tokens: string[] = [];
+  for (let index = 0; index < raw.length; index += 1) {
+    const token = raw[index] ?? "";
+    const next = raw[index + 1];
+    if (/^(\^|~|>=|<=|>|<|=)$/.test(token) && next !== undefined) {
+      tokens.push(`${token}${next}`);
+      index += 1;
+      continue;
+    }
+    tokens.push(token);
+  }
+  return tokens;
+}
+
 /** Split a range into its AND-sets, expanding hyphen ranges before tokenising. */
 function alternatives(range: string): Comparator[][] | null {
   const sets: Comparator[][] = [];
   for (const alternative of range.split("||")) {
     const hyphen = /^\s*(\S+)\s+-\s+(\S+)\s*$/.exec(alternative);
-    const tokens = hyphen === null ? alternative.trim().split(/\s+/).filter((token) => token !== "") : null;
+    const tokens = hyphen === null ? tokenize(alternative) : null;
 
     let comparators: Comparator[] = [];
     if (hyphen !== null) {

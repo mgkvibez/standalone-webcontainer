@@ -146,3 +146,25 @@ describe("parseVersion", () => {
     }
   });
 });
+
+describe("ranges real packages publish", () => {
+  // Measured, not invented: `safer-buffer` publishes `>= 2.1.2 < 3` and it appears twice in an express install. Splitting the
+  // alternative on whitespace alone produced the token `>=`, which carries no version, so the range became unsatisfiable and the
+  // installer reported NO_MATCHING_VERSION for a version that exists.
+  const ranges = [">= 2.1.2 < 3", ">= 2.1.2 <3", ">=2.1.2 < 3", ">= 0.4 < 0.5", "> 1.2 < 2"];
+  const versions = ["0.4.9", "1.0.0", "1.2.0", "1.3.0", "2.0.0", "2.1.1", "2.1.2", "2.9.9", "3.0.0"];
+
+  it("agrees with npm's semver when an operator is separated from its version by a space", () => {
+    for (const range of ranges) {
+      for (const version of versions) {
+        expect([range, version, satisfies(version, range)]).toEqual([range, version, semver.satisfies(version, range)]);
+      }
+    }
+  });
+
+  it("still answers the express case that exposed it", () => {
+    expect(satisfies("2.1.2", ">= 2.1.2 < 3")).toBe(true);
+    expect(satisfies("2.1.1", ">= 2.1.2 < 3")).toBe(false);
+    expect(satisfies("3.0.0", ">= 2.1.2 < 3")).toBe(false);
+  });
+});

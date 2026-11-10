@@ -60,6 +60,11 @@ export interface Packument {
 export interface RegistryClient {
   packument(name: string): Promise<Packument>;
   tarball(url: string): Promise<Uint8Array>;
+  /**
+   * Where the bytes came from, for the line a user reads afterwards: "from the offline corpus" and "from registry.npmjs.org" are
+   * very different claims about an install, and a single hard-coded sentence would be wrong for one of them.
+   */
+  readonly origin?: string;
 }
 
 /** The VFS surface the installer needs. Structural, so the real VFS and a test double both fit. */
@@ -678,6 +683,7 @@ export function createHttpRegistryClient(
   };
 
   return {
+    origin: new URL(baseUrl).host,
     async packument(name: string): Promise<Packument> {
       // Scoped names need their slash escaped on the registry path.
       const path = name.startsWith("@") ? name.replace("/", "%2F") : name;

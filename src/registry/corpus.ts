@@ -95,6 +95,9 @@ function toBytes(raw: string | Uint8Array): Uint8Array {
 }
 
 export class CorpusRegistry implements RegistryClient {
+  /** What an install line says after it succeeded: the bytes came from the committed corpus, not from a network. */
+  readonly origin = "the offline corpus";
+
   readonly #byName = new Map<string, CorpusEntry[]>();
   readonly #byUrl = new Map<string, CorpusEntry>();
   readonly #read: (tarballPath: string) => string | Uint8Array;

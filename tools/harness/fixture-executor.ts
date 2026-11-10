@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 
 import { Container } from "../../src/container/container.js";
 import type { ProjectFiles, RuntimeClient, RuntimeRunOutcome, RuntimeRunRequest } from "../../src/container/types.js";
+import type { RegistryClient } from "../../src/npm/install.js";
 import { ProbeFault, type AssertionEnvironment, type HttpProbe } from "../../src/harness/assertions.js";
 import type { FixtureDefinition } from "../../src/harness/definition.js";
 import { NotPreviewable, previewRequestUrl } from "../../src/harness/preview-target.js";
@@ -117,7 +118,8 @@ class InProcessClient implements RuntimeClient {
   }
 }
 
-export type Registry = Awaited<ReturnType<typeof loadCorpusRegistry>>["registry"];
+/** Any registry the installer can use: the offline corpus by default, the live one when a run asks for it explicitly. */
+export type Registry = RegistryClient;
 
 export const loadRegistry = async (): Promise<Registry> => {
   const root = join(repoRoot, "fixtures", "registry");
