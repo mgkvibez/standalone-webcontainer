@@ -15,7 +15,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit && tsc -p tsconfig.runtime.json --noEmit && tsc -p tsconfig.browser.json --noEmit",
     "test": "vitest run",
-    "verify": "npm run typecheck && npm run guard:identifiers && npm run guard:licences && npm run test:report && npm run tests:count:check && npm run fixtures:check && npm run corpus:check",
+    "verify": "npm run typecheck && npm run guard:identifiers && npm run guard:licences && npm run test:report && npm run tests:count:check && npm run fixtures:check && npm run corpus:check && npm run diff:modules:strict",
     "fixtures:freeze": "vite-node tools/freeze-fixtures.ts",
     "fixtures:check": "vite-node tools/freeze-fixtures.ts --check",
     "corpus:build": "vite-node tools/build-corpus.ts --write",
@@ -34,7 +34,9 @@
     "guard:identifiers": "vite-node tools/checks/forbidden-identifiers.ts",
     "guard:licences": "vite-node tools/checks/licences.ts",
     "diff:event-loop": "vite-node tools/differential/event-loop.ts",
-    "bench:syscall-metadata": "vite-node tools/bench/syscall-metadata.ts"
+    "bench:syscall-metadata": "vite-node tools/bench/syscall-metadata.ts",
+    "diff:modules": "vite-node tools/differential/modules.ts",
+    "diff:modules:strict": "vite-node tools/differential/modules.ts --strict"
   },
   "devDependencies": {
     "@codemirror/lang-javascript": "^6.2.5",
