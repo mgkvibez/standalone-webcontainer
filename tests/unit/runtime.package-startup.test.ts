@@ -55,6 +55,41 @@ describe("the browser entry", () => {
   });
 });
 
+describe("the global object", () => {
+  it("carries the realm's constructors, because a global object without Object is broken, not small", async () => {
+    const result = await run(
+      {
+        "/app/main.js": [
+          'console.log(typeof Object, typeof Uint8Array, typeof Promise, typeof WebAssembly);',
+          "console.log(self.self === self);",
+        ].join("\n"),
+      },
+      "main.js",
+    );
+
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("function function function object\ntrue\n");
+  });
+
+  it("survives a package copying it into a scope of its own, which is what a wasm host does", async () => {
+    // The same loop `esbuild-wasm`'s in-thread service runs before handing its scope to the Go runtime. Measured need: without the realm's
+    // constructors on `self`, that runtime panicked at its first allocation.
+    const result = await run(
+      {
+        "/app/main.js": [
+          "const scope = {};",
+          "for (const name of Object.getOwnPropertyNames(self)) scope[name] = self[name];",
+          'console.log(typeof scope.Object, typeof scope.Uint8Array, typeof scope.setTimeout, typeof scope.crypto);',
+        ].join("\n"),
+      },
+      "main.js",
+    );
+
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("function function function object\n");
+  });
+});
+
 describe("declared startup", () => {
   const packageFiles = (initialise: string): Record<string, string | Uint8Array> => ({
     "/app/node_modules/esbuild/package.json": JSON.stringify({

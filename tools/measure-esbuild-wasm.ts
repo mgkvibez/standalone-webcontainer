@@ -13,6 +13,12 @@ import { createHttpRegistryClient, installDependencies } from "../src/npm/instal
 import { InProcessRuntime } from "../src/runtime/in-process.js";
 import { FileSystem } from "../src/vfs/index.js";
 
+// `--keepalive` appends a chain of timers, which is the cheapest way to ask whether a missing result is a deadlock or the runtime deciding the
+// program is finished while a promise is still pending. The two need different fixes, so the tool measures both rather than guessing.
+const KEEPALIVE = process.argv.includes("--keepalive")
+  ? "\nfor (let tick = 0; tick < 60; tick += 1) setTimeout(() => {}, tick * 25);\n"
+  : "";
+
 const PROGRAM = `
 const esbuild = require("esbuild");
 esbuild
@@ -21,7 +27,7 @@ esbuild
     (result) => { console.log("CODE:" + result.code); },
     (error) => { console.log("FAILED:" + (error && (error.stack || error.message))); },
   );
-`;
+` + KEEPALIVE;
 
 const heapMb = (): number => Math.round((process.memoryUsage().heapUsed / 1024 / 1024) * 10) / 10;
 const now = (): number => Number(process.hrtime.bigint() / 1000000n);

@@ -55,6 +55,7 @@ import {
 } from "../npm/install.js";
 import type { FileSystemPort } from "../vfs/port.js";
 import { CommonJsLoader, type RuntimeGlobals } from "./commonjs.js";
+import { createRealmGlobals } from "./realm-globals.js";
 import { createVirtualDate, createVirtualPerformance, Scheduler, type SchedulerEvidence, type TimerHandle } from "./scheduler.js";
 import { ProcessRefusal, type Refusal } from "./refusal.js";
 
@@ -448,13 +449,15 @@ export class InProcessRuntime implements Runtime {
       clearInterval: ((handle: TimerHandle | number) => scheduler.clear(handle)) as RuntimeGlobals["clearInterval"],
       setImmediate: ((fn: (...args: never[]) => void, ...args: unknown[]) =>
         scheduler.setImmediate(fn, ...args)) as RuntimeGlobals["setImmediate"],
-      WebAssembly,
-      TextEncoder,
-      TextDecoder,
-      crypto: globalThis.crypto,
       self: undefined as unknown,
     } satisfies RuntimeGlobals;
-    runtimeGlobals.self = runtimeGlobals;
+    // The object a program sees as `self` is its own global object, the way a browser's is: the realm's constructors plus what this runtime owns.
+    // Built as one object so a package that assembles a scope from `self` gets both.
+    const globalObject = Object.assign(Object.create(null) as Record<string, unknown>, createRealmGlobals(), runtimeGlobals);
+    // Set after the merge, not before: the merge copies the placeholder `self` in, and a global object whose own `self` is not itself is exactly
+    // the kind of half-object this exists to avoid.
+    globalObject.self = globalObject;
+    runtimeGlobals.self = globalObject;
 
     loader.setRuntimeContext({
       process: processShim,
