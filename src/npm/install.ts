@@ -516,9 +516,14 @@ export async function installDependencies(
         } catch (error) {
           // A substitution that cannot honour the caller's range is a broken table, not a version conflict in the user's project.
           if (substitution === undefined) throw error;
+          // Both versions in one sentence: what the dependent asked for, and the newest the substitute actually published. The two lines move
+          // together but not simultaneously, so there is a real window where a dependent asks for a version the substitute has not shipped yet.
+          // Naming only the range sends the reader to look at their own dependency; naming both makes the drift obvious in one read. Falling back
+          // to "latest" here would hand back a different compiler than the one asked for, silently, which is worse than refusing.
+          const newest = Object.keys(packument.versions).sort(compareVersions).at(-1) ?? "none";
           throw new SubstitutionError(
             "SUBSTITUTE_NO_MATCH",
-            `${substitution.substitute} has no version satisfying "${request.range}" (rule "${substitution.rule}"), which ${request.name}@${request.range} needs`,
+            `${request.name}@${request.range} needs a version ${substitution.substitute} has not published: ${substitution.substitute} has no version satisfying "${request.range}" (newest is ${newest}, rule "${substitution.rule}")`,
           );
         }
         if (substitution !== undefined) {

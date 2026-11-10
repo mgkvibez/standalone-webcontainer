@@ -200,3 +200,51 @@ scheduler: the plugin model survives the substitution.
 dependency optimizer plugins **read package files**, which is exactly the `fs` bridge the Go host does not have yet (`syscall.Write` on fd 1 was
 the first symptom). So the order is: the `fs`/fd bridge into the wasm host first, then `optimizeDeps`, then the dev server. Building `optimizeDeps`
 before the bridge would measure a boundary we already know about rather than the dep optimizer.
+
+## Where esbuild-wasm runs, and the fd layer we do not need
+
+Two questions had to be settled before any bridge code, and both were settled by measuring rather than by reading the POSIX spec.
+
+**What the Go host actually asks for.** esbuild's blob builds its global object by defining a live getter for every property of `self`, then guards
+its whole stub block behind `if (!globalThis.fs)`, so supplying `fs` suppresses that block. That is a contract, not a bag of names, and the bisect
+is blunt about it:
+
+| `self.fs` supplied | outcome |
+|---|---|
+| the stub's own object (nothing supplied) | boots, transform works |
+| `{}` | `panic: syscall/js: call of Value.Get on undefined` at `syscall.init` |
+| `{}` with `writeSync` + `write` | same panic |
+| a near-complete mirror | boots |
+
+So the recorder mirrors the stub's shape (`src` measurement: `npx tsx tools/measure-esbuild-wasm.ts --syscalls`) and then records. What one real
+build asks for:
+
+| phase | calls |
+|---|---|
+| plugin build, `stdin` contents | `write` x3, `stat` x1 |
+| build reading a real file from the VFS | `write` x4, `open` x2, `stat` x1 |
+
+Four members, and the failing build names the fifth requirement in its own words: `Cannot read directory ".": not implemented on js`, because
+`open` answered ENOSYS and esbuild fell back to reading a directory. So the bridge is `write`, `open`, `read`, `close`, `stat` and the `constants`
+object. No `chmod`, no `lchown`, no `fcntl`, no fd table anyone would have written from the spec.
+
+**The finding that decides the architecture:** every one of those is a **callback form**. `fs.write(fd, buf, offset, length, position, callback)`,
+`fs.open(path, flags, mode, callback)`, `fs.stat(path, callback)`. Not one `*Sync` member was called in either run, and Go's own stub for
+js/wasm does not define any: its `fs` surface is asynchronous by construction. A synchronous bridge is not merely unnecessary here, it is
+unreachable, because the Go side has no synchronous call to make.
+
+That settles the Worker question in the direction that saves the most work. `Atomics.wait` being forbidden on the main thread rules out a
+*synchronous* cross-thread bridge, and there is no synchronous call to bridge. So `esbuild-wasm` needs no Worker for the filesystem: the host object
+is a thin adapter over the runtime's own `fs` shim, which is already async, already VFS-backed, and in production already served from the kernel
+Worker over the SAB channel. The async shape means the same adapter works in-process and across threads unchanged. The fd layer over the syscall
+channel stays unbuilt, and the plugin-mediated resolver the reviewer offered as the main-thread fallback is not needed either.
+
+**Cold versus warm.** Measured, one build in-process: install 357 ms (network, never in a user's boot), `new WebAssembly.Module` over 11.1 MB of wasm
+49-67 ms, first transform 170-233 ms total including init, second transform immediate. Vite's own optimizer output lives in `node_modules/.vite` and
+is regenerated freely, which makes it the textbook OPFS artefact: large, regenerable, shared across tabs. Measuring that cache is deferred with the
+rest of the storage decision, and this note is the revisit trigger it was promised.
+
+**Version drift.** `esbuild-wasm` publishes on the same line as `esbuild`, but the two do not ship on the same day, so a dependent can ask for a
+version the substitute has not published. That now refuses in one sentence naming both sides
+(`esbuild@^0.28.2 needs a version esbuild-wasm has not published: ... newest is 0.21.5`) and it never degrades to `latest`, which would serve a
+different compiler silently. Pinned by `tests/unit/npm.substitutions.test.ts`, including that nothing is written to disk on the refusal.
