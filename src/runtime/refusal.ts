@@ -7,8 +7,14 @@
  * consumer can rewrite the diagnostic between the report and the record on disk.
  */
 
-/** The closed set of capabilities refused on purpose. Adding a member is a design act, not a refactor. */
-export type RefusalCode = "native-addon";
+/**
+ * The closed set of capabilities refused on purpose. Adding a member is a design act, not a refactor.
+ *
+ * The set now spans two naming conventions, deliberately: `native-addon` predates the ruling and is byte-pinned by
+ * tests/unit/harness.refusal-contract.test.ts, while `NATIVE_PROCESS_EXEC_REFUSED` is the name the owner chose for the second member.
+ * Renaming the first to match would be a separate act with its own evidence, not a tidy-up to smuggle in with this one.
+ */
+export type RefusalCode = "native-addon" | "NATIVE_PROCESS_EXEC_REFUSED";
 
 export interface Refusal {
   readonly code: RefusalCode;

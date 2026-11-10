@@ -455,18 +455,20 @@ describe("platform-specific packages", () => {
     expect(report.warnings.join(" ")).toMatch(/fsevents@2\.3\.3 skipped: platform-specific \(darwin, any cpu\)/);
   });
 
-  it("skips an architecture-specific optional dependency, as esbuild publishes them", async () => {
+  it("skips an architecture-specific optional dependency, as native build tools publish them", async () => {
     const registry = await createFakeRegistry({
       packages: {
-        esbuild: [{ version: "0.20.0", optionalDependencies: { "@esbuild/darwin-x64": "0.20.0" } }],
-        "@esbuild/darwin-x64": [{ version: "0.20.0", os: ["darwin"], cpu: ["x64"], files: { "bin": "binary" } }],
+        // Deliberately not esbuild: esbuild now resolves to esbuild-wasm through the substitution table, and the wasm build publishes no
+        // platform binaries at all, so a test named after esbuild would be exercising a path no real esbuild install takes any more.
+        "swc-binary": [{ version: "0.20.0", optionalDependencies: { "@swc-binary/darwin-x64": "0.20.0" } }],
+        "@swc-binary/darwin-x64": [{ version: "0.20.0", os: ["darwin"], cpu: ["x64"], files: { "bin": "binary" } }],
       },
     });
     const { vfs, root } = bootVfs();
 
-    const report = await installDependencies({ dependencies: { esbuild: "^0.20.0" } }, { registry, vfs, root });
+    const report = await installDependencies({ dependencies: { "swc-binary": "^0.20.0" } }, { registry, vfs, root });
 
-    expect(report.packages.map((entry) => entry.name)).toEqual(["esbuild"]);
+    expect(report.packages.map((entry) => entry.name)).toEqual(["swc-binary"]);
     expect(report.warnings.join(" ")).toMatch(/darwin, x64/);
   });
 

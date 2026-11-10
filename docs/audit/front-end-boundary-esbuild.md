@@ -43,3 +43,28 @@ Nine defects, each found by real bytes and each fixed with a test that names the
 
 Top-level await was the previous slice's target and is no longer a blocker for this graph: one file in vite's whole dist needs it, and
 it is the program entry.
+
+## What was decided, and what it cost
+
+The owner's ruling: take the WASM route, but **do not** use it to save `fixture-01`, and add the refusal anyway as a separate
+capability. `fixture-01` therefore stays a genuine red until Vite boots. A refusal code that flips it to `UNSUPPORTED_BY_DESIGN`
+would be honest bookkeeping that hides the most important failure.
+
+So the two pieces are separate, and neither one rescues the fixture:
+
+**Substitutions are a table, not a patch.** `src/npm/substitutions.ts` holds rows of requested package, substitute, version rule, init
+hook and reason; `parseSubstitutions` refuses the ways a table rots (a self-substitution, a chain whose outcome would depend on
+iteration order, a pin on a rule that ignores it, a row with no reason). The resolver fetches only the substitute's packument and
+installs its bytes **under the requested name**, because Node resolves by directory and a caller writing `require('esbuild')` must find
+them there. Every application is recorded in `InstallReport.substitutions` with its reason, and warned about in the install log.
+Entry one, measured: `esbuild-wasm@0.21.5`, zero dependencies, `lib/main.js`, 12.2 MB unpacked, published on the same version line as
+native `esbuild`, so the caller's own range (`^0.21.3`) resolves inside the substitute's versions.
+
+**`NATIVE_PROCESS_EXEC_REFUSED` is a capability, not a fixture answer.** A module that requires `child_process` now gets a typed
+refusal naming the owning package and the frame, instead of `Cannot find module 'child_process'`, which reads as a defect in this
+loader. It is catchable, so a program may handle it and continue. It is not wired to `fixture-01`: that fixture's expected set is
+untouched, and the substitution is what stands between Vite and this refusal.
+
+**Consequence for the offline lane:** the Vite snapshot was captured with native `esbuild`, so an install from that snapshot cannot
+satisfy the substitution. The snapshot needs recapturing through the substitution table before the hermetic lane can speak about Vite
+again; until then `fixture-01` is a network-lane fixture.
