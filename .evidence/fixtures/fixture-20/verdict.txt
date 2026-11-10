@@ -1,0 +1,4 @@
+fixture: fixture-20
+evidence schema: 2
+classification: RUNTIME_INCOMPATIBILITY
+reason: assertion failed: stdout-contains: stdout did not contain "migrated"; observed ""

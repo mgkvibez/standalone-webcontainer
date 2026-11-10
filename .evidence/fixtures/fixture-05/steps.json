@@ -1,0 +1,47 @@
+[
+  {
+    "index": 0,
+    "kind": "install",
+    "command": "npm install",
+    "state": "ran",
+    "termination": "ok",
+    "detail": "builtin command reported a failure: npm error: MISSING_PACKAGE_JSON: no package.json at /package.json",
+    "elapsedMs": 0,
+    "record": {
+      "index": 0,
+      "exitCode": 1,
+      "stdout": "",
+      "stderr": "npm error: MISSING_PACKAGE_JSON: no package.json at /package.json"
+    }
+  },
+  {
+    "index": 1,
+    "kind": "build",
+    "command": "npm run build",
+    "state": "ran",
+    "termination": "ok",
+    "detail": "builtin command reported a failure: npm: unsupported command run",
+    "elapsedMs": 0,
+    "record": {
+      "index": 1,
+      "exitCode": 1,
+      "stdout": "",
+      "stderr": "npm: unsupported command run"
+    }
+  },
+  {
+    "index": 2,
+    "kind": "run",
+    "command": "npm run start -- --port 3100",
+    "state": "ran",
+    "termination": "ok",
+    "detail": "builtin command reported a failure: npm: unsupported command run",
+    "elapsedMs": 0,
+    "record": {
+      "index": 2,
+      "exitCode": 1,
+      "stdout": "",
+      "stderr": "npm: unsupported command run"
+    }
+  }
+]

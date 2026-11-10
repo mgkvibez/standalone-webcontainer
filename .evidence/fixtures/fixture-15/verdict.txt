@@ -1,0 +1,4 @@
+fixture: fixture-15
+evidence schema: 2
+classification: RUNTIME_INCOMPATIBILITY
+reason: assertion failed: exit-code: expected exit code 1, observed 0 (and 1 more)

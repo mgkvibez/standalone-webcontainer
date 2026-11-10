@@ -1,0 +1,32 @@
+[
+  {
+    "index": 0,
+    "kind": "install",
+    "command": "npm install express",
+    "state": "ran",
+    "termination": "ok",
+    "detail": "builtin command reported a failure: npm: only npm install/npm ci and --omit=dev are supported; package arguments and other flags are refused",
+    "elapsedMs": 0,
+    "record": {
+      "index": 0,
+      "exitCode": 1,
+      "stdout": "",
+      "stderr": "npm: only npm install/npm ci and --omit=dev are supported; package arguments and other flags are refused"
+    }
+  },
+  {
+    "index": 1,
+    "kind": "run",
+    "command": "node server.mjs",
+    "state": "ran",
+    "termination": "ok",
+    "detail": "builtin command completed: node: cannot find module '/server.mjs'",
+    "elapsedMs": 0,
+    "record": {
+      "index": 1,
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": "node: cannot find module '/server.mjs'"
+    }
+  }
+]

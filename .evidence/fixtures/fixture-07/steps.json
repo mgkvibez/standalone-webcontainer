@@ -1,0 +1,47 @@
+[
+  {
+    "index": 0,
+    "kind": "install",
+    "command": "npm install",
+    "state": "ran",
+    "termination": "ok",
+    "detail": "builtin command completed: added 0 package(s) from the offline corpus",
+    "elapsedMs": 0,
+    "record": {
+      "index": 0,
+      "exitCode": 0,
+      "stdout": "added 0 package(s) from the offline corpus",
+      "stderr": ""
+    }
+  },
+  {
+    "index": 1,
+    "kind": "run",
+    "command": "node cli.mjs --input sample.txt --upper",
+    "state": "ran",
+    "termination": "ok",
+    "detail": "process 1 exited with exit 0",
+    "elapsedMs": 3,
+    "record": {
+      "index": 1,
+      "exitCode": 0,
+      "stdout": "HELLO WORLD\n",
+      "stderr": ""
+    }
+  },
+  {
+    "index": 2,
+    "kind": "run",
+    "command": "node cli.mjs --definitely-not-a-flag",
+    "state": "ran",
+    "termination": "ok",
+    "detail": "process 2 exited with exit 2",
+    "elapsedMs": 3,
+    "record": {
+      "index": 2,
+      "exitCode": 2,
+      "stdout": "",
+      "stderr": "unknown flag: --definitely-not-a-flag\n"
+    }
+  }
+]

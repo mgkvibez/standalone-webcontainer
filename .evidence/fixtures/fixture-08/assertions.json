@@ -1,0 +1,10 @@
+[
+  {
+    "index": 0,
+    "kind": "exit-code",
+    "state": "passed",
+    "passed": true,
+    "stepAvailable": true,
+    "detail": "expected exit code 0, observed 0"
+  }
+]

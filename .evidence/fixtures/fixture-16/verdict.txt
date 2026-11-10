@@ -1,0 +1,4 @@
+fixture: fixture-16
+evidence schema: 2
+classification: RUNTIME_INCOMPATIBILITY
+reason: assertion failed: stdout-contains: stdout did not contain "pong"; observed ""

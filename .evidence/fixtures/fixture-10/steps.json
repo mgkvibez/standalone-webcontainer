@@ -1,0 +1,32 @@
+[
+  {
+    "index": 0,
+    "kind": "install",
+    "command": "pnpm install",
+    "state": "ran",
+    "termination": "ok",
+    "detail": "builtin command completed",
+    "elapsedMs": 0,
+    "record": {
+      "index": 0,
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  {
+    "index": 1,
+    "kind": "run",
+    "command": "node check.mjs",
+    "state": "ran",
+    "termination": "ok",
+    "detail": "builtin command completed: node: cannot find module '/check.mjs'",
+    "elapsedMs": 0,
+    "record": {
+      "index": 1,
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": "node: cannot find module '/check.mjs'"
+    }
+  }
+]

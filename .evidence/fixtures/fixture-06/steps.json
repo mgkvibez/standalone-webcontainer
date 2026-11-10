@@ -1,0 +1,47 @@
+[
+  {
+    "index": 0,
+    "kind": "install",
+    "command": "npm install",
+    "state": "ran",
+    "termination": "ok",
+    "detail": "builtin command reported a failure: npm error: MISSING_PACKAGE_JSON: no package.json at /package.json",
+    "elapsedMs": 0,
+    "record": {
+      "index": 0,
+      "exitCode": 1,
+      "stdout": "",
+      "stderr": "npm error: MISSING_PACKAGE_JSON: no package.json at /package.json"
+    }
+  },
+  {
+    "index": 1,
+    "kind": "build",
+    "command": "npm run build",
+    "state": "ran",
+    "termination": "ok",
+    "detail": "builtin command reported a failure: npm: unsupported command run",
+    "elapsedMs": 0,
+    "record": {
+      "index": 1,
+      "exitCode": 1,
+      "stdout": "",
+      "stderr": "npm: unsupported command run"
+    }
+  },
+  {
+    "index": 2,
+    "kind": "run",
+    "command": "node .output/server/index.mjs",
+    "state": "ran",
+    "termination": "ok",
+    "detail": "builtin command completed: node: cannot find module '/.output/server/index.mjs'",
+    "elapsedMs": 0,
+    "record": {
+      "index": 2,
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": "node: cannot find module '/.output/server/index.mjs'"
+    }
+  }
+]
