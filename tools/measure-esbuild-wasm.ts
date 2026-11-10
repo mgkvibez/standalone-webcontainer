@@ -94,6 +94,55 @@ esbuild
   );
 `;
 
+/**
+ * `--deps` bundles an entry that imports a REAL package by bare specifier, with no plugin.
+ *
+ * It answers one question the optimizer cannot proceed without: can esbuild-wasm resolve `is-odd` into `node_modules` on its own? A resolver needs
+ * the package's `package.json` BYTES to read `main`/`module`/`exports`, and the host object cannot serve file bytes, so this mode reports the exact
+ * failure rather than a guess about one.
+ */
+const DEPS = `
+const fs = require("fs");
+const esbuild = require("esbuild");
+// Can the runtime's own resolver stand in for the one esbuild cannot use? Vite's dependency plugin resolves in JavaScript for exactly this reason,
+// so the question is whether require.resolve here answers a bare specifier at all.
+console.log("RESOLVE:" + JSON.stringify((() => {
+  const made = require("module").createRequire("/app/main.js");
+  return { has: typeof made.resolve === "function", isOdd: typeof made.resolve === "function" ? made.resolve("is-odd") : null };
+})()));
+// Contents arrive by onLoad, so the compiler never needs file bytes for the files it is handed. Bare-specifier RESOLUTION is left to esbuild itself,
+// which is the question this mode exists to answer.
+const plugin = {
+  name: "host-files",
+  setup(build) {
+    build.onLoad({ filter: /.*/, namespace: "file" }, (args) => ({
+      contents: fs.readFileSync(args.path, "utf8"),
+      loader: /\\.tsx$/.test(args.path) ? "tsx" : /\\.ts$/.test(args.path) ? "ts" : "js",
+    }));
+  },
+};
+esbuild
+  .build({ entryPoints: ["/app/entry.ts"], bundle: true, write: false, format: "esm", logLevel: "silent", plugins: [plugin] })
+  .then(
+    (result) => {
+      const files = result.outputFiles || [];
+      console.log("BUILD:files=" + files.length + ";bytes=" + files.map((file) => file.text.length).join(","));
+      console.log("TEXT:" + JSON.stringify(files.length === 0 ? "" : files[0].text));
+    },
+    (error) => {
+      const errors = error && error.errors ? error.errors.map((item) => item.text + " @" + (item.location ? item.location.file + ":" + item.location.line : "?")) : [String(error)];
+      console.log("BUILD_FAILED:" + JSON.stringify(errors));
+    },
+  );
+`;
+
+
+/** The same build with a RELATIVE import, so the two runs differ by one variable: a relative import needs no `package.json`, a bare specifier does. */
+const DEPS_REL = DEPS.replace(
+  'import isOdd from "is-odd";\\nexport const answer: boolean = isOdd(3);',
+  'import { twice } from "./dep.ts";\\nexport const answer: number = twice(3);',
+);
+
 const SYSCALLS = `
 const seen = new Map();
 const trace = [];
@@ -287,8 +336,12 @@ setTimeout(report, 800);
 
 const PROGRAM = process.argv.includes("--syscalls")
   ? SYSCALLS
-  : process.argv.includes("--build")
-    ? BUILD
+  : process.argv.includes("--deps-rel")
+    ? DEPS_REL
+    : process.argv.includes("--deps")
+      ? DEPS
+    : process.argv.includes("--build")
+      ? BUILD
     : process.argv.includes("--plugin")
       ? PLUGIN
       : TRANSFORM;
@@ -305,7 +358,7 @@ async function main(): Promise<void> {
   console.log("installing esbuild (substituted) from the real registry...");
   const installStarted = now();
   const report = await installDependencies(
-    { dependencies: { esbuild: "^0.21.3" } },
+    { dependencies: process.argv.includes("--deps") ? { esbuild: "^0.21.3", "is-odd": "^3.0.1" } : { esbuild: "^0.21.3" } },
     { registry, vfs, root, includeDev: false },
   );
   const installMs = now() - installStarted;
@@ -327,7 +380,15 @@ async function main(): Promise<void> {
   // The recorder is a program, and a program here is not handed this tool's argv, so the request crosses as a file it can see.
   if (process.argv.includes("--trace")) vfs.writeFileSync("/app/.trace", "");
   // The program under measurement reads a real file through the host object, because a build that never touches the filesystem measures nothing.
-  vfs.writeFileSync("/app/entry.ts", 'export const greeting: string = "hi";');
+  vfs.writeFileSync(
+    "/app/entry.ts",
+    process.argv.includes("--deps")
+      ? 'import isOdd from "is-odd";\nexport const answer: boolean = isOdd(3);'
+      : process.argv.includes("--deps-rel")
+        ? 'import { twice } from "./dep.ts";\nexport const answer: number = twice(3);'
+        : 'export const greeting: string = "hi";',
+  );
+  if (process.argv.includes("--deps-rel")) vfs.writeFileSync("/app/dep.ts", "export const twice = (value: number): number => value * 2;\n");
   const runStarted = now();
   const result = await new InProcessRuntime(vfs).run(`${root}/main.js`, { timeoutMs: 120_000 });
   const runMs = now() - runStarted;
@@ -339,7 +400,15 @@ async function main(): Promise<void> {
 
   // Two modes, two expectations, and neither is "some output appeared": the transform must have compiled the type away, and the plugin build must
   // have taken the virtual module through both of its callbacks. Checking for the wrong one made this tool report a success as a failure.
-  if (process.argv.includes("--build")) {
+  if (process.argv.includes("--deps") || process.argv.includes("--deps-rel")) {
+    const failed = /BUILD_FAILED:(.*)/.exec(result.stdout);
+    const notice = /^TEXT:/m.exec(result.stdout);
+    if (notice !== null) console.log(`built: ${(notice[0] ?? "").slice(0, 160)}`);
+    if (failed !== null) {
+      console.error(`FAILED: ${failed[1] ?? ""}`);
+      process.exitCode = 1;
+    }
+  } else if (process.argv.includes("--build")) {
     const produced = /BUILD:files=(\d+);bytes=([0-9,]+)/.exec(result.stdout);
     if (produced === null || produced[1] === "0") {
       console.error("FAILED: the build produced no output file");

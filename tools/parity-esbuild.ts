@@ -11,7 +11,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
@@ -40,6 +40,14 @@ interface Job {
    * `bundler.runOnLoadPlugins -> FSCache.ReadFile -> os.ReadFile -> syscall.Read`.
    */
   readonly pluginEntry: boolean;
+  /**
+   * A real package the entry imports by bare specifier, which needs `node_modules` present on both sides.
+   *
+   * This is the shape Vite's dependency optimizer works in, and the one the host adapter cannot serve alone: esbuild's own resolver reads a package's
+   * `package.json` BYTES, and bytes cannot cross into the Go side. Measured with `measure-esbuild-wasm.ts --deps`, which panics with
+   * `Bad read ... while parsing "app/entry.ts"` for the bare import and builds cleanly for the relative one. So the plugin resolves in JavaScript.
+   */
+  readonly imports?: string;
 }
 
 const JOBS: readonly Job[] = [
@@ -81,6 +89,16 @@ const JOBS: readonly Job[] = [
     options: { define: { "process.env.PARITY_FLAG": '"on"' }, format: "esm", minify: true },
     pluginEntry: true,
   },
+  {
+    // The optimizer's shape in miniature: a real package from the registry, resolved by our own resolver, prebundled by esbuild-wasm, and compared
+    // against what native esbuild produces when IT resolves the same package from the same bytes.
+    name: "build: bare specifier through node_modules",
+    kind: "build",
+    source: 'import isOdd from "is-odd";\nexport const answer: boolean = isOdd(3);',
+    options: { format: "esm", minify: true },
+    pluginEntry: true,
+    imports: "is-odd",
+  },
 ];
 
 function sha(text: string): string {
@@ -97,9 +115,15 @@ function program(): string {
     "// The entry point is NOT resolved by a plugin: it is handed to esbuild as an absolute path and resolved by esbuild itself, which in this embedder",
     "// can only happen through the host fs object. Only the CONTENTS arrive by onLoad, because bytes cannot cross into the Go side at all.",
     "function hostFilesPlugin(job) {",
+    "  const resolveFrom = job.imports ? require(\"module\").createRequire(job.entry + \".js\").resolve : null;",
     "  return {",
     '    name: "host-files",',
     "    setup(build) {",
+    "      if (resolveFrom) {",
+    "        // A bare specifier is resolved by the runtime's own resolver, exactly as Vite's dependency plugin resolves with Vite's. esbuild cannot do it",
+    "        // here at all: its resolver reads package.json BYTES, and the Go side can never receive a file's bytes.",
+    '        build.onResolve({ filter: /^[^./]/ }, (args) => ({ path: resolveFrom(args.path), namespace: "file" }));',
+    "      }",
     '      build.onLoad({ filter: /.*/, namespace: "file" }, (args) => ({',
     '        contents: fs.readFileSync(args.path, "utf8"),',
     '        loader: /\\.tsx$/.test(args.path) ? "tsx" : "js",',
@@ -152,6 +176,17 @@ const hostFilesPlugin = (virtual: boolean) => ({
   },
 });
 
+/** Copies a VFS subtree to a real directory: the bytes the container resolves are then the bytes the native compiler resolves. */
+function mirror(vfs: FileSystem, from: string, to: string): void {
+  mkdirSync(to, { recursive: true });
+  for (const name of vfs.readdirSync(from)) {
+    const source = `${from}/${name}`;
+    const target = `${to}/${name}`;
+    if (vfs.statSync(source).kind === "dir") mirror(vfs, source, target);
+    else writeFileSync(target, vfs.readFileSync(source) as Uint8Array);
+  }
+}
+
 async function nativeResults(nativeEsbuild: typeof import("esbuild"), jobs: readonly Job[]): Promise<string[]> {
   const results: string[] = [];
   for (const job of jobs) {
@@ -165,6 +200,13 @@ async function nativeResults(nativeEsbuild: typeof import("esbuild"), jobs: read
     const dir = mkdtempSync(join(tmpdir(), "parity-"));
     const entry = join(dir, "entry.tsx");
     writeFileSync(entry, job.source);
+    if (job.imports !== undefined) {
+      // Installed by the same installer the container uses, then mirrored, so the comparison is of resolution and compilation and not of two
+      // different downloads.
+      const scratch = new FileSystem();
+      await installDependencies({ dependencies: { [job.imports]: "^3.0.1" } }, { registry: createHttpRegistryClient(), vfs: scratch, root: "/proj" });
+      mirror(scratch, "/proj/node_modules", join(dir, "node_modules"));
+    }
     const out = await nativeEsbuild.build({
       entryPoints: [entry],
       write: false,
@@ -180,7 +222,8 @@ async function nativeResults(nativeEsbuild: typeof import("esbuild"), jobs: read
 async function containerResults(version: string, passed: readonly Job[]): Promise<string[]> {
   const vfs = new FileSystem();
   const report = await installDependencies(
-    { dependencies: { esbuild: version } },
+    // The bare-specifier job needs a real dependency tree in the VFS, which is what makes it the optimizer's shape rather than a virtual one.
+    { dependencies: passed.some((job) => job.imports !== undefined) ? { esbuild: version, "is-odd": "^3.0.1" } : { esbuild: version } },
     { registry: createHttpRegistryClient(), vfs, root: "/app", includeDev: false },
   );
   const applied = report.substitutions[0];
@@ -199,6 +242,7 @@ async function containerResults(version: string, passed: readonly Job[]): Promis
     options: job.options,
     entry: entryFor(index),
     virtual: job.virtual === true,
+    imports: job.imports ?? null,
   }));
   vfs.writeFileSync("/app/jobs.json", JSON.stringify(jobs));
   passed.forEach((job, index) => {
