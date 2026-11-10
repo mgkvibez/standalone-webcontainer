@@ -370,9 +370,58 @@ describe("honest refusal", () => {
     expect(output(container, session.id)).toContain("stdout:added 1 package(s) from the offline corpus");
     await container.execute(session.id, "npm ci");
     expect(project.read("/package-lock.json")).toBe(lockfile);
+    // A package argument is now a request the installer honours, so the corpus answers it the only way it can: not found.
     await container.execute(session.id, "npm install left-pad");
-    expect(registry.fetched).toEqual(["@corpus/hello"]);
-    expect(output(container, session.id).some((line) => line.includes("package arguments and other flags are refused"))).toBe(true);
+    expect(registry.fetched).toEqual(["@corpus/hello", "left-pad"]);
+    // The double raises a plain error for an unpublished name, so the assertion is on the failure being reported and on nothing
+    // being written for the package that failed, not on a code the double does not produce.
+    expect(output(container, session.id).some((line) => line.includes("npm error:"))).toBe(true);
+    expect(project.list().some((path) => path.includes("left-pad"))).toBe(false);
+  });
+
+  it("installs a package named on the command line, in a project with no package.json", async () => {
+    const project = new FakeProject({ "/index.js": "console.log(1);" });
+    const runtime = new FakeRuntime();
+    const registry = await createFakeRegistry({
+      packages: { "@corpus/hello": [{ version: "1.0.0", files: { "index.js": 'module.exports = "installed";' } }] },
+    });
+    const container = new Container({ runtime, files: project, registry });
+    const session = container.createSession();
+
+    await container.execute(session.id, "npm install @corpus/hello");
+
+    expect(output(container, session.id)).toContain("stdout:added 1 package(s) from the offline corpus");
+    expect(project.read("/package-lock.json")).not.toBeNull();
+    // npm does not invent a manifest either: the install records what it did in the lockfile and nothing else.
+    expect(project.read("/package.json")).toBeNull();
+    await container.execute(session.id, "node index.js");
+    expect(runtime.requests.at(-1)?.files["/node_modules/@corpus/hello/index.js"]).toContain("installed");
+  });
+
+  it("saves a named package into an existing package.json, and refuses an unsupported flag", async () => {
+    const project = new FakeProject({ "/package.json": JSON.stringify({ name: "p", version: "1.0.0" }) });
+    const registry = await createFakeRegistry({
+      packages: { "@corpus/hello": [{ version: "1.0.0", files: { "index.js": "module.exports = 1;" } }] },
+    });
+    const container = new Container({ runtime: new FakeRuntime(), files: project, registry });
+    const session = container.createSession();
+
+    await container.execute(session.id, "npm install @corpus/hello@^1.0.0");
+    const manifest = JSON.parse(project.read("/package.json") ?? "{}");
+    expect(manifest.dependencies).toEqual({ "@corpus/hello": "^1.0.0" });
+
+    await container.execute(session.id, "npm install --save-dev @corpus/hello");
+    expect(output(container, session.id).some((line) => line.includes("only --omit=dev and --production are supported"))).toBe(true);
+  });
+
+  it("refuses a spec kind it does not implement by naming that kind", async () => {
+    const registry = await createFakeRegistry({ packages: {} });
+    const container = new Container({ runtime: new FakeRuntime(), files: new FakeProject(), registry });
+    const session = container.createSession();
+    await container.execute(session.id, "npm install git+https://example.com/x.git");
+    expect(output(container, session.id).some((line) => line.includes("installing from a URL or a git remote is not supported"))).toBe(true);
+    await container.execute(session.id, "npm install ./local-folder");
+    expect(output(container, session.id).some((line) => line.includes("installing from a folder or a local tarball is not supported"))).toBe(true);
   });
 
   it("does not accept package arguments or make registry installs without an injected corpus", async () => {

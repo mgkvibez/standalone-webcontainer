@@ -4,6 +4,7 @@
 
 import { join } from "node:path";
 
+import { createHttpRegistryClient } from "../../src/npm/install.js";
 import { loadRegistry, readDefinitions, repoRoot, runDefinition } from "./fixture-executor.js";
 
 const main = async (): Promise<number> => {
@@ -20,7 +21,11 @@ const main = async (): Promise<number> => {
     return 2;
   }
 
-  const registry = await loadRegistry();
+  // The corpus is the default because CI must be hermetic. `--registry network` is the product path, and it is never assumed: a
+  // verdict has to say which bytes it ran against.
+  const useNetwork = args.includes("--registry=network") || args[args.indexOf("--registry") + 1] === "network";
+  const registry = useNetwork ? createHttpRegistryClient() : await loadRegistry();
+  console.log(useNetwork ? "registry: network (registry.npmjs.org)" : "registry: offline corpus");
   let mismatches = 0;
   for (const definition of selected) {
     const report = await runDefinition(definition, registry, evidenceRoot);

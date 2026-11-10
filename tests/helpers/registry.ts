@@ -102,6 +102,9 @@ export async function createFakeRegistry(options: FakeRegistryOptions): Promise<
   }
 
   return {
+    // The double stands in for the offline corpus, so it describes itself the way `CorpusRegistry` does: a container line that
+    // said "from the registry" here would be asserting against a sentence no real install produces.
+    origin: "the offline corpus",
     fetched,
     tarballs: tarballsRequested,
     async packument(name: string): Promise<Packument> {
