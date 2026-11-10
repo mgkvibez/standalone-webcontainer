@@ -45,7 +45,11 @@ fixture-12  step 0  exit 1  npm error: MISSING_PACKAGE_JSON: no package.json at 
 Eleven also ask for something the approved profiles refuse on purpose (`npm install <package>` with arguments, and `pnpm install`
 for fixture-10). Those refusals are correct under D-4 and the pnpm contract; the definitions predate both.
 
-## Finding 2: the offline corpus is synthetic, so no real package can install
+## Finding 2 (superseded): the offline corpus is synthetic, so no real package can install
+
+*Update, same day: the three lanes now exist (`registry-lanes.md`). fixture-08 passes against real express bytes, both live and from a
+frozen snapshot, so real packages do install. The paragraph below describes the state that produced the corpus decision and is kept
+because it is why the decision was needed.*
 
 This is the deeper blocker, and the second pass made it visible. The committed corpus holds **ten packages, all of them
 `@corpus/*` and `@corpus-broken/*`** test fixtures. There is no `vite`, `react`, `next`, `express`, `typescript`, `ws`, `sharp`,
@@ -64,7 +68,7 @@ corpus is reproducible and a live registry is the product.
 
 | Fixture | Verdict | Cause | Runnable today? |
 |---|---|---|---|
-| 01 Vite dev server | RUNTIME_INCOMPATIBILITY | `vite` not in the corpus, so install fails and nothing listens | no |
+| 01 Vite dev server | RUNTIME_INCOMPATIBILITY | installs from the frozen vite@5.4.21 snapshot (8 packages), `npm run dev` resolves the binary, and the ESM loader stops at **top-level await** (ADR-0012) in vite's `dist/node/cli.js` — see `npm-run-and-vite.md` | one decision away |
 | 02 | RUNTIME_INCOMPATIBILITY | no files; no packages | no |
 | 03 shadcn CLI | RUNTIME_INCOMPATIBILITY | no files; `npx` is refused by design | no |
 | 04 core surface | **PASS, 6/6** | fs, http, streams, timers, EventEmitter | yes |

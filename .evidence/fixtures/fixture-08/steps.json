@@ -6,7 +6,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "builtin command completed: added 68 package(s) from snapshot \"express\" (68 pinned packages)",
-    "elapsedMs": 114,
+    "elapsedMs": 116,
     "record": {
       "index": 0,
       "exitCode": 0,
@@ -21,7 +21,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "process 1 exited 0 and left a server listening on port(s) 3200",
-    "elapsedMs": 152,
+    "elapsedMs": 154,
     "record": {
       "index": 1,
       "exitCode": 0,

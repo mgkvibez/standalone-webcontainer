@@ -12,7 +12,7 @@
  *   npm run snapshot:build -- --slug esm-tools is-odd@3.0.1 react@18.3.1
  */
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 
 import { createFsShim } from "../../src/shims/fs.js";
@@ -71,6 +71,10 @@ const main = async (): Promise<number> => {
     const parsed = parseInstallSpec(spec);
     dependencies[parsed.name] = parsed.range;
   }
+
+  // Cleared first: a re-capture with a different spec must not leave tarballs from the previous one behind, which is how a snapshot
+  // ends up holding bytes its manifest does not describe (and 600 KB nobody can account for).
+  await rm(join(out, "tarballs"), { recursive: true, force: true });
 
   const vfs = new FileSystem();
   const captured: Captured = { packuments: new Map(), tarballs: new Map() };
