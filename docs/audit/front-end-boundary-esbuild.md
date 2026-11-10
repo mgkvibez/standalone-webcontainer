@@ -347,7 +347,9 @@ The parity job `build: bare specifier through node_modules` is the proof that th
 bytes with its own resolver. Both emit **1424 identical bytes**, `b9e1fcfe2b4b40f6`. Agreement here means two things at once: our resolver picks the
 same files esbuild would, and the compiler is untouched by any of it.
 
-**What is still between this and a working `optimizeDeps`.** Not the compiler and not the filesystem. Vite 5's own code is ESM with top-level await
-(`dist/node/cli.js`), which ADR-0012 refuses, and the optimizer's orchestration around esbuild assumes a Node process with child processes, a cache
-directory and `chokidar`. This slice settles that the part which had to be ours, the resolver plus the compiler call, produces the same bytes as Node
-does.
+**What is still between this and a working `optimizeDeps`.** Not the compiler and not the filesystem, and not top-level await either: that claim was
+measured and it was wrong about both the file and the scope. `tools/scan-tla.ts` finds one module with a top-level await in `vite@5.4.21`,
+`bin/vite.js`, imported by nothing, both awaits inert; `dist/node/cli.js` and `dist/node/module-runner.js` have none. Entry-level top-level await
+now runs (ADR-0012 amendment), and a non-entry module that awaits is refused as `TLA_IN_NON_ENTRY` naming module and importer. What is left is the
+orchestration around esbuild, which assumes a Node process with child processes, a cache directory and `chokidar`. This slice settles that the part
+which had to be ours, the resolver plus the compiler call, produces the same bytes as Node does.

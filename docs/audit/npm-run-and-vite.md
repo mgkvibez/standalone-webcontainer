@@ -40,12 +40,21 @@ the snapshot lane so the measurement is reproducible without a network):
 | Before | `npm: unsupported command run` |
 | After `npm run` | `vite: not a command in this container, and no installed package provides a "vite" binary` |
 | After bin lookup | `node: cannot find module '/node_modules/vite/bin/vite.js'` |
-| Now | **`EsmSyntaxError: top-level await is not supported by this loader yet (ADR-0012)`** from `src/runtime/esm.ts` |
+| Then | **`EsmSyntaxError: top-level await is not supported by this loader yet (ADR-0012)`** from `src/runtime/esm.ts` |
+| Now (2026-11-10) | **`npm error: SNAPSHOT_MISSING: esbuild-wasm is not in this snapshot`**, so nothing installs and the dev server never starts |
 
-So Vite installs, its binary resolves, its entry file loads, and the ESM transform stops it: Vite 5's `dist/node/cli.js` is ESM with
-**top-level await**. ADR-0012 recorded that limitation deliberately, so this is not a surprise defect, it is the next decision. Making it
-work is not a patch to the transform: our loader is synchronous (`require`-shaped), and TLA needs the module graph to become
-awaitable, which changes `loadFile`'s contract for every caller.
+The top-level-await stage is gone, and the measurement above it was the reason. `tools/scan-tla.ts` counted the incidence instead of trusting
+the description: `vite@5.4.21` has exactly **one** module with a top-level await, `bin/vite.js`, and nothing imports it. Both awaits are inert
+(line 7 is `source-map-support` behind a `node_modules` guard, line 53 is `node:inspector` behind `--profile`), and `dist/node/cli.js` and
+`dist/node/module-runner.js` have none at all. So the general case was never needed: the entry module is the only module that can be awaited
+without making every importer's evaluation async, and that one boundary now exists (ADR-0012's amendment). `require()` of an async module still
+throws Node's `ERR_REQUIRE_ASYNC_MODULE`; a static **import** of one refuses as `TLA_IN_NON_ENTRY`, naming both files, because that case is our
+scope limit rather than a language rule.
+
+**The new wall is a snapshot, not a runtime.** The install now gets far enough to reach the `esbuild` → `esbuild-wasm` substitution
+(`src/npm/substitutions.ts`), and the frozen snapshot was captured from vite's own dependency graph, which does not contain the substitution
+target. The lane refuses to fall back to the network by design, so it stops: `SNAPSHOT_MISSING`. The fix is to rebuild the snapshot through
+the real installer, which records substitutions because it records whatever the installer resolved.
 
 That is why the verdict for fixture-01 is still `RUNTIME_INCOMPATIBILITY` and not `PASS`, and why the scorecard says so with a named
 cause instead of "nothing was installed".
@@ -64,7 +73,7 @@ installer to skip a platform-excluded optional dependency *before* asking the re
 
 ## State after this slice
 
-- 1071 tests across 79 files (8 new `npm run` tests, and the committed-snapshot check now loops over every snapshot).
+- 1116 tests across 84 files at this slice; the committed-snapshot check loops over every snapshot.
 - fixture-08 still passes on both the network and the snapshot lane.
-- fixture-01 reaches a named ESM limit rather than a command refusal, and the vite snapshot is committed so the claim is checkable.
+- fixture-01 now gets past the loader entirely and stops at snapshot coverage; the vite snapshot is committed so the claim is checkable.
 - Nothing about the corpus decision changed: network is the product lane, snapshot is the gate lane, corpus stays unit-test-only.

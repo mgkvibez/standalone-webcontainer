@@ -524,8 +524,11 @@ export class InProcessRuntime implements Runtime {
       try {
         const result = execute();
         if (result.evaluation !== undefined) {
+          // The body is suspended, and what it is suspended on may be a timer of ours: `await new Promise((resolve) => setTimeout(resolve, 5))`
+          // as an entry body deadlocked here until the queue was pumped while it waited. The pump also decides when the body has settled with
+          // work still queued, which is the normal case and is left to `drain` below exactly as before.
           try {
-            await result.evaluation;
+            await scheduler.drainWhile(result.evaluation);
           } catch (error) {
             // A rejection here is a throw from the module's own body after its first await, so it is the program failing.
             return programFailure(error);

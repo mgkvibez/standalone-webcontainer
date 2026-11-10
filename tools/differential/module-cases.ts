@@ -195,6 +195,17 @@ export const MODULE_CASES: readonly ModuleCase[] = [
     entry: "main.mjs",
   },
   {
+    // The microtask case above never caught the real bug: an entry suspended on a MICROTASK settles without the scheduler, while one suspended on a
+    // TIMER deadlocked (nothing ran the timer the body was waiting for, and the run ended at its timeout having printed nothing). Node is the oracle
+    // for the fixed behaviour, which is the only reason this case is worth its runtime.
+    id: "tla-entry-awaiting-a-timer",
+    question: "does an entry that is suspended on a timer resume before the process is judged?",
+    files: {
+      "main.mjs": "console.log('before');\nawait new Promise((resolve) => setTimeout(resolve, 5));\nconsole.log('after');",
+    },
+    entry: "main.mjs",
+  },
+  {
     id: "tla-export-through-import",
     question: "does import() wait for a module whose exports are only set after an await?",
     files: {

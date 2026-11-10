@@ -77,7 +77,9 @@ tests. This one has a fixture consequence: fixture 4's timing assertions must be
 rejected, keep the virtual clock and give up on live servers.
 
 **P0-4. Accept ADR-0012's supersession (native ESM)?** Recommendation: accept at Phase 5. The acorn transform cannot give
-live bindings or top-level await, and ESM-only packages such as `chalk@5` already fail.
+live bindings, and ESM-only packages such as `chalk@5` already fail. (Updated 2026-11-10: top-level await is no longer part of this
+argument. It is supported in the entry module and refused elsewhere as `TLA_IN_NON_ENTRY`; see ADR-0012's amendment, which measured the
+incidence first.)
 
 **P0-5. Amend ADR-0004 D-3 to `process.platform = "linux"`?** Recommendation: yes. Packages branch on `linux` to pick
 code paths that are already the ones we implement; `"browser"` sends them down branches nobody here has heard of. Cost is
