@@ -63,6 +63,29 @@ function prepareSource(raw: string): string {
   return withoutBom.startsWith("#!") ? withoutBom.replace(/^#![^\n]*/, "") : withoutBom;
 }
 
+/**
+ * Does this module declare `name` for itself, lexically?
+ *
+ * Only lexical declarations collide with a parameter: `var` redeclares one happily (it is the same scope slot), but `const`, `let`
+ * and `class` are a SyntaxError when the name is already a parameter. Destructuring counts, because `const { Buffer } = ...` is how
+ * a modernised package binds it.
+ */
+export function declaresOwnBinding(source: string, name: string): boolean {
+  // Comments and string literals are removed first, because a mention is not a declaration: `// use const Buffer` in a doc comment
+  // would otherwise strip the shim from a module that genuinely needs it. This is a scrubber, not a parser, and it says so: a
+  // regex literal containing a quote can confuse the last three rules, and the cost of a false NEGATIVE is bounded (the module keeps
+  // the parameter and hits the same SyntaxError it would have hit without any of this).
+  const scrubbed = source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "")
+    .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
+    .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
+    .replace(/`(?:[^`\\]|\\.)*`/g, "``");
+  const direct = new RegExp(`\\b(?:const|let|class)\\s+${name}\\b`);
+  const destructured = new RegExp(`\\b(?:const|let)\\s*(?:\\{[^}]*\\b${name}\\b[^}]*\\}|\\[[^\\]]*\\b${name}\\b[^\\]]*\\])`, "s");
+  return direct.test(scrubbed) || destructured.test(scrubbed);
+}
+
 /** The clock and timer surface a run exposes to user code (ADR-0013 amendment 2). */
 export interface RuntimeGlobals {
   readonly Date: unknown;
@@ -280,29 +303,15 @@ export class CommonJsLoader {
       this.#moduleFormat(path) === "esm" ? transformEsm(prepared, { url: `file://${path}` }).code : prepared;
     const moduleDir = nodePath.dirname(path);
 
-    // The function's parameter list IS the shim surface: user code sees exactly
-    // these names as free variables, and nothing else from our scope.
-    const factory = new Function(
-      "exports",
-      "require",
-      "module",
-      "__filename",
-      "__dirname",
-      "process",
-      "console",
-      "Buffer",
-      // The clock and the timers are parameters for the same reason process and console are: user code sees exactly these
-      // names as free variables, so a run's setTimeout IS the scheduler's and its Date.now() IS virtual (ADR-0013).
-      "Date",
-      "performance",
-      "setTimeout",
-      "setInterval",
-      "clearTimeout",
-      "clearInterval",
-      "setImmediate",
-      code + "\n//# sourceURL=" + path,
-    );
-
+    // `new Function`'s parameter list IS the shim surface: user code sees exactly these names as free variables, and nothing else
+    // from our scope. The clock and the timers are in it for the same reason `process` is, so a run's setTimeout IS the
+    // scheduler's and its Date.now() IS virtual (ADR-0013).
+    //
+    // One name is omitted per module when that module declares it itself. A parameter is a lexical binding in the body, so
+    // express 5's `lib/utils.js`, which opens with `const Buffer = require("node:buffer").Buffer`, cannot coexist with a `Buffer`
+    // parameter: it is a SyntaxError before a line of it runs. Node never has this problem because Buffer is a real global there
+    // and a module's own declaration simply shadows it. Dropping the parameter for a module that binds the name gives that
+    // module exactly Node's behaviour, while every other module keeps the shim.
     const requireFromHere = (specifier: string): unknown => this.require(specifier, moduleDir);
     // `require.main` is the entry module, on every require function, so the common `require.main === module` test works. It is
     // read at call time from the loader rather than captured, because the entry is only known after it has been loaded.
@@ -311,27 +320,40 @@ export class CommonJsLoader {
       enumerable: false,
       configurable: false,
     });
+    const runtime = this.#runtimeContext;
+    const runtimeGlobals = runtime.globals ?? HOST_GLOBALS;
+    const bindings: ReadonlyArray<readonly [string, unknown]> = [
+      ["exports", record.exports],
+      ["require", requireFromHere],
+      ["module", record],
+      ["__filename", path],
+      ["__dirname", moduleDir],
+      ["process", runtime.process],
+      ["console", runtime.console],
+      ["Buffer", runtime.Buffer],
+      ["Date", runtimeGlobals.Date],
+      ["performance", runtimeGlobals.performance],
+      ["setTimeout", runtimeGlobals.setTimeout],
+      ["setInterval", runtimeGlobals.setInterval],
+      ["clearTimeout", runtimeGlobals.clearTimeout],
+      ["clearInterval", runtimeGlobals.clearInterval],
+      ["setImmediate", runtimeGlobals.setImmediate],
+    ];
+    const injected = bindings.filter(([name]) => !declaresOwnBinding(code, name));
+
+    let factory: (...args: unknown[]) => unknown;
+    try {
+      factory = new Function(...injected.map(([name]) => name), code + "\n//# sourceURL=" + path) as (...args: unknown[]) => unknown;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // A SyntaxError while compiling a dependency is unattributable without its path: the bare message says which identifier
+      // collided and nothing about whose file it was in.
+      throw new SyntaxError(`${path}: ${message}`);
+    }
+
     // The entry module becomes `require.main` the first time anything is evaluated, which is the entry itself.
     if (this.#main === null) this.#main = record;
-    const runtime = this.#runtimeContext;
-    factory.call(
-      record.exports,
-      record.exports,
-      requireFromHere,
-      record,
-      path,
-      moduleDir,
-      runtime.process,
-      runtime.console,
-      runtime.Buffer,
-      (runtime.globals ?? HOST_GLOBALS).Date,
-      (runtime.globals ?? HOST_GLOBALS).performance,
-      (runtime.globals ?? HOST_GLOBALS).setTimeout,
-      (runtime.globals ?? HOST_GLOBALS).setInterval,
-      (runtime.globals ?? HOST_GLOBALS).clearTimeout,
-      (runtime.globals ?? HOST_GLOBALS).clearInterval,
-      (runtime.globals ?? HOST_GLOBALS).setImmediate,
-    );
+    factory.call(record.exports, ...injected.map(([, value]) => value));
 
     record.loaded = true;
     return record;

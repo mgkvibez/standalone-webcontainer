@@ -29,13 +29,36 @@ interface Registration {
   readonly once: boolean;
 }
 
+/**
+ * Listener storage lives outside the instance, keyed by whatever object is calling.
+ *
+ * This is not an optimisation. `EventEmitter.prototype` is routinely **mixed into a plain object** (`express` does exactly that with
+ * `merge-descriptors`, then calls `app.on(...)`), and Node's emitter supports it because its state is an ordinary property. A `#private`
+ * field cannot be read from an object that is not an instance of this class, so those calls threw "Cannot read private member
+ * #listeners from an object whose class did not declare it". A WeakMap keyed by `this` gives every object its own registry and keeps
+ * the state out of sight, which is what the private field was for.
+ */
+const registries = new WeakMap<object, Map<string, Registration[]>>();
+
+function listenersOf(target: object): Map<string, Registration[]> {
+  let registry = registries.get(target);
+  if (registry === undefined) {
+    registry = new Map<string, Registration[]>();
+    registries.set(target, registry);
+  }
+  return registry;
+}
+
+function peek(target: object): Map<string, Registration[]> | undefined {
+  return registries.get(target);
+}
+
 export class EventEmitter {
-  readonly #listeners = new Map<string, Registration[]>();
 
   on(event: string, listener: Listener): this {
     if (typeof listener !== "function") throw new TypeError("listener must be a function");
-    const existing = this.#listeners.get(event);
-    if (existing === undefined) this.#listeners.set(event, [{ listener, once: false }]);
+    const existing = listenersOf(this).get(event);
+    if (existing === undefined) listenersOf(this).set(event, [{ listener, once: false }]);
     else existing.push({ listener, once: false });
     return this;
   }
@@ -46,19 +69,19 @@ export class EventEmitter {
 
   once(event: string, listener: Listener): this {
     if (typeof listener !== "function") throw new TypeError("listener must be a function");
-    const existing = this.#listeners.get(event);
-    if (existing === undefined) this.#listeners.set(event, [{ listener, once: true }]);
+    const existing = listenersOf(this).get(event);
+    if (existing === undefined) listenersOf(this).set(event, [{ listener, once: true }]);
     else existing.push({ listener, once: true });
     return this;
   }
 
   /** Removes one registration, preferring an exact match. Unknown events and listeners are no-ops. */
   off(event: string, listener: Listener): this {
-    const existing = this.#listeners.get(event);
+    const existing = listenersOf(this).get(event);
     if (existing === undefined) return this;
     const index = existing.findIndex((registration) => registration.listener === listener);
     if (index >= 0) existing.splice(index, 1);
-    if (existing.length === 0) this.#listeners.delete(event);
+    if (existing.length === 0) listenersOf(this).delete(event);
     return this;
   }
 
@@ -68,13 +91,13 @@ export class EventEmitter {
 
   /** With no event name, removes everything: what teardown needs to stop all further delivery. */
   removeAllListeners(event?: string): this {
-    if (event === undefined) this.#listeners.clear();
-    else this.#listeners.delete(event);
+    if (event === undefined) listenersOf(this).clear();
+    else listenersOf(this).delete(event);
     return this;
   }
 
   emit(event: string, ...args: unknown[]): boolean {
-    const registrations = this.#listeners.get(event);
+    const registrations = listenersOf(this).get(event);
     if (registrations === undefined || registrations.length === 0) {
       // Node's special case, preserved on purpose: an unhandled "error" is thrown, not dropped.
       if (event === "error") {
@@ -95,15 +118,15 @@ export class EventEmitter {
   }
 
   listeners(event: string): readonly Listener[] {
-    return (this.#listeners.get(event) ?? []).map((registration) => registration.listener);
+    return (listenersOf(this).get(event) ?? []).map((registration) => registration.listener);
   }
 
   listenerCount(event: string): number {
-    return (this.#listeners.get(event) ?? []).length;
+    return (listenersOf(this).get(event) ?? []).length;
   }
 
   eventNames(): readonly string[] {
-    return [...this.#listeners.keys()];
+    return [...(peek(this)?.keys() ?? [])];
   }
 }
 

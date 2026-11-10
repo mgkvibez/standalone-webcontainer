@@ -71,7 +71,7 @@ corpus is reproducible and a live registry is the product.
 | 05 | RUNTIME_INCOMPATIBILITY (expected) | no files; no packages | no |
 | 06 | RUNTIME_INCOMPATIBILITY (expected) | no files; no packages | no |
 | 07 CLI | **PASS, 3/3** | argv, a file read, an exit code | yes |
-| 08 express | RUNTIME_INCOMPATIBILITY | program added; `npm install express` now installs 68 real packages, then `node server.mjs` fails on a missing `node:zlib` — see `live-registry-measurement.md` | one shim away |
+| 08 express | **PASS** | 68 real packages from registry.npmjs.org, express 5 serves the body on port 3200 through the preview gateway; 3/3 assertions — see `shim-layer.md` | frozen once signed off |
 | 09 is-odd | RUNTIME_INCOMPATIBILITY | install with arguments refused; no files | no |
 | 10 pnpm | RUNTIME_INCOMPATIBILITY | `pnpm install` restricted by D-4 | no |
 | 11 Vite build | RUNTIME_INCOMPATIBILITY | no files; `vite` not in the corpus | no |

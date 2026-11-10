@@ -55,6 +55,23 @@ function byteLength(chunk: unknown): number {
  * The read half. Kept separate from the write half because `Duplex` needs two independent states: an error on the write
  * side must not silently stop reading, which is the contract's stated behaviour.
  */
+/**
+ * The legacy `Stream` base class, which is what `require("stream")` **is** in Node.
+ *
+ * This is not decoration. `send` and dozens of older packages do `util.inherits(SendStream, require("stream"))` and call
+ * `Stream.call(this)`, which needs the module itself to be a constructor whose prototype carries EventEmitter's methods. Exporting
+ * only `{ Readable, Writable, ... }` made `util.inherits` receive `undefined` and fail with "Object prototype may only be an Object or
+ * null", which is a confusing error a long way from its cause.
+ */
+export class Stream extends EventEmitter {
+  /** Legacy `pipe` from the pre-`Readable` era; `Readable.prototype.pipe` is the one modern code uses. */
+  pipe<T extends { write?: (chunk: unknown) => boolean; end?: () => void }>(destination: T): T {
+    this.on("data", (chunk) => destination.write?.(chunk));
+    this.on("end", () => destination.end?.());
+    return destination;
+  }
+}
+
 export class Readable extends EventEmitter {
   #buffer: unknown[] = [];
   #buffered = 0;
