@@ -6,7 +6,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "builtin command completed: added 0 package(s) from snapshot \"vite\" (8 pinned packages)",
-    "elapsedMs": 1,
+    "elapsedMs": 2,
     "record": {
       "index": 0,
       "exitCode": 0,
@@ -21,7 +21,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "process 1 exited with exit 0",
-    "elapsedMs": 16,
+    "elapsedMs": 15,
     "record": {
       "index": 1,
       "exitCode": 0,
