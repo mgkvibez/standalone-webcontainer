@@ -2,25 +2,25 @@
   {
     "index": 0,
     "kind": "exit-code",
-    "state": "passed",
-    "passed": true,
+    "state": "failed",
+    "passed": false,
     "stepAvailable": true,
-    "detail": "expected exit code 0, observed 0"
+    "detail": "expected exit code 0, observed 1"
   },
   {
     "index": 1,
     "kind": "http-status",
-    "state": "passed",
-    "passed": true,
+    "state": "failed",
+    "passed": false,
     "stepAvailable": true,
-    "detail": "expected status 200 from http://localhost:3200/ (as observed at the end of step 1), observed 200"
+    "detail": "expected status 200 from http://localhost:3200/ (as observed at the end of step 1), observed 404"
   },
   {
     "index": 2,
     "kind": "http-body-contains",
-    "state": "passed",
-    "passed": true,
+    "state": "failed",
+    "passed": false,
     "stepAvailable": true,
-    "detail": "body of http://localhost:3200/ (as observed at the end of step 1) contained the expected text"
+    "detail": "body of http://localhost:3200/ (as observed at the end of step 1) did not contain \"express-static-ok\"; observed \"No preview server is listening on port 3200. Start one with server.listen(3200).\""
   }
 ]

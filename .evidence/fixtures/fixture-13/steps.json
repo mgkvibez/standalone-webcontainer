@@ -6,7 +6,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "builtin command completed: added 8 package(s) from snapshot \"vite\" (8 pinned packages)",
-    "elapsedMs": 219,
+    "elapsedMs": 217,
     "record": {
       "index": 0,
       "exitCode": 0,
@@ -21,7 +21,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "process 1 exited 0 and left a server listening on port(s) 3300",
-    "elapsedMs": 943,
+    "elapsedMs": 976,
     "record": {
       "index": 1,
       "exitCode": 0,
@@ -42,7 +42,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "process 2 exited with exit 0",
-    "elapsedMs": 99,
+    "elapsedMs": 102,
     "record": {
       "index": 2,
       "exitCode": 0,
