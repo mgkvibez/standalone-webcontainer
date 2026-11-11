@@ -190,11 +190,33 @@ export class InProcessRuntime implements Runtime {
   readonly #registry: PortRegistry;
   readonly #gateway: PreviewGateway;
   readonly #watches: WatchSourcePort | undefined;
+  /** The scheduler of the most recent run, kept so a served request always has a queue to be resumed on. */
+  #lastScheduler: Scheduler | null = null;
+  /** Runs in progress. A run pumps its own queue, so a request pump must not start a second loop over the same one. */
+  #running = 0;
+  #pumping = false;
+  /**
+   * Requests waiting for an answer.
+   *
+   * A set rather than a flag because "keep pumping" is about ALL of them: the first pump covered only the request that started it, so a
+   * second request arriving while the first was still being answered got no pump at all and its work was orphaned. Measured: vite's
+   * optimizer ran on the SECOND request (`/node_modules/.vite/deps/picocolors.js`), the pump belonged to the first (`/src/main.js`), and
+   * the optimizer's work sat with nothing scheduling it while the first pump reported `queue-empty` and exited.
+   */
+  readonly #pendingRequests = new Set<Promise<unknown>>();
+  #idleWaiters: (() => void)[] = [];
 
   constructor(vfs: FileSystemPort, options: InProcessRuntimeOptions = {}) {
     this.#vfs = vfs;
     this.#registry = options.registry ?? new PortRegistry();
-    this.#gateway = new PreviewGateway({ registry: this.#registry });
+    this.#gateway = new PreviewGateway({
+      registry: this.#registry,
+      // A served request is work this runtime does on a caller's behalf long after the program body returned, and this queue is the
+      // only thing that can resume it. See Scheduler.pumpWhile for the measurement that made this necessary.
+      pump: (pending) => {
+        void this.#pumpForRequest(pending);
+      },
+    });
     this.#watches = options.watches;
   }
 
@@ -205,6 +227,55 @@ export class InProcessRuntime implements Runtime {
    */
   get gateway(): PreviewGateway {
     return this.#gateway;
+  }
+
+  /**
+   * Keep the queue turning while one request is outstanding.
+   *
+   * Failure here is silent on purpose: this is not the caller's answer, and turning a pump fault into a 500 would report a runtime
+   * problem as a broken project. The gateway's own deadline owns what the caller finally sees.
+   */
+  async #pumpForRequest(pending: Promise<unknown>): Promise<void> {
+    this.#pendingRequests.add(pending);
+    void Promise.resolve(pending).then(
+      () => {
+        this.#forgetRequest(pending);
+      },
+      () => {
+        this.#forgetRequest(pending);
+      },
+    );
+    if (this.#pumping) return; // The pump already running waits for every request in the set, this one included.
+    await this.#pumpUntilIdle();
+  }
+
+  #forgetRequest(pending: Promise<unknown>): void {
+    this.#pendingRequests.delete(pending);
+    if (this.#pendingRequests.size > 0) return;
+    // Nobody is waiting any more: the pump can stop at its next turn instead of sitting out its ceiling.
+    for (const wake of this.#idleWaiters.splice(0)) wake();
+  }
+
+  /** Resolves once nothing is outstanding, or immediately when nothing is. */
+  #allRequestsSettled(): Promise<void> {
+    if (this.#pendingRequests.size === 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      this.#idleWaiters.push(resolve);
+    });
+  }
+
+  async #pumpUntilIdle(): Promise<void> {
+    const scheduler = this.#lastScheduler;
+    // A run in progress is already pumping this queue; two loops over it would interleave callbacks in an order nobody wrote.
+    if (scheduler === null || this.#running > 0 || this.#pumping) return;
+    this.#pumping = true;
+    try {
+      await scheduler.pumpWhile(this.#allRequestsSettled());
+    } catch {
+      // Nothing to report and nothing to retry: each request's own deadline decides its outcome.
+    } finally {
+      this.#pumping = false;
+    }
   }
 
   /**
@@ -266,6 +337,19 @@ export class InProcessRuntime implements Runtime {
   }
 
   async run(entryPath: string, options: RunOptions = {}): Promise<ExecutionResult> {
+    // Counted around the whole execution, including a run that throws: a leaked count would disable the request pump for every later
+    // run in this runtime, which is a silent way to reintroduce the defect the pump exists for.
+    this.#running += 1;
+    try {
+      return await this.#performRun(entryPath, options);
+    } finally {
+      this.#running -= 1;
+      // A request that arrived during the run had no pump of its own; now that the run is over, its work needs one.
+      if (this.#pendingRequests.size > 0) void this.#pumpUntilIdle();
+    }
+  }
+
+  async #performRun(entryPath: string, options: RunOptions = {}): Promise<ExecutionResult> {
     const started = Date.now();
     const onOutput = options.onOutput;
     const stdout = createSink(onOutput === undefined ? undefined : (text) => onOutput("stdout", text));
@@ -385,6 +469,9 @@ export class InProcessRuntime implements Runtime {
         stderr.write(`Uncaught ${message}\n`);
       },
     );
+
+    // Kept so a request that arrives after this run ends still has a queue to be resumed on (see #pumpForRequest).
+    this.#lastScheduler = scheduler;
 
     const consoleShim = {
       log: (...args: unknown[]) => {

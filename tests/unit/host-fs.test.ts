@@ -75,13 +75,16 @@ describe("the host fs object's shape", () => {
       expect(fs, `host fs is missing ${name}`).toHaveProperty([name]);
       expect(typeof fs[name as keyof typeof fs], `${name} is not callable`).toBe("function");
     }
-    // Go copies these and `syscall.Open` reads them; the stub's values are -1 sentinels and inventing real ones would change behaviour nobody measured.
-    expect(fs.constants).toMatchObject({ O_WRONLY: -1, O_RDWR: -1, O_CREAT: -1, O_TRUNC: -1, O_APPEND: -1, O_EXCL: -1 });
+    // Go copies these at startup and `syscall.Open` reads them, so their VALUES decide what an open call means. They used to be the stub's -1
+    // sentinels, which made every flag indistinguishable: `OpenFile(name, O_WRONLY|O_CREATE|O_TRUNC)` arrived as arithmetic on -1, nothing could
+    // tell a read from a truncating write, and esbuild's output files were written to stdout instead of to disk. Real POSIX values, pinned.
+    expect(fs.constants).toEqual({ O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_TRUNC: 512, O_APPEND: 1024, O_EXCL: 128 });
   });
 
   it("refuses the members nothing has been measured asking for", () => {
     const { fs } = setup();
     for (const name of REFUSED_HOST_FS_MEMBERS) {
+      // `mkdir` is no longer among these: a build with an `outdir` asks for it, and it is implemented.
       const { error } = call((callback) => member(fs, name)(callback));
       expect(error, `${name} should refuse`).toMatchObject({ code: "ENOSYS" });
     }
@@ -264,5 +267,98 @@ describe("write", () => {
     const fs = createHostFs(hostFsSourceFrom(vfs), { cwd: "/app", write: () => {} });
     const { error } = call((callback) => fs.write(1, new Uint8Array(4), 1, 2, null, callback as never));
     expect(error).toMatchObject({ code: "ENOSYS" });
+  });
+});
+
+/**
+ * The write path, which esbuild's output depends on.
+ *
+ * Measured need: a build with an `outdir` opens each output file for writing, writes the bytes and closes it. Before this path existed, `write`
+ * sent EVERY call to the program's stdout, so the bytes went into the log and no file appeared. Go's `os.Create` is `OpenFile(name, O_RDWR |
+ * O_CREATE | O_TRUNC, 0666)`, so those three flags are what the tests exercise.
+ */
+describe("writing through the host fs", () => {
+  const O = { O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_TRUNC: 512, O_APPEND: 1024 };
+
+  const openFor = (fs: ReturnType<typeof createCompleteHostFs>, path: string, flags: number): number => {
+    const { error, value } = call((callback) => member(fs, "open")(path, flags, 0o666, callback));
+    if (error !== null && error !== undefined) throw error;
+    return value as number;
+  };
+
+  const writeTo = (fs: ReturnType<typeof createCompleteHostFs>, fd: number, text: string): void => {
+    const bytes = new TextEncoder().encode(text);
+    const { error } = call((callback) => member(fs, "write")(fd, bytes, 0, bytes.length, null, callback));
+    if (error !== null && error !== undefined) throw error;
+  };
+
+  it("creates the file an O_CREAT open names, and puts the bytes in it, not in stdout", () => {
+    const { vfs, lines, fs } = setup();
+    const fd = openFor(fs, "/app/out.js", O.O_RDWR | O.O_CREAT | O.O_TRUNC);
+    writeTo(fs, fd, "// bundle\n");
+
+    expect(vfs.readFileSync("/app/out.js", "utf8")).toBe("// bundle\n");
+    expect(lines).toEqual([]);
+  });
+
+  it("makes the directories an output path needs", () => {
+    const { vfs, fs } = setup();
+    const { error } = call((callback) => member(fs, "mkdir")("/app/deps/nested", 0o777, callback));
+    expect(error).toBeNull();
+    expect(vfs.statSync("/app/deps/nested").kind).toBe("dir");
+
+    const fd = openFor(fs, "/app/deps/nested/x.js", O.O_RDWR | O.O_CREAT | O.O_TRUNC);
+    writeTo(fs, fd, "x");
+    expect(vfs.readFileSync("/app/deps/nested/x.js", "utf8")).toBe("x");
+  });
+
+  it("empties a file opened O_TRUNC instead of leaving the old tail behind", () => {
+    const { vfs, fs } = setup((seeded) => seeded.writeFileSync("/app/out.js", "an older, much longer bundle\n"));
+    const fd = openFor(fs, "/app/out.js", O.O_RDWR | O.O_CREAT | O.O_TRUNC);
+    writeTo(fs, fd, "short");
+
+    expect(vfs.readFileSync("/app/out.js", "utf8")).toBe("short");
+  });
+
+  it("appends at the end when the handle was opened O_APPEND, whatever the position", () => {
+    const { vfs, fs } = setup((seeded) => seeded.writeFileSync("/app/log.txt", "first\n"));
+    const fd = openFor(fs, "/app/log.txt", O.O_WRONLY | O.O_CREAT | O.O_APPEND);
+    writeTo(fs, fd, "second\n");
+
+    expect(vfs.readFileSync("/app/log.txt", "utf8")).toBe("first\nsecond\n");
+  });
+
+  it("advances an unpositioned write the way a real fd does", () => {
+    const { vfs, fs } = setup();
+    const fd = openFor(fs, "/app/a.txt", O.O_WRONLY | O.O_CREAT | O.O_TRUNC);
+    writeTo(fs, fd, "one ");
+    writeTo(fs, fd, "two");
+
+    expect(vfs.readFileSync("/app/a.txt", "utf8")).toBe("one two");
+  });
+
+  it("refuses a write to a handle opened read-only, with EBADF", () => {
+    const { vfs, fs } = setup((seeded) => seeded.writeFileSync("/app/a.txt", "read me"));
+    const fd = openFor(fs, "/app/a.txt", 0);
+    const bytes = new TextEncoder().encode("nope");
+    const { error } = call((callback) => member(fs, "write")(fd, bytes, 0, bytes.length, null, callback));
+
+    expect(error).toMatchObject({ code: "EBADF" });
+    expect(vfs.readFileSync("/app/a.txt", "utf8")).toBe("read me");
+  });
+
+  it("still sends a write to an unopened fd to the program's stdout", () => {
+    // fd 1 is not a file this object opened, so it must keep reaching the sink: that is how a Go program's log output arrives.
+    const { fs, lines } = setup();
+    const bytes = new TextEncoder().encode("hello\n");
+    // Called through the object, as the Go side calls it: `write` delegates to `this.writeSync` because esbuild replaces that member when its
+    // service starts, and a detached call would lose the receiver.
+    let value: unknown;
+    fs.write(1, bytes, 0, bytes.length, null, (_error, written) => {
+      value = written;
+    });
+
+    expect(value).toBe(6);
+    expect(lines).toEqual(["hello\n"]);
   });
 });

@@ -353,3 +353,8 @@ measured and it was wrong about both the file and the scope. `tools/scan-tla.ts`
 now runs (ADR-0012 amendment), and a non-entry module that awaits is refused as `TLA_IN_NON_ENTRY` naming module and importer. What is left is the
 orchestration around esbuild, which assumes a Node process with child processes, a cache directory and `chokidar`. This slice settles that the part
 which had to be ours, the resolver plus the compiler call, produces the same bytes as Node does.
+
+**Update (2026-11-11):** that orchestration now runs. `vite dev` pre-bundles a bare import and serves it, `200`, 1185 bytes, measured in
+`docs/audit/vite-dependency-optimizer.md`. Two defects stood in the way and neither was the one predicted here: a served request never ran its own
+timers (ADR-0013 amendment 4), and esbuild-wasm's browser channel answers `hasFS: false`, so `write` is refused and defaults to false while native
+esbuild defaults it to true. The second is now handled at the esbuild init hook, which writes a build's `outputFiles` to its `outdir`.

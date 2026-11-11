@@ -35,6 +35,10 @@
 /** The filesystem facts a Go runtime asks for, and nothing wider. */
 export interface HostFsSource {
   readdirSync(path: string): string[];
+  /** Write a file's whole contents, creating it (and its parents) if needed. */
+  writeFileSync(path: string, bytes: Uint8Array): void;
+  /** Create a directory and its parents, as `mkdir -p`. */
+  mkdirSync(path: string): void;
   /** A file's bytes. Throws when the path does not exist or is a directory, as Node's does. */
   readFileSync(path: string): Uint8Array | string;
   statSync(path: string): {
@@ -56,9 +60,19 @@ export function hostFsSourceFrom(vfs: {
   readdirSync(path: string): string[];
   readFileSync(path: string): Uint8Array | string;
   statSync(path: string): { kind: "file" | "dir"; size: number; modifiedAt: number; createdAt: number };
+  writeFileSync(path: string, data: Uint8Array | string, options?: { readonly evictable?: boolean }): void;
+  mkdirSync(path: string, options?: { readonly recursive?: boolean }): void;
 }): HostFsSource {
   return {
     readdirSync: (path) => vfs.readdirSync(path),
+    // The VFS writes a file only where its parents already exist, which is Node's rule and the right one for a shim. Go's `Create` is a one-call
+    // affair, so the parents are made here rather than making esbuild ask for a directory it never asked for.
+    writeFileSync: (path, bytes) => {
+      const slash = path.lastIndexOf("/");
+      if (slash > 0) vfs.mkdirSync(path.slice(0, slash), { recursive: true });
+      vfs.writeFileSync(path, bytes);
+    },
+    mkdirSync: (path) => vfs.mkdirSync(path, { recursive: true }),
     readFileSync: (path) => vfs.readFileSync(path),
     statSync: (path) => {
       const stats = vfs.statSync(path);
@@ -130,7 +144,26 @@ interface Handle {
   readonly path: string;
   /** Where an unpositioned read resumes. Advanced by each read, as a real fd's offset is. */
   position: number;
+  /** Opened for writing. Decides whether `write` reaches the file or the program's stdout. */
+  readonly writable: boolean;
+  /** `O_APPEND`: every write lands at the end, whatever the position says. */
+  readonly append: boolean;
 }
+
+/**
+ * The open flags the Go runtime ORs together, as real POSIX values.
+ *
+ * They used to be the -1 sentinels esbuild's own stub ships, which made every flag indistinguishable: `OpenFile(name, O_WRONLY|O_CREATE|O_TRUNC)` arrived
+ * as arithmetic on -1 and nothing could tell a read from a truncating write. `syscall.init` copies these members into its own constants at startup, so
+ * supplying real values is what makes those flags mean what they say.
+ */
+const O_RDONLY = 0;
+const O_WRONLY = 1;
+const O_RDWR = 2;
+const O_CREAT = 0o100;
+const O_TRUNC = 0o1000;
+const O_APPEND = 0o2000;
+const O_ACCMODE = O_WRONLY | O_RDWR;
 
 /** The object placed at `globalThis.fs` for a program that loads a Go runtime. */
 export interface HostFs {
@@ -144,6 +177,7 @@ export interface HostFs {
   readdir(path: string, callback: Callback): void;
   read(fd: number, buffer: Uint8Array, offset: number, length: number, position: number | null, callback: Callback): void;
   close(fd: number, callback: Callback): void;
+  mkdir(path: string, mode: number, callback: Callback): void;
 }
 
 /**
@@ -166,6 +200,10 @@ export function createHostFs(source: HostFsSource, options: { readonly cwd: stri
   // Line-buffered, as the stub is: a caller that writes half a line must not have it cut in two on the way out.
   let pending = "";
   const writeSync = (fd: number, buffer: Uint8Array): number => {
+    const handle = handles.get(fd);
+    // An fd this object opened for writing is a file, not a stream. Sending its bytes to stdout was the defect: esbuild wrote every dependency
+    // bundle into the program's log and nothing appeared on disk, so vite's optimizer produced metadata naming a file that did not exist.
+    if (handle !== undefined) return writeFileBytes(handle, buffer);
     pending += decoder.decode(buffer);
     const newline = pending.lastIndexOf("\n");
     if (newline !== -1) {
@@ -173,6 +211,41 @@ export function createHostFs(source: HostFsSource, options: { readonly cwd: stri
       pending = pending.slice(newline + 1);
     }
     return buffer.length;
+  };
+
+  /** A file's bytes, or empty when it does not exist yet: the write path may be creating it. */
+  const bytesOf = (path: string): Uint8Array => {
+    try {
+      const existing = source.readFileSync(path);
+      return typeof existing === "string" ? new TextEncoder().encode(existing) : existing;
+    } catch {
+      return new Uint8Array(0);
+    }
+  };
+
+  /**
+   * Put `chunk` into the file behind a writable handle: at `position` when one is given, else at the end for `O_APPEND`, else at the handle's own
+   * advancing offset, which is the rule a real fd follows.
+   *
+   * The bytes reach the filesystem on every call rather than being held until `close`. A kernel buffers, but here buffering buys nothing and costs
+   * correctness: `close` is not guaranteed (a Go program that panics never sends one), the files are small, and anything reading between the write and
+   * the close would see a truncated file. The measured case needs exactly this: esbuild writes one bundle per dependency and vite renames the whole
+   * directory immediately afterwards, from the JavaScript side, with no Go close in between.
+   */
+  const writeFileBytes = (handle: Handle, chunk: Uint8Array, position: number | null = null): number => {
+    if (!handle.writable) {
+      // Writing to a handle opened read-only is EBADF in POSIX, and answering it anyway would hide a caller's bug.
+      throw failure("EBADF", "write", handle.path);
+    }
+    const current = bytesOf(handle.path);
+    const start = position ?? (handle.append ? current.length : handle.position);
+    const end = start + chunk.length;
+    const next = new Uint8Array(Math.max(current.length, end));
+    next.set(current, 0);
+    next.set(chunk, start);
+    source.writeFileSync(handle.path, next);
+    handle.position = end;
+    return chunk.length;
   };
 
   const statOf = (path: string, callback: Callback): void => {
@@ -186,16 +259,41 @@ export function createHostFs(source: HostFsSource, options: { readonly cwd: stri
   const fs: HostFs = {
     // `syscall.Open` copies these members, and the stub's own values are -1 sentinels. Kept identical rather than invented: a caller that branches
     // on a flag is branching on something this runtime never implemented, and matching the stub is the only behaviour that cannot surprise it.
-    constants: { O_WRONLY: -1, O_RDWR: -1, O_CREAT: -1, O_TRUNC: -1, O_APPEND: -1, O_EXCL: -1 },
-    open(path: string, _flags: number, _mode: number, callback: Callback): void {
+    constants: { O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND, O_EXCL: 0o200 },
+    open(path: string, flags: number, _mode: number, callback: Callback): void {
       const resolved = at(path);
+      const writable = (flags & (O_ACCMODE | O_CREAT | O_TRUNC | O_APPEND)) !== 0;
+      const append = (flags & O_APPEND) !== 0;
       try {
-        // Opened for its identity, not its contents: Go's Open is immediately followed by fstat to learn whether this is a directory to readdir.
-        source.statSync(resolved);
+        if (writable) {
+          // A writable open cannot be gated on the file existing: `O_CREAT` means it may not yet. `O_TRUNC` empties it now, which is what makes a
+          // second, shorter write a complete file rather than a new head on the old tail.
+          if ((flags & O_TRUNC) !== 0) source.writeFileSync(resolved, new Uint8Array(0));
+          else {
+            try {
+              source.statSync(resolved);
+            } catch (error) {
+              if ((flags & O_CREAT) === 0) throw error;
+              source.writeFileSync(resolved, new Uint8Array(0));
+            }
+          }
+        } else {
+          // Opened for its identity, not its contents: Go's Open is immediately followed by fstat to learn whether this is a directory to readdir.
+          source.statSync(resolved);
+        }
         const fd = nextFd;
         nextFd += 1;
-        handles.set(fd, { path: resolved, position: 0 });
+        handles.set(fd, { path: resolved, position: 0, writable, append });
         callback(null, fd);
+      } catch (error) {
+        callback(error);
+      }
+    },
+    mkdir(path: string, _mode: number, callback: Callback): void {
+      try {
+        // Recursive because that is what the caller means: esbuild asks for an output directory that may be several levels deep.
+        source.mkdirSync(at(path));
+        callback(null);
       } catch (error) {
         callback(error);
       }
@@ -258,6 +356,16 @@ export function createHostFs(source: HostFsSource, options: { readonly cwd: stri
     // Delegates through `this`, exactly as the stub does, because esbuild replaces `writeSync` on this object when its service starts and that
     // replacement is what carries output to the program's stdout. Calling our own copy directly would bypass it and print nothing.
     write(this: HostFs, fd: number, buffer: Uint8Array, offset: number, length: number, position: number | null, callback: Callback): void {
+      const handle = handles.get(fd);
+      if (handle !== undefined) {
+        // A file fd takes the caller's slice and position; the stdout-only restriction below is about streams, where a partial write has nowhere to go.
+        try {
+          callback(null, writeFileBytes(handle, buffer.subarray(offset, offset + length), position));
+        } catch (error) {
+          callback(error);
+        }
+        return;
+      }
       if (offset !== 0 || length !== buffer.length || position !== null) {
         callback(enosys());
         return;
@@ -308,7 +416,6 @@ export const REFUSED_HOST_FS_MEMBERS: readonly string[] = [
   "ftruncate",
   "lchown",
   "link",
-  "mkdir",
   "readlink",
   "rename",
   "rmdir",

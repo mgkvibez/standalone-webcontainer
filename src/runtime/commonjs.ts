@@ -455,7 +455,16 @@ export class CommonJsLoader {
     this.#initQueue.delete(path);
     const hook = INIT_HOOKS.find((candidate) => candidate.key === pending.key);
     if (hook === undefined) return;
-    const prepared = hook.run(record.exports, { dir: pending.dir, readFile: (file) => this.#deps.fs.readFileSync(file) });
+    const prepared = hook.run(record.exports, {
+      dir: pending.dir,
+      readFile: (file) => this.#deps.fs.readFileSync(file),
+      // Parents are created because a package's output directory is its own choice, and Node's `mkdir -p` semantics are what native esbuild's
+      // write path has when the directory does not exist.
+      writeFile: (file, bytes) => {
+        this.#deps.fs.mkdirSync(file.slice(0, file.lastIndexOf("/")), { recursive: true });
+        this.#deps.fs.writeFileSync(file, bytes);
+      },
+    });
     // A hook may hand back a replacement (a proxy that awaits readiness on first call). The record is the only place a caller can see it, so it
     // is replaced here rather than inside the hook, which has no business knowing how modules are cached.
     if (prepared !== undefined) record.exports = prepared;

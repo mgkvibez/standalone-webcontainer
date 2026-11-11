@@ -25,6 +25,37 @@ export const DEFAULT_MAX_REAL_MS = 5_000;
 /** How often a drain with outstanding handles checks whether anything happened. Real milliseconds. */
 export const DEFAULT_KEEP_ALIVE_POLL_MS = 10;
 
+/**
+ * The allowance for ONE served request, which is a different thing from one execution.
+ *
+ * The execution guards above bound a program body: a second of virtual time, ten thousand callbacks, five real seconds. A server is
+ * running for as long as somebody keeps asking, so those ceilings cannot apply to the work a request makes it do, and a fresh
+ * accounting per request is the only shape that both bounds a stuck request and lets a long-lived server serve.
+ *
+ * The real ceiling sits under the gateway's own 30 s deadline on purpose: a pump that outlives the deadline would report work the
+ * client has already given up on.
+ */
+export const DEFAULT_PUMP_VIRTUAL_MS = 60_000;
+export const DEFAULT_PUMP_CALLBACKS = 200_000;
+export const DEFAULT_PUMP_REAL_MS = 20_000;
+
+/** What one pump is allowed to spend. Every field is a ceiling on the pump's own accounting, not on the program's. */
+export interface PumpLimits {
+  readonly maxVirtualMs?: number;
+  readonly maxCallbacks?: number;
+  readonly maxRealMs?: number;
+}
+
+/** The resolved pump scope: what `#drainPass` reads its ceilings from while a request is outstanding. */
+interface PumpScope {
+  readonly virtualStart: number;
+  readonly callbacksStart: number;
+  readonly realStart: number;
+  readonly limits: Required<PumpLimits>;
+  /** Whether the request this pump serves has been answered. A settled request ends the pass rather than finishing the queue. */
+  readonly settled: () => boolean;
+}
+
 export interface SchedulerLimits {
   readonly budgetMs?: number;
   readonly maxCallbacks?: number;
@@ -174,6 +205,13 @@ export class Scheduler {
   readonly #onCallbackError: ((error: unknown) => void) | undefined;
   readonly #keepAlive: (() => number) | undefined;
   readonly #keepAlivePollMs: number;
+  /**
+   * The pump in progress, or null when the execution guards are the ones that apply.
+   *
+   * While this is set, `#drainPass` measures against the pump's own ceilings: the program is a long-lived server now, so its
+   * execution budget has long since been spent on the program body and reusing it would refuse the first request.
+   */
+  #pump: PumpScope | null = null;
 
   constructor(limits: SchedulerLimits = {}, onCallbackError?: (error: unknown) => void) {
     this.#budgetMs = limits.budgetMs ?? DEFAULT_VIRTUAL_BUDGET_MS;
@@ -306,8 +344,9 @@ export class Scheduler {
         break;
       }
       const pass = await this.#drainPass();
-      // A pass that ended on a guard ended this loop too: continuing would run exactly the work the guard exists to stop.
-      if (pass !== "queue-empty") {
+      // A pass that ended on a guard ended this loop too: continuing would run exactly the work the guard exists to stop. `"settled"` is a
+      // request-bound ending and cannot arrive here, because this loop holds no pump; the guard is a type narrowing, not a runtime branch.
+      if (pass !== "queue-empty" && pass !== "settled") {
         stop = pass;
         break;
       }
@@ -348,6 +387,97 @@ export class Scheduler {
     return { stop, settled };
   }
 
+  /**
+   * Runs this queue while an outside promise - one served HTTP request - is outstanding.
+   *
+   * THE DEFECT THIS EXISTS FOR, MEASURED. A server that outlives its program is the shape this runtime documents: `vite dev` exits 0,
+   * the container marks the process "running" with its ports, and the preview gateway keeps routing to it. But the timer queue is only
+   * pumped while a run is in progress, so once the program body returned, nothing advanced it again. A request handler that awaited
+   * `setTimeout(..., 10)` therefore never answered, and neither did one that awaited `setTimeout(..., 0)`:
+   *
+   *   GET /?wait=10 -> no response in 6 s      GET /?wait=0 -> no response in 6 s      pendingAsyncWork: 0
+   *
+   * That is not cosmetic. Vite's dependency optimizer - the whole of `optimizeDeps`, which every dev server runs for a bare import -
+   * is asynchronous work behind such a request, so `import pc from "picocolors"` produced a rewritten specifier pointing at a file
+   * that could never be generated, and the request hung until the gateway's deadline.
+   *
+   * WHAT IT IS NOT. It does not make the program immortal: it stops when the request settles, when a pump guard fires, or when the
+   * queue is empty and nothing outside it is in flight. It does not reset the program's clock, because virtual time is what
+   * `Date.now()` reports inside the server and moving it backwards would be a lie the server could feel.
+   *
+   * ONE PUMP AT A TIME. Two loops over one queue would interleave callbacks in an order nobody wrote, so a nested call refuses
+   * instead of pretending to share. The runtime serialises requests before reaching here.
+   */
+  async pumpWhile(pending: Promise<unknown>, limits: PumpLimits = {}): Promise<SchedulerStop> {
+    if (this.#pump !== null) return "aborted";
+
+    let settled = false;
+    void Promise.resolve(pending).then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+
+    const scope: PumpScope = {
+      virtualStart: this.#virtual,
+      callbacksStart: this.#callbacks,
+      realStart: Date.now(),
+      limits: {
+        maxVirtualMs: limits.maxVirtualMs ?? DEFAULT_PUMP_VIRTUAL_MS,
+        maxCallbacks: limits.maxCallbacks ?? DEFAULT_PUMP_CALLBACKS,
+        maxRealMs: limits.maxRealMs ?? DEFAULT_PUMP_REAL_MS,
+      },
+      settled: () => settled,
+    };
+    this.#pump = scope;
+
+    let stop: SchedulerStop = "queue-empty";
+    try {
+      for (;;) {
+        if (this.#aborted) {
+          stop = "aborted";
+          break;
+        }
+        const pass = await this.#drainPass();
+        if (pass === "settled") {
+          // The pass stopped because the response went out. Nothing was exhausted and nothing was refused, so this is the ordinary ending of a
+          // request that its handler answered before the queue ran dry.
+          stop = "queue-empty";
+          break;
+        }
+        if (pass !== "queue-empty") {
+          stop = pass;
+          break;
+        }
+        await drainContinuations();
+        // The response has been written. Whatever the server queued for later is the next request's problem, and running it here
+        // would charge this request for the server's whole life.
+        if (settled) break;
+        if (this.#queue.length > 0) continue;
+
+        const outstanding = this.#keepAlive === undefined ? 0 : this.#keepAlive();
+        const elapsed = Date.now() - scope.realStart;
+        if (elapsed > scope.limits.maxRealMs) {
+          stop = "real-time-limit";
+          break;
+        }
+        // A turn of the real event loop is what lets work this runtime cannot see make progress: a wasm instantiation settling,
+        // a dynamic import resolving. With something in flight that is a wait worth polling; with nothing in flight it is the
+        // only chance the request has left, so it is taken exactly as often as the ceiling allows.
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, outstanding > 0 ? this.#keepAlivePollMs : 0);
+        });
+      }
+    } finally {
+      this.#pump = null;
+    }
+
+    return stop;
+  }
+
   async drain(): Promise<SchedulerEvidence> {
     if (this.#evidence !== null) return this.#evidence;
 
@@ -357,7 +487,7 @@ export class Scheduler {
     let stop: SchedulerStop = "queue-empty";
     for (;;) {
       const pass = await this.#drainPass();
-      stop = pass;
+      if (pass !== "settled") stop = pass;
       if (pass !== "queue-empty") break;
       // Let continuations run, then look again: they may have scheduled more work.
       await drainContinuations();
@@ -405,7 +535,7 @@ export class Scheduler {
   }
 
   /** One pass over everything currently queued. */
-  async #drainPass(): Promise<SchedulerStop> {
+  async #drainPass(): Promise<SchedulerStop | "settled"> {
     let stop: SchedulerStop = "queue-empty";
 
     while (true) {
@@ -431,17 +561,26 @@ export class Scheduler {
         this.#unrefPending = this.#queue.length;
         break;
       }
-      if (next.due > this.#budgetMs) {
+      // The ceilings are the execution's during a run and the pump's while a request is being served. One set of checks, two
+      // accountings: duplicating the pass would let the two drift, which is the class of bug this file keeps meeting.
+      const budgetCeiling = this.#pump === null ? this.#budgetMs : this.#pump.virtualStart + this.#pump.limits.maxVirtualMs;
+      if (next.due > budgetCeiling) {
         stop = "budget-exhausted";
         break;
       }
-      if (this.#callbacks >= this.#maxCallbacks) {
+      const callbackCeiling = this.#pump === null ? this.#maxCallbacks : this.#pump.callbacksStart + this.#pump.limits.maxCallbacks;
+      if (this.#callbacks >= callbackCeiling) {
         stop = "callback-limit";
         break;
       }
-      if (Date.now() - this.#realStart - this.#idleTotal() > this.#maxRealMs) {
+      const realStart = this.#pump === null ? this.#realStart : this.#pump.realStart;
+      // Idle time is not charged to a pump: a request waiting on the outside world is bounded by the request's own deadline,
+      // and the stretch bookkeeping exists for a program body that would otherwise look like it had spin.
+      const realSpent = Date.now() - realStart - (this.#pump === null ? this.#idleTotal() : 0);
+      const realCeiling = this.#pump === null ? this.#maxRealMs : this.#pump.limits.maxRealMs;
+      if (realSpent > realCeiling) {
         stop = "real-time-limit";
-        this.#chargeIdle();
+        if (this.#pump === null) this.#chargeIdle();
         break;
       }
 
@@ -479,6 +618,10 @@ export class Scheduler {
         this.#onCallbackError?.(error);
       }
       await drainContinuations();
+      // A request-bound pass stops the moment its request has been answered, even with work still queued. That work was queued for the server's
+      // future, and running it here would charge this request for a life it does not own. Only a pump can be told to stop this way: a program body
+      // has no request to settle and must drain its queue the way Node does.
+      if (this.#pump !== null && this.#pump.settled()) return "settled";
     }
 
     return stop;

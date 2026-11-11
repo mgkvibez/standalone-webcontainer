@@ -18,6 +18,13 @@ export interface InitHookContext {
   readonly dir: string;
   /** Present so a hook can read a data file the package ships. */
   readonly readFile: (path: string) => string | Uint8Array;
+  /**
+   * Writes a file the package produced, creating parents.
+   *
+   * A hook is allowed to put a package's output on disk because some packages cannot: `esbuild-wasm` runs its compiler over a channel that declares
+   * no filesystem, so the tool that expects files refuses to run at all. This is the only way such a package's declared work becomes real files.
+   */
+  readonly writeFile: (path: string, bytes: Uint8Array) => void;
 }
 
 export interface InitHook {
@@ -61,13 +68,109 @@ export const INIT_HOOKS: readonly InitHook[] = [
       // promise returned from initialize to be resolved before calling this"), and its callers never await it, or even call initialize at
       // all. So every callable export waits for readiness on first call. Without this the module loads, reports itself ready, and fails on
       // the first real call: initialisation ORDER is the whole problem, not initialisation itself.
-      return new Proxy(exports, {
+      /**
+       * THE FILESYSTEM ESBUILD THINKS IT DOES NOT HAVE.
+       *
+       * `esbuild-wasm`'s browser service builds its channel with `hasFS: false` (`lib/browser.js`), and the JS side then (a) throws `The "write"
+       * option is unavailable in this environment` for an explicit `write: true` and (b) makes `write` DEFAULT TO FALSE for every build. Native
+       * esbuild defaults it to true, so a caller written against Node esbuild believes its files are on disk when they exist only on the returned
+       * `outputFiles`.
+       *
+       * Measured, and it is the reason vite's dev server never produced a dependency: `optimizeDeps` runs `esbuild.context({ outdir })`, esbuild
+       * returns `outputFiles` instead of writing them, vite's own commit only renames the temporary cache directory into place, and the browser
+       * then asks for `/node_modules/.vite/deps/picocolors.js`, which does not exist. Metadata naming a file that was never written. The dev server
+       * answers `504 Outdated Optimize Dep` forever.
+       *
+       * So the hook restores native esbuild's contract: `write` defaults to true, an `outdir`/`outfile` receives the real bytes, and a context keeps
+       * doing it on every rebuild. It can, because a hook holds the runtime's filesystem. `write: false` is left exactly as the caller asked: the
+       * fixtures that read `outputFiles` in memory stay a pure in-memory build.
+       */
+      const writeOutputs = (result: unknown): void => {
+        if (!isRecord(result)) return;
+        const files = result.outputFiles;
+        if (!Array.isArray(files)) return;
+        for (const file of files) {
+          if (!isRecord(file) || typeof file.path !== "string") continue;
+          const contents = file.contents;
+          const bytes =
+            contents instanceof Uint8Array
+              ? contents
+              : typeof file.text === "string"
+                ? new TextEncoder().encode(file.text)
+                : undefined;
+          if (bytes !== undefined) context.writeFile(file.path, bytes);
+        }
+      };
+
+      /** Native esbuild's rule: write unless the caller said otherwise, and only when there is somewhere to write to. */
+      const wantsFiles = (options: unknown): options is Record<string, unknown> => {
+        if (!isRecord(options) || options.write === false) return false;
+        return typeof options.outdir === "string" || typeof options.outfile === "string";
+      };
+
+      const buildWithFiles = (build: (...inner: unknown[]) => unknown) => (options: unknown) => {
+        if (!wantsFiles(options)) return build(options);
+        // `write` is stripped rather than set to false so esbuild reports `outputFiles`, which is where the bytes are in this environment.
+        const { write: _write, ...rest } = options;
+        return Promise.resolve(build(rest)).then((result: unknown) => {
+          writeOutputs(result);
+          return result;
+        });
+      };
+
+      /**
+       * A context writes on every rebuild.
+       *
+       * `rebuild()` takes no options of its own: everything that decides what a rebuild produces (outdir, outfile, splitting) was fixed when the
+       * context was created, and esbuild answers a rebuild with `outputFiles` like any other build. So the bytes are taken from each rebuild's
+       * result, and the OPTIONS were already cleaned when the context was made.
+       */
+      const contextWithFiles = (context: unknown): unknown => {
+        if (!isRecord(context) || typeof context.rebuild !== "function") return context;
+        const rebuild = context.rebuild as (...inner: unknown[]) => unknown;
+        return new Proxy(context, {
+          get(target, property, receiver) {
+            if (property === "rebuild") {
+              return (...args: unknown[]) =>
+                Promise.resolve(rebuild.apply(target, args)).then((result: unknown) => {
+                  writeOutputs(result);
+                  return result;
+                });
+            }
+            return Reflect.get(target, property, receiver) as unknown;
+          },
+        });
+      };
+
+      const proxy: unknown = new Proxy(exports, {
         get(target, property, receiver) {
+          // `default` answers THIS PROXY, not the raw module object. esbuild's bundle ends with `default: browser_exports`, and an ES module import
+          // reads that property, so handing back the unwrapped object would put every wrapped function out of reach: measured, vite's dependency
+          // optimizer kept calling the unwrapped `context` and kept writing nothing.
+          if (property === "default") return proxy;
           const value = Reflect.get(target, property, receiver) as unknown;
           if (typeof value !== "function" || property === "initialize") return value;
-          return (...args: unknown[]) => ready.then(() => (value as (...inner: unknown[]) => unknown).apply(target, args));
+          const call = (args: unknown[]): unknown => (value as (...inner: unknown[]) => unknown).apply(target, args);
+          // `build` is the whole API for a one-shot caller, and `context` is the whole API for one that rebuilds. Both are wrapped; everything
+          // else (transform, formatMessages, version, stop) is passed through untouched, because none of them produces files.
+          if (property === "build") {
+            const build = buildWithFiles((options: unknown) => call([options]));
+            return (...args: unknown[]) => ready.then(() => (args.length === 0 ? call(args) : build(args[0])));
+          }
+          if (property === "context") {
+            return (...args: unknown[]) =>
+              ready.then(() => {
+                const options = args[0];
+                if (!wantsFiles(options)) return Promise.resolve(call(args)).then(contextWithFiles);
+                // The decision lives at creation, so `write` is removed HERE: leaving it in makes esbuild refuse before the context exists.
+                const { write: _write, ...rest } = options;
+                return Promise.resolve(call([rest, ...args.slice(1)])).then(contextWithFiles);
+              });
+          }
+          return (...args: unknown[]) => ready.then(() => call(args));
         },
       });
+      return proxy;
     },
   },
 ];
