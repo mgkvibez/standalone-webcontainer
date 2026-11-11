@@ -9,7 +9,16 @@ import { describe, expect, it } from "vitest";
 
 import { Container } from "../../src/container/container.js";
 import { parseCommand, resolvePath, tokenize } from "../../src/container/commands.js";
-import type { ProcessRecord, ProjectFiles, RuntimeClient, RuntimeRunOutcome, RuntimeRunRequest } from "../../src/container/types.js";
+import type {
+  FileSyncReport,
+  ProcessRecord,
+  ProjectFileContents,
+  ProjectFiles,
+  RuntimeClient,
+  RuntimeRunOutcome,
+  RuntimeRunRequest,
+  RuntimeSyncRequest,
+} from "../../src/container/types.js";
 import { createFakeRegistry } from "../helpers/registry.js";
 
 class FakeProject implements ProjectFiles {
@@ -702,5 +711,61 @@ describe("npm run", () => {
     const session = container.createSession();
     await container.execute(session.id, "npm run loop");
     expect(output(container, session.id).some((line) => line.includes("nested more than 8 deep"))).toBe(true);
+  });
+});
+
+/**
+ * The save channel: pushing a file into a runtime that is already running.
+ *
+ * Every other path into a program is a command, so the files arrive with the run that consumes them. An editor's save has no run behind it, and
+ * that is the shape these cover.
+ */
+describe("Container.syncFiles", () => {
+  const wires = () => {
+    const project = new FakeProject({ "index.html": "<html></html>" });
+    const runtime = new FakeRuntime();
+    return { container: new Container({ runtime, files: project }), runtime };
+  };
+
+  it("reports null when the client cannot reach a live runtime", async () => {
+    // The difference between "not supported here" and "nothing to do" is what lets the page show an honest preview state instead of guessing.
+    const runtime = new FakeRuntime();
+    const client: RuntimeClient = { run: (request) => runtime.run(request), reset: () => undefined };
+    const container = new Container({ runtime: client, files: new FakeProject() });
+
+    expect(await container.syncFiles({ "/a.txt": "a" })).toBeNull();
+  });
+
+  it("normalises relative paths and coalesces a path that is also listed as removed", async () => {
+    const { container, runtime } = wires();
+    const seen: RuntimeSyncRequest[] = [];
+    (runtime as unknown as { syncFiles: (request: RuntimeSyncRequest) => Promise<FileSyncReport> }).syncFiles = async (request) => {
+      seen.push(request);
+      return { live: true, written: Object.keys(request.files), removed: [...(request.removed ?? [])] };
+    };
+
+    const report = await container.syncFiles({ "src/main.js": "next" }, ["/src/main.js", "src/gone.js"]);
+
+    // A file that is written and removed in one call is written: the editor saved it, and a deletion that arrives in the same breath describes a
+    // file that already did not exist. Both paths are absolute before they reach the runtime, because the VFS has no relative names.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.files).toEqual({ "/src/main.js": "next" });
+    expect(seen[0]?.removed).toEqual(["/src/gone.js"]);
+    expect(seen[0]?.projectId).toBe("test-project");
+    expect(report).toEqual({ live: true, written: ["/src/main.js"], removed: ["/src/gone.js"] });
+  });
+
+  it("passes bytes through untouched, because the channel is a push and not a decode", async () => {
+    const { container, runtime } = wires();
+    const blob = new Uint8Array([0x00, 0x61, 0xff, 0xfe]);
+    let received: ProjectFileContents | undefined;
+    (runtime as unknown as { syncFiles: (request: RuntimeSyncRequest) => Promise<FileSyncReport> }).syncFiles = async (request) => {
+      received = request.files["/blob.bin"];
+      return { live: true, written: ["/blob.bin"], removed: [] };
+    };
+
+    await container.syncFiles({ "/blob.bin": blob });
+
+    expect(received).toBe(blob);
   });
 });

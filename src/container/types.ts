@@ -63,6 +63,53 @@ export interface RuntimeClient {
   reset(): void;
   /** Stop the servers owned by a completed bootstrap process without discarding the project runtime. */
   stopServers?(ports: readonly number[]): void;
+  /**
+   * Push the project's files into a runtime that is already loaded, without starting a run.
+   *
+   * A run mirrors the snapshot it carries, which is enough while every change to a project arrives as the prelude to a command. It is not
+   * enough for a dev server: the editor writes while the server is already running, and a file that reaches the runtime only on the *next*
+   * command never reaches the program that is serving the preview right now. That is why an edit was invisible in the preview even after a
+   * reload: the bytes were never there to serve.
+   *
+   * Optional, and absent means "this client cannot deliver files to a live runtime", which the container reports rather than pretends.
+   */
+  syncFiles?(request: RuntimeSyncRequest): Promise<FileSyncReport>;
+}
+
+/**
+ * The files to push into a live runtime.
+ *
+ * Deliberately partial. A run carries the whole project because it is the authoritative snapshot; a save carries the files it touched, because
+ * the alternative is re-reading and re-comparing every installed package on the way to writing one line of a source file.
+ */
+export interface RuntimeSyncRequest {
+  readonly projectId?: string;
+  readonly files: Readonly<Record<string, ProjectFileContents>>;
+  /**
+   * Paths the page deleted.
+   *
+   * Named rather than inferred: a partial sync cannot tell "this file is gone" from "this file was not mentioned", and guessing would delete a
+   * project the first time an editor saved one file.
+   */
+  readonly removed?: readonly string[];
+}
+
+/**
+ * What a sync actually did, as evidence.
+ *
+ * `written` and `removed` are counted because "no change" and "the client ignored me" are otherwise the same response, and a caller that
+ * cannot tell them apart will report a preview as up to date when nothing was ever pushed.
+ */
+export interface FileSyncReport {
+  /**
+   * Whether a runtime was loaded to receive them.
+   *
+   * `false` is not a failure: a project with no runtime loaded has no files to update, and the next run mirrors the snapshot anyway. It is
+   * reported because a caller that cannot tell "nothing changed" from "nothing received it" will call a preview current when it is not.
+   */
+  readonly live: boolean;
+  readonly written: readonly string[];
+  readonly removed: readonly string[];
 }
 
 /**
