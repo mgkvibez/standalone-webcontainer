@@ -19,6 +19,7 @@
  */
 import { path as nodePath } from "../shims/path.js";
 import { fileURLToPath } from "../shims/url.js";
+import { parse as parseAcorn } from "acorn";
 import { transformEsm } from "./esm.js";
 import type { FsShim } from "../shims/fs.js";
 import { ProcessRefusal } from "./refusal.js";
@@ -132,6 +133,52 @@ function prepareSource(raw: string): string {
  * and `class` are a SyntaxError when the name is already a parameter. Destructuring counts, because `const { Buffer } = ...` is how
  * a modernised package binds it.
  */
+/**
+ * Rewrite `import(...)` in a CommonJS module so the call reaches this loader instead of V8's missing hook.
+ *
+ * `new Function` compiles a body with no dynamic-import callback, and Node only does better because it compiles through `vm`, which takes one.
+ * So a CommonJS file containing `import("x")` fails with `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING` *before* it runs, which is what vite 5's CJS
+ * entry does on its way to `createServer`. The keyword is all that is replaced: the argument is left exactly as written, including a computed
+ * specifier, because the loader's resolver is the thing that should decide what it names.
+ *
+ * Offsets come from a real parse rather than from a pattern, for the reason the scan below documents at length: `import(` inside a string, a
+ * comment or a regex is common in bundled code, and rewriting one of those changes what a module means. A file that will not parse is left
+ * untouched, so a syntax error stays the module's own syntax error rather than becoming a rewrite failure.
+ */
+export function rewriteDynamicImport(source: string, replacement: string): { code: string; rewritten: boolean } {
+  // Cheap exit first: the parse below is the expensive part, and a module with no `import(` in it cannot contain an ImportExpression.
+  if (!source.includes("import(")) return { code: source, rewritten: false };
+  let tree: unknown;
+  try {
+    tree = parseAcorn(source, { ecmaVersion: "latest", sourceType: "script", allowReturnOutsideFunction: true, allowAwaitOutsideFunction: true, allowHashBang: true });
+  } catch {
+    return { code: source, rewritten: false };
+  }
+
+  const edits: { start: number; end: number }[] = [];
+  const walk = (node: unknown): void => {
+    if (typeof node !== "object" || node === null) return;
+    const record = node as Record<string, unknown>;
+    if (record["type"] === "ImportExpression") {
+      edits.push({ start: record["start"] as number, end: (record["start"] as number) + "import".length });
+      return;
+    }
+    for (const value of Object.values(record)) {
+      if (Array.isArray(value)) for (const item of value) walk(item);
+      else if (typeof value === "object" && value !== null) walk(value);
+    }
+  };
+  walk(tree);
+  if (edits.length === 0) return { code: source, rewritten: false };
+
+  let code = source;
+  // Back to front, so an earlier replacement cannot move a later offset.
+  for (const edit of [...edits].sort((left, right) => right.start - left.start)) {
+    code = code.slice(0, edit.start) + replacement + code.slice(edit.end);
+  }
+  return { code, rewritten: true };
+}
+
 export function declaresOwnBinding(source: string, name: string): boolean {
   // Comments and string literals are removed first, because a mention is not a declaration: `// use const Buffer` in a doc comment
   // would otherwise strip the shim from a module that genuinely needs it. This is a scrubber, not a parser, and it says so: a
@@ -607,7 +654,7 @@ export class CommonJsLoader {
       seen.add(name);
       return true;
     });
-    const base = unique.filter(([name]) => {
+    const base: (readonly [string, unknown])[] = unique.filter(([name]) => {
       if (declared !== null) return !declared.has(name);
       return !declaresOwnBinding(code, name);
     });
@@ -641,6 +688,14 @@ export class CommonJsLoader {
      * declared` before a line of it ran. The compile below is the backstop that turns that class of mistake into a correct module: the names V8
      * itself names are the ones that actually collide, and dropping one restores exactly the shadowing Node gives a module over a global.
      */
+    // `import()` in a CommonJS module, for the reason rewriteDynamicImport documents: without this the module cannot compile at all. The helper
+    // is injected only when a rewrite actually happened, so a module that never calls it keeps the smaller parameter list.
+    const dynamicImport = transformed === undefined ? rewriteDynamicImport(code, "__cjsDynamicImport") : { code, rewritten: false };
+    if (dynamicImport.rewritten) {
+      base.push(["__cjsDynamicImport", (specifier: string): Promise<unknown> => this.importModule(String(specifier), moduleDir)]);
+    }
+    const moduleCode = dynamicImport.code;
+
     let injected: ReadonlyArray<readonly [string, unknown]> = [...base, ...generated];
     /**
      * Names the loader must supply, so a collision with one of them is a defect to report rather than a shadow to respect.
@@ -649,12 +704,21 @@ export class CommonJsLoader {
      * file is `SyntaxError: Identifier 'require' has already been declared` in Node 20, and it must be here too. The realm globals are the other
      * case entirely: Node has them as real globals, so a module's own `const crypto` simply shadows one.
      */
-    const suppliedNames = new Set<string>(["exports", "require", "__require", "module", "__filename", "__dirname", ...generated.map(([name]) => name)]);
+    const suppliedNames = new Set<string>([
+      "exports",
+      "require",
+      "__require",
+      "module",
+      "__filename",
+      "__dirname",
+      ...generated.map(([name]) => name),
+      ...(dynamicImport.rewritten ? ["__cjsDynamicImport"] : []),
+    ]);
 
     // An async module's body is wrapped rather than rewritten: the transformed code is unchanged, only its execution context
     // becomes awaitable. The wrapper returns the promise, so `factory` still has one call signature and the loader reads the
     // difference from the returned value rather than from a second factory type.
-    const body = asyncModule ? `return (async () => {\n${code}\n})();` : code;
+    const body = asyncModule ? `return (async () => {\n${moduleCode}\n})();` : moduleCode;
 
     let factory: (...args: unknown[]) => unknown;
     for (;;) {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { CommonJsLoader, declaresOwnBinding } from "../../src/runtime/commonjs.js";
+import { CommonJsLoader, declaresOwnBinding, rewriteDynamicImport } from "../../src/runtime/commonjs.js";
 import { FileSystem } from "../../src/vfs/index.js";
 import { createFsShim } from "../../src/shims/fs.js";
 import { EventEmitter } from "../../src/shims/events.js";
@@ -128,5 +128,57 @@ describe("require('stream') is the legacy Stream constructor, with the classes a
     expect(typeof streamModule).toBe("function");
     expect(streamModule.Readable).toBe(Readable);
     expect(typeof streamModule.prototype.on).toBe("function");
+  });
+});
+
+/**
+ * `import()` from a CommonJS module.
+ *
+ * `new Function` has no dynamic-import callback, so the keyword reaches V8 and the whole module fails to compile with
+ * `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING` before it runs. Node does better only because it compiles through `vm`, which takes one; the loader
+ * compiles with `new Function`, so it rewrites the keyword and supplies the callback itself. vite 5's CJS entry is the module that found this.
+ */
+describe("a CommonJS module may import() dynamically", () => {
+  const loadWith = (files: Record<string, string>, entry: string): unknown => {
+    const vfs = new FileSystem();
+    for (const [path, contents] of Object.entries(files)) vfs.writeFileSync(path, contents);
+    const loader = new CommonJsLoader({ fs: createFsShim(vfs as never), builtins: {} });
+    return loader.require(entry, "/app");
+  };
+
+  it("rewrites the keyword and not a mention inside a string", () => {
+    const source = `const note = "import(x)";\nconst pattern = /import\\(/;\nimport("/app/target.mjs");\n`;
+    const { code, rewritten } = rewriteDynamicImport(source, "__dyn");
+
+    expect(rewritten).toBe(true);
+    expect(code).toContain(`const note = "import(x)"`);
+    expect(code).toContain("/import\\(/");
+    expect(code).toContain(`__dyn("/app/target.mjs")`);
+    expect(code).not.toMatch(/(^|[^_"])\bimport\(/m);
+  });
+
+  it("leaves a file that does not parse exactly as it was", () => {
+    // A syntax error must stay the module's own: a half-rewritten file would report a position that no longer matches its source.
+    const broken = `import( "unclosed ;`;
+    expect(rewriteDynamicImport(broken, "__dyn")).toEqual({ code: broken, rewritten: false });
+  });
+
+  it("resolves the target and returns its namespace", async () => {
+    const exported = loadWith(
+      {
+        "/app/entry.cjs": `module.exports = import("/app/target.mjs").then((namespace) => namespace.default);\n`,
+        "/app/target.mjs": `export default "from an ES module";\n`,
+      },
+      "/app/entry.cjs",
+    );
+
+    await expect(exported).resolves.toBe("from an ES module");
+  });
+
+  it("compiles a module that calls import() without calling it, where V8 alone cannot", () => {
+    // The failure this replaces was at compile time, so a module that merely contains the keyword died. This is that shape.
+    const value = loadWith({ "/app/quiet.cjs": `module.exports = () => import("/app/never.mjs");\n` }, "/app/quiet.cjs");
+
+    expect(typeof value).toBe("function");
   });
 });
