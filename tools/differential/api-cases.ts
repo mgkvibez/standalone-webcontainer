@@ -248,6 +248,37 @@ const cases: ApiCase[] = [
       "console.log(values.name, values.verbose);",
     ].join("\n"),
   },
+  {
+    // Shape, not value: the zero point is arbitrary in both processes (page origin here, process start in Node), so only a DIFFERENCE between
+    // two calls in the same process can be compared. That is exactly how hrtime is used in real code.
+    id: "process-hrtime-shape",
+    question: "does process.hrtime give a pair, a bigint, and a usable difference?",
+    source: [
+      "const first = process.hrtime();",
+      "const second = process.hrtime(first);",
+      "const big = process.hrtime.bigint();",
+      "console.log(Array.isArray(first), first.length, first[0] >= 0, first[1] >= 0 && first[1] < 1e9);",
+      "console.log('diff', second[0] === 0, second[1] >= 0, 'bigint', typeof big);",
+    ].join("\n"),
+  },
+  {
+    id: "process-memory-usage-shape",
+    question: "does process.memoryUsage report Node's five numeric fields?",
+    source: [
+      "const usage = process.memoryUsage();",
+      "const fields = ['rss', 'heapTotal', 'heapUsed', 'external', 'arrayBuffers'];",
+      "console.log(Object.keys(usage).sort().join(','));",
+      "console.log(fields.every((field) => typeof usage[field] === 'number' && usage[field] >= 0));",
+    ].join("\n"),
+  },
+  {
+    id: "process-uptime-shape",
+    question: "does process.uptime report a small non-negative number of seconds?",
+    source: [
+      "const seconds = process.uptime();",
+      "console.log(typeof seconds, seconds >= 0, seconds < 600);",
+    ].join("\n"),
+  },
 ];
 
 export const API_CASES: readonly ApiCase[] = cases;

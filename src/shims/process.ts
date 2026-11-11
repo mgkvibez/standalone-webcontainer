@@ -54,6 +54,26 @@ export interface ProcessShim {
    * what Node does and what lets the runner apply it only when the run did not already fail.
    */
   exitCode?: number | undefined;
+  /**
+   * `process.hrtime([previous])`: monotonic time as `[seconds, nanoseconds]`, and `.bigint()` beside it.
+   *
+   * Measured from the page's own time origin rather than invented, so it is monotonic, never goes backwards, and two calls in the same turn
+   * differ by what actually elapsed. Node's ZERO POINT is arbitrary too (process start), which is why nothing may compare these numbers against
+   * another process's: only differences are meaningful, and the differential case compares exactly that.
+   */
+  readonly hrtime: ((previous?: readonly [number, number]) => [number, number]) & {
+    bigint(): bigint;
+  };
+  /**
+   * `process.memoryUsage()`: Node's five fields, filled from what a browser will actually tell us.
+   *
+   * `performance.memory` (Chromium) gives `heapUsed` and `heapTotal`; there is no browser API for RSS, external or arrayBuffers, so those are
+   * reported as what is known rather than invented. A zero here means "not exposed", not "none used", which is the honest reading and is said
+   * so in the header rather than left for a caller to discover.
+   */
+  memoryUsage(): { rss: number; heapTotal: number; heapUsed: number; external: number; arrayBuffers: number };
+  /** Seconds since this runtime created the process shim, which is this program's start. */
+  uptime(): number;
   cwd(): string;
   exit(code?: number): never;
   nextTick(callback: () => void, ...args: unknown[]): void;
@@ -169,6 +189,14 @@ export const createProcessShim = (options: ProcessOptions = {}): ProcessShim => 
    */
   const signalRegistrations = new Map<string, Map<() => void, () => void>>();
   const argv = options.argv !== undefined ? [...options.argv] : ["node"];
+  /**
+   * The clock `hrtime` and `uptime` read.
+   *
+   * `performance.now()` where it exists, `Date.now()` as the fallback: the browser always has the former, and the fallback keeps a bare test
+   * lane working without pretending the two clocks are the same (the difference is the time origin, and nothing here compares them).
+   */
+  const now = (): number => (typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now());
+  const startedAt = now();
   const cwd = options.cwd ?? "/";
 
   const shim: ProcessShim = {
@@ -184,6 +212,36 @@ export const createProcessShim = (options: ProcessOptions = {}): ProcessShim => 
     browser: true,
     pid: 1,
     exitCode: undefined,
+    /**
+     * `performance.now()` is milliseconds with a fractional part, so nanoseconds are derived by multiplication and rounded once. Rounding at
+     * the end rather than per component keeps the two parts consistent: `s * 1e9 + ns` always reconstructs the same instant.
+     */
+    hrtime: Object.assign(
+      (previous?: readonly [number, number]): [number, number] => {
+        const total = Math.round(now() * 1e6);
+        let seconds = Math.floor(total / 1e9);
+        let nanoseconds = total - seconds * 1e9;
+        if (previous !== undefined) {
+          seconds -= previous[0];
+          nanoseconds -= previous[1];
+          // A negative nanosecond part is normal when the difference does not land on a second boundary, and Node normalises it the same way
+          // instead of returning a value that reads as negative time.
+          if (nanoseconds < 0) {
+            seconds -= 1;
+            nanoseconds += 1e9;
+          }
+        }
+        return [seconds, nanoseconds];
+      },
+      { bigint: (): bigint => BigInt(Math.round(now() * 1e6)) },
+    ),
+    memoryUsage: () => {
+      const reported = (globalThis as { performance?: { memory?: { usedJSHeapSize?: number; totalJSHeapSize?: number } } }).performance?.memory;
+      const heapUsed = typeof reported?.usedJSHeapSize === "number" ? reported.usedJSHeapSize : 0;
+      const heapTotal = typeof reported?.totalJSHeapSize === "number" ? reported.totalJSHeapSize : 0;
+      return { rss: heapTotal, heapUsed, heapTotal, external: 0, arrayBuffers: 0 };
+    },
+    uptime: () => (now() - startedAt) / 1000,
     cwd: () => cwd,
     exit: (code = 0) => {
       throw new ProcessExit(code);
