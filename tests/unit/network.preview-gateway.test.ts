@@ -105,6 +105,36 @@ describe("PreviewGateway.handle", () => {
     expect((await gateway.handle(request("/preview/3000/"))).statusCode).toBe(404);
   });
 
+  it("answers an upgrade handshake like a plain request, because it carries no upgrade path", async () => {
+    // ADR-0024: the preview has no transport for a socket, so a websocket handshake is an ordinary GET here and Vite's client gives up on the
+    // connection. Pinned rather than assumed, so anyone implementing `upgrade` later meets this test and the ADR together.
+    const { gateway } = setup();
+    const seen: { readonly headers: Record<string, string | undefined> }[] = [];
+    const server = gateway.createServer((incoming, response) => {
+      seen.push(incoming);
+      response.writeHead(200, { "content-type": "text/html" });
+      response.end('<div id="root"></div>');
+    });
+    server.listen(4201);
+
+    const response = await gateway.handle(
+      request("/preview/4201/", {
+        headers: {
+          connection: "Upgrade",
+          upgrade: "websocket",
+          "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+          "sec-websocket-version": "13",
+          "sec-websocket-protocol": "vite-hmr",
+        },
+      }),
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(decoder.decode(response.body)).toContain('<div id="root">');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.headers.upgrade).toBe("websocket");
+  });
+
   it("passes the method, headers and body through to the handler", async () => {
     const { gateway } = setup();
     const server = gateway.createServer((req, res) => {
