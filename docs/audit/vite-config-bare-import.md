@@ -39,14 +39,40 @@ Five facts, each of which could have been the failure:
 5. **The server still answers a request afterwards**, so loading the config did not consume the run in a way that leaves the server unable
    to serve (the guard the timer work added, exercised on a different path).
 
-## One observation not attributed
+## The `define` observation, now settled: my expectation was wrong
 
 The plugin's first version returned `config: () => ({ define: { __PLUGIN__: '"local-plugin"' } })` and the served module came back
-**unreplaced**. `define` from a USER plugin's `config` hook therefore did not reach the transform in this setup. That was not investigated
-further: the probe's question is whether a config's bare import loads and is used, and a `transform` hook answers it without depending on
-plugin ordering. Vite's own hook ordering was not instrumented, so nothing is claimed about whether this is expected Vite behavior or something
-this runtime perturbs. It is recorded because an unexplained unreplaced `define` is exactly the kind of detail that resurfaces later wearing a
-different hat.
+**unreplaced**. That looked like a defect and is not one. Vite's own shipped source says so, at `chunks/dep-BK3b2jBa.js:47346` of vite 5.4.21:
+
+```js
+name: "vite:define",
+async transform(code, id, options) {
+  const ssr = options?.ssr === true;
+  if (!ssr && !isBuild) {
+    return;
+  }
+```
+
+For a client dev transform the plugin returns immediately. The only substitution vite performs in dev is `process.env.NODE_ENV`, in the
+client-env plugin (`~47504`). So a user `define` is **not** applied to dev-served source, by design, and the runtime that left it alone was
+behaving correctly.
+
+Cross-checked against a real server rather than the source alone: the same config under real Vite 7.3.7 (this repo's own devDependency) also
+serves `document.title = __APP_VERSION__;` verbatim, including with the documented `__APP_VERSION__` example. Two implementations and the
+source agree.
+
+The branch that *does* substitute is build, and there the substitution is real work through esbuild-wasm with the output written to disk.
+Measured (`tools/probe-vite-define.ts`, `vite build`, `define: { __DEFINED_VALUE__: '"define-worked"' }`):
+
+```
+dist/assets/index-DA4DlV4G.js  800 bytes
+  contains define-worked: true
+  still contains __DEFINED_VALUE__: false
+```
+
+**Limitation, stated rather than hidden:** real vite 5.4.21 could not be executed under Node for the cross-check, because this snapshot ships
+`esbuild-wasm` where vite imports `esbuild` (`ERR_MODULE_NOT_FOUND: Cannot find package 'esbuild'`). The cross-check therefore used vite
+7.3.7 plus 5.4.21's own source, not a 5.4.21 process.
 
 ## What it cost
 
