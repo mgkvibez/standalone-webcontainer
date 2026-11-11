@@ -47,5 +47,11 @@
   ],
   "knownLimits": [
     "Depends on a file-change notification path. Charter Q5 places fs.watch outside Phase 1, so a failure here is scope, not regression, and must be recorded as such."
-  ]
+  ],
+  "files": {
+    "package.json": "{\n  \"name\": \"fixture-13-hmr\",\n  \"private\": true,\n  \"version\": \"0.0.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"dev\": \"vite\"\n  },\n  \"devDependencies\": {\n    \"vite\": \"^5.4.0\"\n  }\n}\n",
+    "index.html": "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\" />\n    <title>fixture-13</title>\n  </head>\n  <body>\n    <div id=\"root\">initial-marker</div>\n    <script type=\"module\" src=\"/src/main.js\"></script>\n  </body>\n</html>\n",
+    "src/main.js": "// Runs in the previewing browser, not in our runtime.\nconst root = document.querySelector(\"#root\");\nif (root !== null) root.dataset.hydrated = \"yes\";\n",
+    "edit.mjs": "import { writeFileSync } from \"node:fs\";\n\nconst edited = \"<!doctype html>\\n<html lang=\\\"en\\\">\\n  <head>\\n    <meta charset=\\\"utf-8\\\" />\\n    <title>fixture-13</title>\\n  </head>\\n  <body>\\n    <div id=\\\"root\\\">edited-marker</div>\\n    <script type=\\\"module\\\" src=\\\"/src/main.js\\\"></script>\\n  </body>\\n</html>\\n\";\nwriteFileSync(\"/index.html\", edited);\nconsole.log(\"rewrote /index.html\");\n"
+  }
 }

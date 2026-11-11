@@ -1,4 +1,4 @@
 fixture: fixture-13
-evidence schema: 2
-classification: RUNTIME_INCOMPATIBILITY
-reason: assertion failed: http-body-contains: body of http://localhost:3300/ did not contain "initial-marker"; observed "No project runtime is loaded." (and 1 more)
+evidence schema: 3
+classification: PASS
+reason: all 2 assertion(s) passed

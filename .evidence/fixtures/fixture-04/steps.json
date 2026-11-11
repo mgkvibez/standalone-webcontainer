@@ -21,7 +21,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "process 1 exited with exit 0",
-    "elapsedMs": 23,
+    "elapsedMs": 29,
     "record": {
       "index": 1,
       "exitCode": 0,

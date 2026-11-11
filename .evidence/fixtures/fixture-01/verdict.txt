@@ -1,4 +1,4 @@
 fixture: fixture-01
-evidence schema: 2
+evidence schema: 3
 classification: PASS
 reason: all 2 assertion(s) passed
