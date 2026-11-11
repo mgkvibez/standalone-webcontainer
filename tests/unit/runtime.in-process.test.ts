@@ -233,3 +233,41 @@ describe("InProcessRuntime", () => {
     expect(second.stdout).toBe("1\n");
   });
 });
+
+describe("builtin module shapes the loader serves", () => {
+  it("serves `events` as the class, so require('events') can be a base class", async () => {
+    // The wall vite's boot hit, reproduced through the real loader rather than by importing the shim: its chunk does
+    // `class WebSocket extends require$$0$7` where require$$0$7 came from `events`, and a namespace object fails there with
+    // "Class extends value #<Object> is not a constructor" even though the class is inside it.
+    const { vfs, root } = boot({
+      "/app/main.js": [
+        'const events = require("events");',
+        'console.log(typeof events === "function");',
+        "console.log(events === events.EventEmitter);",
+        "class Socket extends events {}",
+        'const socket = new Socket();',
+        'socket.on("open", (value) => console.log("emitted:" + value));',
+        'socket.emit("open", "upgrade");',
+        "console.log(events.defaultMaxListeners);",
+      ].join("\n"),
+    });
+    const result = await new InProcessRuntime(vfs).run(`${root}/main.js`);
+
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("true\ntrue\nemitted:upgrade\n10\n");
+  });
+
+  it("serves the same class through node:events, because Node has one module under two names", async () => {
+    const { vfs, root } = boot({
+      "/app/main.js": [
+        'const bare = require("events");',
+        'const prefixed = require("node:events");',
+        "console.log(bare === prefixed);",
+        "console.log(bare === prefixed.EventEmitter);",
+      ].join("\n"),
+    });
+    const result = await new InProcessRuntime(vfs).run(`${root}/main.js`);
+
+    expect(result.stdout).toBe("true\ntrue\n");
+  });
+});

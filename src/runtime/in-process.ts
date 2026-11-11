@@ -10,7 +10,7 @@
  */
 import { Buffer } from "buffer";
 
-import { EventEmitter } from "../shims/events.js";
+import { eventsModule } from "../shims/events.js";
 import {
   createServer,
   IncomingMessage,
@@ -393,7 +393,10 @@ export class InProcessRuntime implements Runtime {
         path,
         process: processShim,
         buffer: { Buffer },
-        events: { EventEmitter },
+        // The module IS the class, as in Node: vite's chunk writes `class WebSocket extends require$$0$7` after a default import from
+        // `events`, and a namespace object fails there with "Class extends value #<Object> is not a constructor" despite the class
+        // being present inside it. Same arrangement as `stream` below, for the same reason.
+        events: eventsModule,
         // ADR-0015's six classes plus pipeline. Real behaviour, not import-only stubs: fixture 4 fails on this import alone,
         // and a stub would turn four honest failures into four unexplained ones.
         // `require("stream")` IS the legacy Stream constructor in Node, with the modern classes attached to it. Packages written

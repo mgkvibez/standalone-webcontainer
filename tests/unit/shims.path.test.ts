@@ -102,3 +102,31 @@ describe("path shim vs node:path.posix", () => {
     for (const c of CASES) expect(path.toNamespacedPath(c), c).toBe(nodePath.toNamespacedPath(c));
   });
 });
+
+describe("the two namespaces Node hangs off path", () => {
+  it("path.posix is the POSIX implementation itself, not a copy", () => {
+    // Node's own arrangement, and the reason it has to be a real namespace rather than absent: rollup reads `path.posix.sep` at module
+    // scope, so an undefined `posix` is a crash at import time rather than a fallback.
+    expect(path.posix.normalize).toBe(path.normalize);
+    expect(path.posix.join).toBe(path.join);
+    expect(path.posix.sep).toBe(nodePath.sep);
+    expect(path.posix.delimiter).toBe(nodePath.delimiter);
+    for (const c of CASES) expect(path.posix.normalize(c), c).toBe(nodePath.normalize(c));
+  });
+
+  it("path.win32 exists and refuses by name, rather than answering POSIX rules", () => {
+    // Answering POSIX paths under a Windows name would compute wrong paths quietly, which is the one outcome worse than a throw.
+    expect(path.win32.sep).toBe("\\");
+    expect(path.win32.delimiter).toBe(";");
+    expect(typeof path.win32.join).toBe("function");
+    let caught: unknown;
+    try {
+      path.win32.join("a", "b");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({ code: "ERR_NOT_IMPLEMENTED_IN_THIS_RUNTIME" });
+    expect((caught as Error).message).toContain("path.win32.join is not implemented");
+    expect((caught as Error).message).toContain("wrong path");
+  });
+});

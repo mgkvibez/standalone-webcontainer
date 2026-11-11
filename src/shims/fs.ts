@@ -162,6 +162,41 @@ export interface FsShim {
     listenerOrOptions?: WatchListener | WatchOptions,
     maybeListener?: WatchListener,
   ): WatchHandlePort;
+  /**
+   * Callback `readdir`, `stat` and `lstat`.
+   *
+   * These exist because a real dependency asks for them BY NAME and promisifies them: vite's bundled chokidar does
+   * `const readdir = promisify(fs.readdir)` at module scope, so an absent member is not a gap a program can route around, it is a boot failure.
+   * Node's signatures are (path[, options], callback) for readdir and (path, callback) for the two stats.
+   */
+  readdir(path: FsPath, optionsOrCallback?: object | string | ReaddirCallback, maybeCallback?: ReaddirCallback): void;
+  /**
+   * `open` and `close`, callback and sync forms.
+   *
+   * Implemented over the VFS with a real per-shim table, so the descriptor is a number a caller can hold and close, exactly as Node's is.
+   * `read`/`write` through a descriptor are NOT implemented: they refuse with a named error naming the fd and its path, because this VFS has
+   * whole-file reads and writes and inventing positional semantics on top would be a guess dressed as an answer.
+   */
+  open(path: FsPath, flags: string | number, callback: (error: unknown, fd?: FileDescriptor) => void): void;
+  openSync(path: FsPath, flags: string | number): FileDescriptor;
+  close(fd: FileDescriptor, callback: (error: unknown) => void): void;
+  closeSync(fd: FileDescriptor): void;
+  /** Present, and refusing by name: this VFS reads and writes whole files, so positional descriptor I/O has no faithful answer here. */
+  readSync(fd: FileDescriptor): never;
+  /** Present for the same reason as `readSync`. */
+  writeSync(fd: FileDescriptor): never;
+  stat(path: FsPath, callback: StatCallback): void;
+  /** No symlinks exist in this VFS, so `lstat` is `stat`. Documented rather than silently aliased. */
+  lstat(path: FsPath, callback: StatCallback): void;
+  /**
+   * `realpathSync`, with Node's `.native` property hanging off it.
+   *
+   * Nothing in this VFS is a symbolic link, so there is no chain for a "native" variant to follow differently: `.native` is the same
+   * implementation. It has to EXIST, though, because vite reads `require('fs').realpathSync.native` and dies on the property being undefined.
+   */
+  realpathSync: RealpathSync;
+  /** Node's callback form, `(path[, options], callback)`. */
+  realpath: RealpathCallback;
   promises: {
     readFile(path: string, encoding?: "utf8"): Promise<Buffer | string>;
     writeFile(path: string, data: string | Uint8Array): Promise<void>;
@@ -179,6 +214,29 @@ export interface FsShim {
     watch(path: string, options?: WatchOptions): WatchAsyncIterator;
   };
 }
+
+/**
+ * An open file descriptor.
+ *
+ * Real: `open` and `close` are implemented over the VFS with a small table, because a caller that opens a file to prove it can (which is what
+ * vite's bundled watcher does, in Node's own Windows EPERM workaround) needs a descriptor that round-trips through `close`. Reading and writing
+ * THROUGH a descriptor is not implemented, and refuses by name rather than pretending: see the fd table below.
+ */
+export type FileDescriptor = number;
+
+/** Callback shapes for the three promisified members: `(error) | (error, value)`. */
+export type ReaddirCallback = (error: unknown, entries?: string[]) => void;
+export type StatCallback = (error: unknown, stats?: StatsShim) => void;
+
+/** The synchronous realpath, plus the `.native` property Node hangs off it (and that vite reads as `realpathSync.native`). */
+export type RealpathSync = ((path: FsPath) => string) & { native: (path: FsPath) => string };
+
+/** Node's callback form: (path[, options], callback). */
+export type RealpathCallback = (
+  path: FsPath,
+  optionsOrCallback?: object | ((error: unknown, resolved?: string) => void),
+  maybeCallback?: (error: unknown, resolved?: string) => void,
+) => void;
 
 export interface WatchOptions {
   readonly recursive?: boolean;
@@ -220,7 +278,85 @@ const absoluteWatch = (
     return handle;
 };
 
-const createAbsoluteFsShim = (port: FileSystemPort, watches?: WatchSourcePort): FsShim => {
+const createAbsoluteFsShim = (
+  port: FileSystemPort,
+  watches?: WatchSourcePort,
+): // The absolute layer is not the object a program receives, so it does not carry Node's `.native` property: the wrapper below adds that,
+// because `.native` is a property of the function the public `fs` exports and nowhere else.
+Omit<FsShim, "realpathSync"> & { realpathSync: (path: FsPath) => string } => {
+
+  /**
+   * The open-descriptor table.
+   *
+   * A descriptor is an integer, as in Node, because that is what callers put on the wire and in logs. The number counts up from 3 (Node's 0/1/2
+   * are the standard streams) and a closed descriptor is REUSED never, so a program holding a stale fd gets EBADF with the number it asked
+   * about rather than a different file.
+   */
+  const openFiles = new Map<FileDescriptor, { path: string; flags: string }>();
+  let nextDescriptor = 3;
+
+  /** Node's string flags, reduced to the facts this VFS can act on: does it read, does it write, does it create, does it truncate. */
+  const parseOpenFlags = (flags: string | number): string => {
+    if (typeof flags === "number") {
+      throw Object.assign(
+        new Error(`fs.open numeric flags are not implemented in this runtime: pass a string flag such as "r" or "w"`),
+        { code: "ERR_NOT_IMPLEMENTED_IN_THIS_RUNTIME" },
+      );
+    }
+    const known = ["r", "r+", "w", "w+", "a", "a+", "wx", "wx+", "ax", "ax+", "rs", "rs+"];
+    if (!known.includes(flags)) {
+      throw Object.assign(new Error(`Unknown file open flag: ${flags}`), { code: "ERR_INVALID_ARG_VALUE" });
+    }
+    return flags;
+  };
+
+  /** Opens a descriptor against the VFS, applying the create/truncate side effects immediately, as Node does. */
+  const openDescriptor = (path: string, flagsInput: string | number): FileDescriptor => {
+    const flags = parseOpenFlags(flagsInput);
+    const writes = flags.includes("w") || flags.includes("a") || flags.includes("+");
+    const exclusive = flags.includes("x");
+    const mustExist = !flags.includes("w") && !flags.includes("a");
+    let exists = true;
+    try {
+      vfs.statSync(path);
+    } catch {
+      exists = false;
+    }
+    if (mustExist && !exists) {
+      throw Object.assign(new Error(`ENOENT: no such file or directory, open '${path}'`), {
+        code: "ENOENT",
+        errno: -2,
+        syscall: "open",
+        path,
+      });
+    }
+    if (exclusive && exists) {
+      throw Object.assign(new Error(`EEXIST: file already exists, open '${path}'`), {
+        code: "EEXIST",
+        errno: -17,
+        syscall: "open",
+        path,
+      });
+    }
+    if (writes && !exists) vfs.writeFileSync(path, new Uint8Array(0));
+    // Truncation is a real side effect of "w" and "w+", and applying it at open is what makes the descriptor mean the same thing it does in Node.
+    if (flags.includes("w")) vfs.writeFileSync(path, new Uint8Array(0));
+    const fd = nextDescriptor;
+    nextDescriptor += 1;
+    openFiles.set(fd, { path, flags });
+    return fd;
+  };
+
+  /** Reads through a descriptor. Refused, and the refusal is the point: there is no positional read here to be faithful with. */
+  const refuseDescriptorIo = (operation: string, fd: FileDescriptor): never => {
+    const entry = openFiles.get(fd);
+    throw Object.assign(
+      new Error(
+        `fs.${operation} on a file descriptor is not implemented in this runtime (fd ${fd}${entry === undefined ? "" : ` for '${entry.path}'`}): read and write whole files with readFile/writeFile`,
+      ),
+      { code: "ERR_NOT_IMPLEMENTED_IN_THIS_RUNTIME" },
+    );
+  };
   const vfs = pathAccepting(port);
   return {
   watch: (path, listenerOrOptions, maybeListener) =>
@@ -269,11 +405,119 @@ const createAbsoluteFsShim = (port: FileSystemPort, watches?: WatchSourcePort): 
     }
   },
 
+  open(path: FsPath, flags: string | number, callback: (error: unknown, fd?: FileDescriptor) => void) {
+    try {
+      callback(null, openDescriptor(pathOf(path), flags));
+    } catch (error) {
+      callback(error);
+    }
+  },
+
+  openSync(path: FsPath, flags: string | number) {
+    return openDescriptor(pathOf(path), flags);
+  },
+
+  close(fd: FileDescriptor, callback: (error: unknown) => void) {
+    try {
+      this.closeSync(fd);
+      callback(null);
+    } catch (error) {
+      callback(error);
+    }
+  },
+
+  closeSync(fd: FileDescriptor) {
+    if (!openFiles.has(fd)) {
+      throw Object.assign(new Error(`EBADF: bad file descriptor, close`), {
+        code: "EBADF",
+        errno: -9,
+        syscall: "close",
+      });
+    }
+    openFiles.delete(fd);
+  },
+
+  /** Present so a program that reads through a descriptor learns the truth by name instead of reading a wrong answer. */
+  readSync(fd: FileDescriptor): never {
+    return refuseDescriptorIo("readSync", fd);
+  },
+
+  /** Present for the same reason as `readSync`. */
+  writeSync(fd: FileDescriptor): never {
+    return refuseDescriptorIo("writeSync", fd);
+  },
+
+  /** Callback `readdir`. The error, when there is one, is the same mapped error the sync form throws: one source of truth for the code. */
+  readdir(path: FsPath, optionsOrCallback?: object | string | ReaddirCallback, maybeCallback?: ReaddirCallback) {
+    const callback = typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback;
+    const resolvedPath = pathOf(path);
+    let entries: string[];
+    try {
+      entries = vfs.readdirSync(resolvedPath);
+    } catch (error) {
+      callback?.(toNodeError(error, "scandir", resolvedPath));
+      return;
+    }
+    callback?.(null, entries);
+  },
+
+  stat(path: FsPath, callback: StatCallback) {
+    const resolvedPath = pathOf(path);
+    try {
+      callback(null, asStats(vfs.statSync(resolvedPath)));
+    } catch (error) {
+      callback(toNodeError(error, "stat", resolvedPath));
+    }
+  },
+
+  /** `lstat` is `stat`, as above, because nothing in this VFS is a symbolic link. */
+  lstat(path: FsPath, callback: StatCallback) {
+    const resolvedPath = pathOf(path);
+    try {
+      callback(null, asStats(vfs.statSync(resolvedPath)));
+    } catch (error) {
+      callback(toNodeError(error, "lstat", resolvedPath));
+    }
+  },
+
   statSync(path) {
     try {
       return asStats(vfs.statSync(path));
     } catch (error) {
       throw toNodeError(error, "stat", path);
+    }
+  },
+
+  /**
+   * `realpathSync`: existence and a normalised path, and nothing more, because nothing in this VFS is a symbolic link.
+   *
+   * A missing path still throws ENOENT with `syscall: "realpath"`, which is what callers branch on. The `.native` property is assigned in the
+   * path-rewriting layer below, where the shape is built, because Node exposes `realpathSync.native` as a property OF this function.
+   */
+  realpathSync(path: FsPath) {
+    const resolvedPath = pathOf(path);
+    try {
+      vfs.statSync(resolvedPath);
+    } catch (error) {
+      throw toNodeError(error, "realpath", resolvedPath);
+    }
+    return nodePath.normalize(resolvedPath);
+  },
+
+  /** The callback form, which takes the same options object Node accepts and then calls back. */
+  realpath(
+    path: FsPath,
+    optionsOrCallback?: object | ((error: unknown, resolved?: string) => void),
+    maybeCallback?: (error: unknown, resolved?: string) => void,
+  ) {
+    const callback = typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback;
+    const resolvedPath = pathOf(path);
+    try {
+      vfs.statSync(resolvedPath);
+      callback?.(null, nodePath.normalize(resolvedPath));
+    } catch (error) {
+      // The same mapped error the sync form throws, so both shapes of this call report the same code and syscall.
+      callback?.(toNodeError(error, "realpath", resolvedPath));
     }
   },
 
@@ -418,7 +662,17 @@ export const createFsShim = (
   };
   const inner = createAbsoluteFsShim(vfs, options.watches);
 
+  const realpathSync = Object.assign((path: FsPath) => inner.realpathSync(at(path)), {
+    native: (path: FsPath) => inner.realpathSync(at(path)),
+  });
+
   return {
+    realpathSync,
+    // Forwarded uncast, in both shapes Node accepts: `promisify(fs.realpath)` — which is how vite's bundled watcher calls it — passes the
+    // callback as the SECOND argument, so both positions have to survive this wrapper. The cast that used to be here was only a type-level
+    // lie (the value still arrived at runtime and the call DID work), but it described the wrapper as taking one shape while it accepted two,
+    // which is how a real regression would have been introduced without a test noticing.
+    realpath: (path, optionsOrCallback, maybeCallback) => inner.realpath(at(path), optionsOrCallback, maybeCallback),
     readFileSync: (path, encoding) => inner.readFileSync(at(path), encoding),
     writeFileSync: (path, data) => inner.writeFileSync(at(path), data),
     existsSync: (path) => inner.existsSync(at(path)),
@@ -427,6 +681,16 @@ export const createFsShim = (
     // Every path is rewritten before the batch is sent, so the caller batches relative paths and the port sees absolute ones.
     statManySync: (paths) => inner.statManySync(paths.map(at)),
     statSync: (path) => inner.statSync(at(path)),
+    readdir: (path, optionsOrCallback, maybeCallback) =>
+      inner.readdir(at(path), optionsOrCallback as object | string | undefined, maybeCallback),
+    open: (path, flags, callback) => inner.open(at(path), flags, callback),
+    openSync: (path, flags) => inner.openSync(at(path), flags),
+    close: (fd, callback) => inner.close(fd, callback),
+    closeSync: (fd) => inner.closeSync(fd),
+    readSync: (fd) => inner.readSync(fd),
+    writeSync: (fd) => inner.writeSync(fd),
+    stat: (path, callback) => inner.stat(at(path), callback),
+    lstat: (path, callback) => inner.lstat(at(path), callback),
     unlinkSync: (path) => inner.unlinkSync(at(path)),
     rmdirSync: (path) => inner.rmdirSync(at(path)),
     renameSync: (from, to) => inner.renameSync(at(from), at(to)),
