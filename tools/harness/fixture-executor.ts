@@ -116,6 +116,22 @@ export class InProcessClient implements RuntimeClient {
     });
     return { status: response.statusCode, body: new TextDecoder().decode(response.body) };
   }
+
+  /**
+   * The same gateway path with headers of the probe's choosing.
+   *
+   * Exists for requests whose SHAPE is the question: a websocket handshake is an ordinary GET plus `Connection: Upgrade`, so sending that
+   * shape and reading the status is how the preview's ability to carry one gets measured rather than assumed.
+   */
+  async probeWith(url: string, headers: Record<string, string>): Promise<HttpProbe> {
+    const response = await this.#supervisor.handleTransport({
+      method: "GET",
+      url: previewRequestUrl(url),
+      headers,
+      body: new Uint8Array(0),
+    });
+    return { status: response.statusCode, body: new TextDecoder().decode(response.body) };
+  }
 }
 
 /** Any registry the installer can use: the offline corpus by default, the live one when a run asks for it explicitly. */
