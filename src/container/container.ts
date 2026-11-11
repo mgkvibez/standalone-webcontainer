@@ -33,6 +33,7 @@ import type {
 } from "./types.js";
 import { installDependencies, loadLockfile, readPackageManifest, type PackageManifest, type RegistryClient } from "../npm/install.js";
 import { parseInstallSpec } from "../npm/spec.js";
+import { splitScriptLine } from "./script-line.js";
 import { VFSNotFoundError } from "../vfs/errors.js";
 
 export interface ContainerOptions {
@@ -74,6 +75,14 @@ export class Container {
   #nextPid = 1;
   #nextSession = 1;
   #queue: Promise<void> = Promise.resolve();
+  /**
+   * Exit status of the last command this container ran.
+   *
+   * `execute` returns void because a caller in the terminal does not need a number, but `&&` and `||` do: sequencing is meaningless
+   * without a status to short-circuit on. Every place that finishes a command writes it here, including builtins, so a stale value from
+   * an earlier line can never be what decides whether the rest of a script runs.
+   */
+  #lastExitCode = 0;
 
   constructor(options: ContainerOptions) {
     this.#runtime = options.runtime;
@@ -203,17 +212,24 @@ export class Container {
 
     switch (command.kind) {
       case "refused":
+        // A command the container refuses by policy is a command that did not run, and sequencing has to see it that way.
         this.#line(session, "system", `${command.name}: ${command.reason}`);
+        this.#lastExitCode = 1;
         this.#notify();
         return;
       case "unsupported":
         this.#line(session, "stderr", `${command.name}: not a supported command in this terminal. Type \`help\`.`);
+        this.#lastExitCode = 1;
         this.#notify();
         return;
       case "install":
         await this.#install(session, command.args, scriptDepth);
+        // `npm install` reports through the scrollback rather than an exit code, and it is a top-level command rather than a script
+        // segment, so it neither reads nor sets the sequencing status. Saying so here is cheaper than a reader wondering.
+        this.#lastExitCode = 0;
         return;
       case "builtin":
+        this.#lastExitCode = 0;
         this.#builtin(session, command.name, command.args);
         this.#notify();
         return;
@@ -295,9 +311,33 @@ export class Container {
     this.#line(session, "stdout", `> ${projectName}@${projectVersion} ${name}`);
     this.#line(session, "stdout", `> ${composed}`);
 
-    const resolved = this.#resolveScriptLine(session, composed);
-    if (resolved === null) return;
-    await this.execute(session.id, resolved, depth + 1);
+    const segments = splitScriptLine(composed);
+    if (segments.length === 0) {
+      this.#line(session, "stderr", "npm error: the script is empty");
+      this.#notify();
+      return;
+    }
+    if (segments[segments.length - 1]?.operator !== null) {
+      // `build &&` is a syntax error in a shell. Running the first half and calling it done would be the same silent green this
+      // sequencing exists to prevent.
+      this.#line(session, `stderr`, "npm error: the script ends with an operator and no command after it");
+      this.#notify();
+      this.#lastExitCode = 1;
+      return;
+    }
+
+    for (const segment of segments) {
+      const resolved = this.#resolveScriptLine(session, segment.command);
+      if (resolved === null) {
+        // A segment this container cannot run fails the script, whether or not an `||` follows: the operator's meaning is "run the
+        // next command if this one failed", and a refusal by name is a failure to run, not a command that returned non-zero.
+        this.#lastExitCode = 1;
+        return;
+      }
+      await this.execute(session.id, resolved, depth + 1);
+      if (segment.operator === "&&" && this.#lastExitCode !== 0) return;
+      if (segment.operator === "||" && this.#lastExitCode === 0) return;
+    }
   }
 
   /**
@@ -605,6 +645,7 @@ export class Container {
       this.#flush(session);
       process.state = "failed";
       process.endedAt = this.#now();
+      this.#lastExitCode = 1;
       const message = error instanceof Error ? error.message : String(error);
       this.#line(session, "stderr", `${basename(process.argv[1] ?? "node")}: ${message}`);
       this.#notify();
@@ -617,6 +658,8 @@ export class Container {
     if (this.#processes.get(process.pid)?.state === "killed") {
       // terminate() already recorded the truth; a late outcome must not overwrite it with an exit code.
       this.#line(session, "system", `[${process.pid}] terminated`);
+      // Terminated is not success: a `&&` after a killed program must not go on to run the rest of the script.
+      this.#lastExitCode = 1;
       this.#notify();
       return;
     }
@@ -624,6 +667,7 @@ export class Container {
     if (!outcome.timedOut && outcome.exitCode === 0 && (outcome.previewPorts?.length ?? 0) > 0) {
       process.previewPorts = [...(outcome.previewPorts ?? [])];
       process.state = "running";
+      this.#lastExitCode = 0;
       this.#line(session, "system", `[${process.pid}] server listening on port(s) ${process.previewPorts.join(", ")}`);
       this.#notify();
       return;
@@ -631,6 +675,7 @@ export class Container {
     if ((outcome.previewPorts?.length ?? 0) > 0) this.#runtime.stopServers?.(outcome.previewPorts ?? []);
     process.state = outcome.timedOut ? "failed" : "exited";
     process.exitCode = outcome.exitCode;
+    this.#lastExitCode = outcome.exitCode;
     process.endedAt = this.#now();
     this.#line(
       session,
@@ -652,6 +697,7 @@ export class Container {
           session.cwd = target;
         } else {
           this.#line(session, "stderr", `cd: no such directory: ${args[0] ?? "/"}`);
+          this.#lastExitCode = 1;
         }
         return;
       }
@@ -667,6 +713,7 @@ export class Container {
             return;
           }
           this.#line(session, "stderr", `ls: no such directory: ${args[0] ?? "."}`);
+        this.#lastExitCode = 1;
           return;
         }
         const entries = new Set<string>();
@@ -683,12 +730,14 @@ export class Container {
       case "cat": {
         if (args.length === 0) {
           this.#line(session, "stderr", "cat: usage: cat <file>");
+        this.#lastExitCode = 1;
           return;
         }
         const target = resolvePath(session.cwd, args[0] ?? "");
         const contents = this.#files.read(target);
         if (contents === null) {
           this.#line(session, "stderr", `cat: no such file: ${args[0] ?? ""}`);
+        this.#lastExitCode = 1;
           return;
         }
         for (const line of contents.split("\n")) this.#line(session, "stdout", line);
@@ -697,15 +746,18 @@ export class Container {
       case "mkdir": {
         if (args.length === 0) {
           this.#line(session, "stderr", "mkdir: usage: mkdir <directory>");
+        this.#lastExitCode = 1;
           return;
         }
         const target = resolvePath(session.cwd, args[0] ?? "");
         if (!this.#files.mkdir(target)) this.#line(session, "stderr", `mkdir: already exists: ${args[0] ?? ""}`);
+      this.#lastExitCode = 1;
         return;
       }
       case "touch": {
         if (args.length === 0) {
           this.#line(session, "stderr", "touch: usage: touch <file>");
+        this.#lastExitCode = 1;
           return;
         }
         const target = resolvePath(session.cwd, args[0] ?? "");
@@ -715,6 +767,7 @@ export class Container {
       case "rm": {
         if (args.length === 0) {
           this.#line(session, "stderr", "rm: usage: rm <path>");
+        this.#lastExitCode = 1;
           return;
         }
         const target = resolvePath(session.cwd, args[0] ?? "");
@@ -723,9 +776,11 @@ export class Container {
           this.#files.listDirs().some((path) => path.startsWith(`${target}/`)));
         if (isDirectory && hasChildren) {
           this.#line(session, "stderr", `rm: ${args[0] ?? ""} is a non-empty directory (recursive removal is not supported)`);
+        this.#lastExitCode = 1;
           return;
         }
         if (!this.#files.remove(target)) this.#line(session, "stderr", `rm: no such file or directory: ${args[0] ?? ""}`);
+      this.#lastExitCode = 1;
         return;
       }
       case "echo":
@@ -752,13 +807,16 @@ export class Container {
         const pid = Number(args[0]);
         if (!Number.isInteger(pid)) {
           this.#line(session, "stderr", "kill: usage: kill <pid>");
+        this.#lastExitCode = 1;
           return;
         }
         if (!this.terminate(pid)) this.#line(session, "stderr", `kill: no running process with pid ${pid}`);
+      this.#lastExitCode = 1;
         return;
       }
       default:
         this.#line(session, "stderr", `${name}: not implemented`);
+      this.#lastExitCode = 1;
     }
   }
 
