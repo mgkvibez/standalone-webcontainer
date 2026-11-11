@@ -15,13 +15,20 @@ export interface TerminalSize {
   readonly rows: number;
 }
 
+import type { ProjectFileContents } from "../container/types.js";
+
 export interface RunRequest {
   readonly type: "run";
   readonly id: number;
   readonly projectId: string;
   readonly processId: number;
-  /** Absolute path → contents. The host rebuilds its VFS from this on every run, so projects cannot leak into each other. */
-  readonly files: Readonly<Record<string, string>>;
+  /**
+   * Absolute path → contents. The host rebuilds its VFS from this on every run, so projects cannot leak into each other.
+   *
+   * Bytes are allowed and travel unchanged: `postMessage` uses structured clone, which moves a `Uint8Array` natively. Nothing may JSON-encode this
+   * message, because a `Uint8Array` through `JSON.stringify` becomes `{"0":0,"1":97,...}` and the corruption that follows is silent.
+   */
+  readonly files: Readonly<Record<string, ProjectFileContents>>;
   readonly entry: string;
   readonly argv: readonly string[];
   readonly cwd: string;

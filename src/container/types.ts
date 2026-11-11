@@ -65,11 +65,21 @@ export interface RuntimeClient {
   stopServers?(ports: readonly number[]): void;
 }
 
+/**
+ * A file's contents in a project snapshot.
+ *
+ * `Uint8Array` is not a convenience here. A package can legitimately ship bytes (`esbuild`'s `.wasm`, a font, a fixture image), and decoding them as
+ * text destroys them. Measured: the container's install did exactly that and vite died on `CompileError: WebAssembly.Module(): unknown section code
+ * #0x20 @+133`, because an 11 MB WebAssembly module had been through a UTF-8 decode on its way into the runtime. The bytes were never wrong; only
+ * their transport was.
+ */
+export type ProjectFileContents = string | Uint8Array;
+
 export interface RuntimeRunRequest {
   readonly projectId?: string;
   /** Container process id for supervisor-side lifecycle tracking. */
   readonly processId?: number;
-  readonly files: Readonly<Record<string, string>>;
+  readonly files: Readonly<Record<string, ProjectFileContents>>;
   readonly entry: string;
   readonly argv: readonly string[];
   readonly cwd: string;

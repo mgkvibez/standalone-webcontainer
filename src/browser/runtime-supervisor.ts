@@ -1,4 +1,4 @@
-import type { RuntimeRunOutcome, RuntimeRunRequest } from "../container/types.js";
+import type { ProjectFileContents, RuntimeRunOutcome, RuntimeRunRequest } from "../container/types.js";
 import { InProcessRuntime } from "../runtime/in-process.js";
 import { FileSystem } from "../vfs/index.js";
 import type { WireRequest, WireResponse } from "../shims/http.js";
@@ -130,7 +130,7 @@ export class RuntimeSupervisor {
     this.#processes.clear();
   }
 
-  #loadProject(projectId: string, files: Readonly<Record<string, string>>): void {
+  #loadProject(projectId: string, files: Readonly<Record<string, ProjectFileContents>>): void {
     if (this.#projectId !== projectId) {
       this.dispose();
       const vfs = new FileSystem();
@@ -158,7 +158,9 @@ export class RuntimeSupervisor {
       } catch {
         // Missing files are created below, with their parents.
       }
-      if (existing === contents) continue;
+      // Only a string can be compared against a text read. A byte file is always written, because the comparison above decoded it and a decode is
+      // not an equality test: two different byte sequences can decode to the same replacement-character text.
+      if (typeof contents === "string" && existing === contents) continue;
       const parent = path.slice(0, Math.max(0, path.lastIndexOf("/")));
       if (parent !== "") vfs.mkdirSync(parent, { recursive: true });
       vfs.writeFileSync(path, contents);

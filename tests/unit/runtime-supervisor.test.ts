@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 import { RuntimeSupervisor } from "../../src/browser/runtime-supervisor.js";
 import { previewRequestUrl } from "../../src/harness/preview-target.js";
 
-const run = (supervisor: RuntimeSupervisor, files: Record<string, string>, entry: string, timeoutMs = 5_000) =>
+const run = (supervisor: RuntimeSupervisor, files: Record<string, string | Uint8Array>, entry: string, timeoutMs = 5_000) =>
   supervisor.run({
     projectId: "test",
     files,
@@ -31,6 +31,23 @@ const until = async (predicate: () => boolean, timeoutMs = 5_000): Promise<void>
 };
 
 describe("RuntimeSupervisor readback", () => {
+  it("hands a program the exact bytes a snapshot carries", async () => {
+    // The other half of the binary path: the container test proves the bytes survive staging, and this proves they survive seeding into the VFS
+    // a program actually reads. Both halves are needed, because either decode alone produces the same unloadable module.
+    const supervisor = new RuntimeSupervisor();
+    const blob = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0xff, 0xfe, 0x80]);
+    const files = {
+      "/blob.wasm": blob,
+      "/index.js": `const bytes = require("fs").readFileSync("/blob.wasm");
+console.log(Array.from(bytes).join(","));`,
+    };
+
+    const result = await run(supervisor, files, "/index.js");
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe([...blob].join(","));
+  });
+
   it("reads a file a program wrote, which the project snapshot cannot show", async () => {
     const supervisor = new RuntimeSupervisor();
     const files = {

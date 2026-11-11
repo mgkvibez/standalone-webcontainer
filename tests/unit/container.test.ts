@@ -65,6 +65,19 @@ interface FakeRuntimeOptions {
   readonly throwWith?: string;
 }
 
+/**
+ * An installed file's text.
+ *
+ * A snapshot carries installed files as the bytes they were extracted as, which is what keeps a wasm module loadable, so a test that cares about
+ * source text decodes rather than assuming every entry is a string.
+ */
+const textOf = (files: Readonly<Record<string, unknown>> | undefined, path: string): string => {
+  const contents = files?.[path];
+  if (typeof contents === "string") return contents;
+  if (contents instanceof Uint8Array) return new TextDecoder().decode(contents);
+  throw new Error(`no contents at ${path}`);
+};
+
 class FakeRuntime implements RuntimeClient {
   readonly requests: RuntimeRunRequest[] = [];
   /** Every keystroke and resize the container forwarded, in order, so routing can be asserted rather than assumed. */
@@ -366,7 +379,7 @@ describe("honest refusal", () => {
     expect(lockfile).not.toBeNull();
     expect(project.list().some((path) => path.includes("node_modules"))).toBe(false);
     await container.execute(session.id, "node index.js");
-    expect(runtime.requests.at(-1)?.files["/node_modules/@corpus/hello/index.js"]).toContain("installed");
+    expect(textOf(runtime.requests.at(-1)?.files, "/node_modules/@corpus/hello/index.js")).toContain("installed");
     expect(output(container, session.id)).toContain("stdout:added 1 package(s) from the offline corpus");
     await container.execute(session.id, "npm ci");
     expect(project.read("/package-lock.json")).toBe(lockfile);
@@ -395,7 +408,33 @@ describe("honest refusal", () => {
     // npm does not invent a manifest either: the install records what it did in the lockfile and nothing else.
     expect(project.read("/package.json")).toBeNull();
     await container.execute(session.id, "node index.js");
-    expect(runtime.requests.at(-1)?.files["/node_modules/@corpus/hello/index.js"]).toContain("installed");
+    expect(textOf(runtime.requests.at(-1)?.files, "/node_modules/@corpus/hello/index.js")).toContain("installed");
+  });
+
+  it("carries a package's binary file into the runtime unchanged", async () => {
+    // The bytes are deliberately not valid UTF-8: 0xff and 0xfe have no encoding, so any decode on the way turns them into replacement
+    // characters and the comparison fails. This is the shape of the bug that stopped vite: an 11 MB wasm went through `TextDecoder` while the
+    // container staged the install, and the runtime then reported `CompileError: unknown section code #0x20`, which names the wasm and blames
+    // nothing real. A whole wasm module does not belong in a unit test, so the payload here is the header plus the two bytes that broke it.
+    const blob = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0xff, 0xfe, 0x80]);
+    const project = new FakeProject({ "/index.js": 'console.log(1);' });
+    const runtime = new FakeRuntime();
+    const registry = await createFakeRegistry({
+      packages: {
+        "@corpus/binary": [{ version: "1.0.0", files: { "index.js": 'module.exports = "binary";', "blob.wasm": blob } }],
+      },
+    });
+    const container = new Container({ runtime, files: project, registry });
+    const session = container.createSession();
+
+    await container.execute(session.id, "npm install @corpus/binary");
+    await container.execute(session.id, "node index.js");
+
+    const carried = runtime.requests.at(-1)?.files["/node_modules/@corpus/binary/blob.wasm"];
+    expect(carried).toBeInstanceOf(Uint8Array);
+    expect([...(carried as Uint8Array)]).toEqual([...blob]);
+    // The project store stays text: node_modules is runtime state and is never written into the project's own files.
+    expect(project.list().some((path) => path.includes("node_modules"))).toBe(false);
   });
 
   it("saves a named package into an existing package.json, and refuses an unsupported flag", async () => {
