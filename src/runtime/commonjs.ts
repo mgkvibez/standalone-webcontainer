@@ -632,7 +632,24 @@ export class CommonJsLoader {
               (specifier: string): unknown => this.importSync(specifier, moduleDir, path),
             ],
           ];
-    const injected: ReadonlyArray<readonly [string, unknown]> = [...base, ...generated];
+    /**
+     * The parameters a module's body is compiled with: the globals it did not declare for itself, then the transform's own names.
+     *
+     * Mutable on purpose. The scan above decides "did this module declare `crypto` itself?" by reading text, and text cannot answer that question
+     * for a real bundle: vite's `publicUtils.cjs` declares `const crypto` at the top of a 6 000-line file whose template literals desynchronise the
+     * scan, so the answer came back "no", `crypto` was injected as a parameter, and the module died with `Identifier 'crypto' has already been
+     * declared` before a line of it ran. The compile below is the backstop that turns that class of mistake into a correct module: the names V8
+     * itself names are the ones that actually collide, and dropping one restores exactly the shadowing Node gives a module over a global.
+     */
+    let injected: ReadonlyArray<readonly [string, unknown]> = [...base, ...generated];
+    /**
+     * Names the loader must supply, so a collision with one of them is a defect to report rather than a shadow to respect.
+     *
+     * Node's wrapper passes exactly these, and Node throws for a module that declares one of them at top level: `const require = 1` in a CommonJS
+     * file is `SyntaxError: Identifier 'require' has already been declared` in Node 20, and it must be here too. The realm globals are the other
+     * case entirely: Node has them as real globals, so a module's own `const crypto` simply shadows one.
+     */
+    const suppliedNames = new Set<string>(["exports", "require", "__require", "module", "__filename", "__dirname", ...generated.map(([name]) => name)]);
 
     // An async module's body is wrapped rather than rewritten: the transformed code is unchanged, only its execution context
     // becomes awaitable. The wrapper returns the promise, so `factory` still has one call signature and the loader reads the
@@ -640,13 +657,23 @@ export class CommonJsLoader {
     const body = asyncModule ? `return (async () => {\n${code}\n})();` : code;
 
     let factory: (...args: unknown[]) => unknown;
-    try {
-      factory = new Function(...injected.map(([name]) => name), body + "\n//# sourceURL=" + path) as (...args: unknown[]) => unknown;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      // A SyntaxError while compiling a dependency is unattributable without its path: the bare message says which identifier
-      // collided and nothing about whose file it was in.
-      throw new SyntaxError(`${path}: ${message}`);
+    for (;;) {
+      try {
+        factory = new Function(...injected.map(([name]) => name), body + "\n//# sourceURL=" + path) as (...args: unknown[]) => unknown;
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // V8 names the identifier it refused. Only a name this loader added can be withdrawn: a collision with one the transform generated means
+        // the transform and the source disagree, which is a defect to report rather than to paper over.
+        const collided = /Identifier '([^']+)' has already been declared/.exec(message)?.[1];
+        if (collided !== undefined && !suppliedNames.has(collided) && injected.some(([name]) => name === collided)) {
+          injected = injected.filter(([name]) => name !== collided);
+          continue;
+        }
+        // A SyntaxError while compiling a dependency is unattributable without its path: the bare message says which identifier
+        // collided and nothing about whose file it was in.
+        throw new SyntaxError(`${path}: ${message}`);
+      }
     }
 
     // The entry module becomes `require.main` the first time anything is evaluated, which is the entry itself.

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { declaresOwnBinding } from "../../src/runtime/commonjs.js";
+import { CommonJsLoader, declaresOwnBinding } from "../../src/runtime/commonjs.js";
+import { FileSystem } from "../../src/vfs/index.js";
+import { createFsShim } from "../../src/shims/fs.js";
 import { EventEmitter } from "../../src/shims/events.js";
 import { Duplex, PassThrough, Readable, Stream, Transform, Writable } from "../../src/shims/stream.js";
 
@@ -47,6 +49,45 @@ describe("the module wrapper omits a binding a module declares for itself", () =
     expect(declaresOwnBinding("const other = 1;", "Buffer")).toBe(false);
     expect(declaresOwnBinding("console.log('const Buffer = 1');", "Buffer")).toBe(false);
     expect(declaresOwnBinding("Buffer.from('x');", "Buffer")).toBe(false);
+  });
+});
+
+/**
+ * The scan above decides, from text, whether a module declares a global for itself. Text cannot always answer that, and the answer that matters
+ * is the one V8 gives at compile time. These two tests pin the limit and the backstop together, because either one alone reads as the other
+ * working.
+ */
+describe("a module whose own declaration the scan cannot see still loads", () => {
+  // Real shape: vite's `publicUtils.cjs` is 6 000 lines of bundled code, and the walk below counts braces in text that is not only code. A regex
+  // literal containing an opening brace leaves it one deep for the rest of the file, so every top-level declaration after it reads as nested.
+  const source = `const openingBrace = /{/;
+const crypto = { marker: "own" };
+module.exports = crypto.marker;
+`;
+
+  const load = (contents: string): unknown => {
+    const vfs = new FileSystem();
+    vfs.writeFileSync("/app/bundle.cjs", contents);
+    const loader = new CommonJsLoader({ fs: createFsShim(vfs as never), builtins: {} });
+    return loader.require("/app/bundle.cjs", "/app");
+  };
+
+  it("is a case the scan gets wrong, which is why the loader cannot rely on it alone", () => {
+    expect(declaresOwnBinding(source, "crypto")).toBe(false);
+  });
+
+  it("loads anyway, and the module's own binding wins over the injected global", () => {
+    // Before the backstop this threw `SyntaxError: /app/bundle.cjs: Identifier 'crypto' has already been declared` and the dependency never
+    // ran. Node's behaviour, which this restores: a module-level binding shadows the global of the same name.
+    expect(load(source)).toBe("own");
+  });
+
+  it("keeps a module's own `require`, a divergence from Node that predates the backstop", () => {
+    // Node's wrapper passes `require` as a parameter, so `const require = createRequire(import.meta.url)` is a SyntaxError there. This loader has
+    // always withdrawn the parameter for such a module on purpose (see the `__require` binding), and the backstop does not change that: it only
+    // makes the withdrawal happen for the names the scan misses too. Recorded here because "we do it on purpose" and "we forgot" look identical
+    // from outside.
+    expect(load(`const require = 1;\nmodule.exports = require;\n`)).toBe(1);
   });
 });
 
