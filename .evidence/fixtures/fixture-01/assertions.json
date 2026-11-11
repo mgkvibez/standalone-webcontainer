@@ -2,17 +2,17 @@
   {
     "index": 0,
     "kind": "http-status",
-    "state": "failed",
-    "passed": false,
+    "state": "passed",
+    "passed": true,
     "stepAvailable": true,
-    "detail": "expected status 200 from http://localhost:3000/, observed 404"
+    "detail": "expected status 200 from http://localhost:3000/, observed 200"
   },
   {
     "index": 1,
     "kind": "http-body-contains",
-    "state": "failed",
-    "passed": false,
+    "state": "passed",
+    "passed": true,
     "stepAvailable": true,
-    "detail": "body of http://localhost:3000/ did not contain \"<div id=\\\"root\\\">\"; observed \"No preview server is listening on port 3000. Start one with server.listen(3000).\""
+    "detail": "body of http://localhost:3000/ contained the expected text"
   }
 ]

@@ -1,4 +1,4 @@
 fixture: fixture-01
 evidence schema: 2
-classification: RUNTIME_INCOMPATIBILITY
-reason: assertion failed: http-status: expected status 200 from http://localhost:3000/, observed 404 (and 1 more)
+classification: PASS
+reason: all 2 assertion(s) passed

@@ -6,7 +6,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "builtin command completed: added 8 package(s) from snapshot \"vite\" (8 pinned packages)",
-    "elapsedMs": 240,
+    "elapsedMs": 227,
     "record": {
       "index": 0,
       "exitCode": 0,
@@ -20,13 +20,13 @@
     "command": "npm run dev -- --port 3000 --host 127.0.0.1",
     "state": "ran",
     "termination": "ok",
-    "detail": "process 1 exited with exit 0",
-    "elapsedMs": 918,
+    "detail": "process 1 exited 0 and left a server listening on port(s) 3000",
+    "elapsedMs": 965,
     "record": {
       "index": 1,
       "exitCode": 0,
-      "stdout": "",
-      "stderr": "error when starting dev server:\nTypeError: Cannot read properties of null (reading 'on')\n    at setupSIGTERMListener (/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:17662:19)\n    at _createServer (/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:63273:5)\n    at processTicksAndRejections (node:internal/process/task_queues:95:5)\n    at CAC.eval (/node_modules/vite/dist/node/cli.js:743:20)\n"
+      "stdout": "\n  VITE v5.4.21  \n\n  ➜  Local:   http://127.0.0.1:3000/\n",
+      "stderr": ""
     }
   }
 ]
