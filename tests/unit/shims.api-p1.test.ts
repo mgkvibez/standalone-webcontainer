@@ -12,6 +12,7 @@ import { bufferModule, isUtf8 } from "../../src/shims/buffer.js";
 import cryptoModule, { getHashes, randomInt } from "../../src/shims/crypto.js";
 import { EventEmitter, eventsModule } from "../../src/shims/events.js";
 import { createOsShim } from "../../src/shims/os.js";
+import { createProcessShim } from "../../src/shims/process.js";
 import { Scheduler } from "../../src/runtime/scheduler.js";
 import { createTimersPromisesShim, createTimersShim } from "../../src/shims/timers.js";
 import { parseArgs } from "../../src/shims/util.js";
@@ -208,5 +209,54 @@ describe("util.parseArgs", () => {
 
   it("refuses grouped short flags rather than misreading them as a value", () => {
     expect(() => parseArgs({ args: ["-abc"], options: { a: { type: "boolean", short: "a" } } })).toThrow(/Grouped short options/);
+  });
+});
+
+describe("process.hrtime, memoryUsage and uptime", () => {
+  it("returns [seconds, nanoseconds] with a nanosecond part inside its second", () => {
+    const shim = createProcessShim();
+    const stamp = shim.hrtime();
+    expect(stamp).toHaveLength(2);
+    expect(Number.isInteger(stamp[0])).toBe(true);
+    expect(Number.isInteger(stamp[1])).toBe(true);
+    expect(stamp[0]).toBeGreaterThanOrEqual(0);
+    expect(stamp[1]).toBeGreaterThanOrEqual(0);
+    // The invariant that makes the pair usable: the nanosecond part cannot reach a whole second.
+    expect(stamp[1]).toBeLessThan(1e9);
+  });
+
+  it("measures a DIFFERENCE when given a previous reading, normalising a negative part", () => {
+    const shim = createProcessShim();
+    const before = shim.hrtime();
+    const after = shim.hrtime(before);
+    expect(after[0]).toBeGreaterThanOrEqual(0);
+    expect(after[1]).toBeGreaterThanOrEqual(0);
+    expect(after[1]).toBeLessThan(1e9);
+    expect(after[0] * 1e9 + after[1]).toBeGreaterThanOrEqual(0);
+  });
+
+  it("offers .bigint(), which is the form modern code times with", () => {
+    const shim = createProcessShim();
+    const first = shim.hrtime.bigint();
+    const second = shim.hrtime.bigint();
+    expect(typeof first).toBe("bigint");
+    expect(second >= first).toBe(true);
+  });
+
+  it("answers memoryUsage with Node's five numeric fields, never negatives", () => {
+    const usage = createProcessShim().memoryUsage();
+    expect(Object.keys(usage).sort()).toEqual(["arrayBuffers", "external", "heapTotal", "heapUsed", "rss"]);
+    for (const value of Object.values(usage)) {
+      expect(typeof value).toBe("number");
+      expect(value).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("reports uptime from the shim's own start, so a fresh one reads near zero", () => {
+    const shim = createProcessShim();
+    const first = shim.uptime();
+    expect(first).toBeGreaterThanOrEqual(0);
+    expect(first).toBeLessThan(600);
+    expect(shim.uptime()).toBeGreaterThanOrEqual(first);
   });
 });

@@ -3,7 +3,7 @@
 **Date:** 11 November 2026
 **Base:** `main` at `a85d9af`
 **Instrument:** `npm run diff:api` (`tools/differential/{api,api-cases}.ts`)
-**Result:** 0/25 → **25/25 cases match real Node**
+**Result:** 0/28 → **28/28 cases match real Node**
 
 ## Why this document exists
 
@@ -18,7 +18,7 @@ So the first deliverable here is not a feature. It is a measurement that can see
 
 ## The instrument
 
-25 small programs, each asking one question ("does `rmSync` remove a tree, and does the tree then read as gone?"). Each is run twice and compared:
+28 small programs, each asking one question ("does `rmSync` remove a tree, and does the tree then read as gone?"). Each is run twice and compared:
 
 - **real Node**, staged as a `.cjs` file in a fresh temp directory per case;
 - **this runtime**, against a fresh `FileSystem` and `InProcessRuntime`.
@@ -35,7 +35,7 @@ Two design rules the first version broke and this one encodes:
 
 ## The baseline, before any change
 
-`0 of 25`. Not "a few rough edges": every single case deviated, and the failures spread well past `fs`:
+`0 of 28`. Not "a few rough edges": every single case deviated, and the failures spread well past `fs`:
 
 | Area | What the baseline showed |
 | --- | --- |
@@ -48,6 +48,7 @@ Two design rules the first version broke and this one encodes:
 | `buffer.isUtf8` | absent: `buffer` was `{ Buffer }` and nothing else |
 | `crypto.randomInt` | absent |
 | `util.parseArgs` | absent |
+| `process.hrtime` / `memoryUsage` / `uptime` | absent |
 
 ## What closed
 
@@ -100,9 +101,26 @@ call.
 | `buffer.isUtf8` | `buffer` was `{Buffer}` | decoded with `fatal: true`, so the answer agrees with the parser the caller is about to use |
 | `crypto.randomInt` | absent | rejection sampling, not modulo: a biased id or shuffle is a defect nobody notices until it matters |
 | `util.parseArgs` | absent | long/short options, `--no-flag`, `--`, `multiple`, strict refusals by name; grouped short flags refused rather than misread as a value |
+| `process.hrtime` (+`.bigint()`) | absent | `performance.now()` scaled to `[seconds, nanoseconds]`, with the previous-reading difference normalised |
+| `process.memoryUsage` | absent | Node's five fields, from `performance.memory` where Chromium exposes it; a zero means "not exposed", and the header says so |
+| `process.uptime` | absent | seconds since this run's process shim was created |
 
 `crypto.getHashes()` returns `["sha1", "sha256"]` — only what `createHash` accepts, because `getHashes` is how a caller decides whether the
 digest it needs is available, and promising md5 then throwing elsewhere moves the failure to a worse place.
+
+## The three that finished P1
+
+The audit's P1 list ended with `process.hrtime` "via performance.now()" and `process.memoryUsage` "with honest fields where the browser
+exposes them", and this document's first version stopped one member short of that. They are closed now, with three more differential cases:
+
+- **`hrtime`** returns `[seconds, nanoseconds]` and a `.bigint()`, scaled from `performance.now()` and rounded **once** at the end, so the two
+  components always reconstruct the same instant. The difference form normalises a negative nanosecond part the way Node does, because
+  `hrtime()` minus a previous reading does not have to land on a second boundary. Its zero point is the page's, Node's is the process's, and
+  nothing may compare the numbers across processes: the case compares a difference, which is how the member is used.
+- **`memoryUsage`** reports Node's five fields. `performance.memory` (Chromium) supplies `heapUsed` and `heapTotal`; a browser has no API for
+  RSS, external or arrayBuffers, so `rss` is the heap total and those two are 0. **A zero here means "not exposed", not "none used"**, which is
+  stated in the shim's own header rather than left for a caller to assume the happy reading.
+- **`uptime`** is seconds since this run's shim was created, which is this program's start.
 
 ## What this does NOT claim
 
@@ -115,9 +133,9 @@ digest it needs is available, and promising md5 then throwing elsewhere moves th
 
 ## Regression cover
 
-- `tools/differential/api-cases.ts` — 25 cases, with their own guards in `tests/unit/differential.cases.test.ts` (unique ids, a question
+- `tools/differential/api-cases.ts` — 28 cases, with their own guards in `tests/unit/differential.cases.test.ts` (unique ids, a question
   ending in `?`, a `console.log` on every path, no clocks or randomness).
 - `tests/unit/shims.fs.surface.test.ts` — 23 tests.
-- `tests/unit/shims.api-p1.test.ts` — 25 tests.
+- `tests/unit/shims.api-p1.test.ts` — 30 tests.
 
 The differential proves the answer matches Node. The unit tests keep a later edit from changing it without a Node oracle in the loop.
