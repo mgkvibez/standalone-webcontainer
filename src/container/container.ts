@@ -23,6 +23,7 @@ import {
   PROCESS_COMMANDS,
 } from "./commands.js";
 import type {
+  FileSyncReport,
   LogLine,
   ProcessRecord,
   ProjectFileContents,
@@ -197,6 +198,33 @@ export class Container {
       "Not supported: npx, pnpm, yarn, sh, bash, zsh.",
       "No pipes, globbing, redirection, environment assignment or job control.",
     ].join("\n");
+  }
+
+  /**
+   * Push files the page changed into the runtime that is already running, without starting a command.
+   *
+   * The case this exists for: an editor saves a file while a dev server is serving the preview. Every other change reaches the runtime as the
+   * prelude to a command, so a run's snapshot is enough; a save has no run behind it, and until this method existed the bytes stayed in the page
+   * while the program kept serving the old ones.
+   *
+   * `removed` is required for deletions rather than inferred from the omissions, because this is a partial push: an unrelated path being absent
+   * from `files` says nothing about it. Both are absolute paths, and a path listed in both is written, not removed.
+   *
+   * Returns `null` when the runtime client cannot deliver files to a live runtime, so a caller can tell "not supported here" from "nothing to do".
+   */
+  async syncFiles(
+    files: Readonly<Record<string, ProjectFileContents>>,
+    removed: readonly string[] = [],
+  ): Promise<FileSyncReport | null> {
+    if (this.#runtime.syncFiles === undefined) return null;
+    const normalized: Record<string, ProjectFileContents> = {};
+    for (const [path, contents] of Object.entries(files)) normalized[path.startsWith("/") ? path : `/${path}`] = contents;
+    const gone = removed.map((path) => (path.startsWith("/") ? path : `/${path}`)).filter((path) => normalized[path] === undefined);
+    return this.#runtime.syncFiles({
+      projectId: this.#files.projectId ?? "default",
+      files: normalized,
+      removed: gone,
+    });
   }
 
   /** Run one line. Resolves when the line is finished, including any process it started. */

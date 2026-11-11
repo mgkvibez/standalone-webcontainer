@@ -115,3 +115,109 @@ describe("RuntimeSupervisor preview transport", () => {
     supervisor.dispose();
   });
 });
+
+/**
+ * Pushing a save into a runtime that is already running.
+ *
+ * This is the shape the preview actually needs. A run mirrors the whole project because a run is the authoritative snapshot; an editor's save has
+ * no run behind it, so until this channel existed the bytes stayed in the page while a dev server kept serving the old ones. The last test here is
+ * the load-bearing one: it fetches from a server that is already listening and expects the new bytes, which is the only version of the question a
+ * user would recognise.
+ */
+describe("RuntimeSupervisor file sync", () => {
+  it("says so when no runtime is loaded, instead of pretending a preview was updated", async () => {
+    const supervisor = new RuntimeSupervisor();
+
+    expect(await supervisor.syncFiles({ projectId: "test", files: { "/a.txt": "a" } })).toEqual({
+      live: false,
+      written: [],
+      removed: [],
+    });
+    supervisor.dispose();
+  });
+
+  it("refuses to push a different project's files into the loaded runtime", async () => {
+    // The runtime holds one project's VFS. Answering `live: true` for another project would write A's file into B's tree.
+    const supervisor = new RuntimeSupervisor();
+    await run(supervisor, { "/index.js": `console.log("built");` }, "/index.js");
+
+    expect(await supervisor.syncFiles({ projectId: "other", files: { "/a.txt": "a" } })).toEqual({
+      live: false,
+      written: [],
+      removed: [],
+    });
+    expect(supervisor.readRuntimeFile("/a.txt")).toBeNull();
+    supervisor.dispose();
+  });
+
+  it("writes what differs, removes only what it was told, and leaves the rest alone", async () => {
+    const supervisor = new RuntimeSupervisor();
+    await run(
+      supervisor,
+      {
+        "/index.js": `console.log("built");`,
+        "/src/kept.js": "kept",
+        "/src/changed.js": "before",
+        "/src/gone.js": "remove me",
+      },
+      "/index.js",
+    );
+
+    const report = await supervisor.syncFiles({
+      projectId: "test",
+      files: { "/src/changed.js": "after", "/src/kept.js": "kept", "/src/added.js": "new" },
+      removed: ["/src/gone.js"],
+    });
+
+    // Three files were named and one of them already matched. Writing it again is not a change, and a report that says otherwise turns every save
+    // into three.
+    expect(report.live).toBe(true);
+    expect(report.written).toEqual(["/src/changed.js", "/src/added.js"]);
+    expect(report.removed).toEqual(["/src/gone.js"]);
+    // The point of a partial push: silence about a path means nothing. If a save were treated as authoritative, the dev server's own build output
+    // and everything under node_modules would be deleted on every keystroke.
+    expect(supervisor.readRuntimeFile("/src/kept.js")).toBe("kept");
+    expect(supervisor.readRuntimeFile("/src/changed.js")).toBe("after");
+    expect(supervisor.readRuntimeFile("/src/added.js")).toBe("new");
+    expect(supervisor.readRuntimeFile("/src/gone.js")).toBeNull();
+    expect(supervisor.readRuntimeFile("/index.js")).not.toBeNull();
+    supervisor.dispose();
+  });
+
+  it("reaches a server that is already listening, which is what an edited preview needs", async () => {
+    const supervisor = new RuntimeSupervisor();
+    const pending = run(
+      supervisor,
+      {
+        "/server.js": `require("http").createServer((request, response) => {
+  response.end(require("fs").readFileSync("/src/data.txt", "utf8"));
+}).listen(4322);`,
+        "/src/data.txt": "before",
+      },
+      "/server.js",
+    ).catch(() => undefined);
+
+    await until(() => supervisor.processes().some((process) => process.ports.includes(4322)));
+    const fetchBody = async (): Promise<string> => {
+      const response = await supervisor.handleTransport({
+        method: "GET",
+        url: previewRequestUrl("http://localhost:4322/"),
+        headers: { host: "localhost:4322" },
+        body: new Uint8Array(0),
+      });
+      return new TextDecoder().decode(response.body);
+    };
+
+    expect(await fetchBody()).toBe("before");
+
+    // The save. No command is started, no run is created: the file changes under a program that is already serving.
+    const report = await supervisor.syncFiles({ projectId: "test", files: { "/src/data.txt": "after" } });
+    expect(report.written).toEqual(["/src/data.txt"]);
+
+    // The handler reads the file per request, so a stale answer here means the write never reached the VFS the program sees.
+    expect(await fetchBody()).toBe("after");
+
+    supervisor.dispose();
+    await pending;
+  });
+});

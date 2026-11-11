@@ -23,7 +23,7 @@ import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Container } from "../../src/container/container.js";
-import type { ProjectFiles, RuntimeClient, RuntimeRunOutcome, RuntimeRunRequest } from "../../src/container/types.js";
+import type { FileSyncReport, ProjectFiles, RuntimeClient, RuntimeRunOutcome, RuntimeRunRequest, RuntimeSyncRequest } from "../../src/container/types.js";
 import type { RegistryClient } from "../../src/npm/install.js";
 import { ProbeFault, type AssertionEnvironment, type HttpProbe } from "../../src/harness/assertions.js";
 import type { FixtureDefinition } from "../../src/harness/definition.js";
@@ -90,7 +90,13 @@ export class InProcessClient implements RuntimeClient {
   }
 
   reset(): void {
-    // The supervisor rebuilds the VFS per run, so there is no long-lived runtime to discard between fixtures.
+    // Runs rebuild the VFS from their snapshot; a sync only ever updates the project the supervisor already holds, so there is nothing to
+    // discard between fixtures.
+  }
+
+  /** The same file push a page makes when an editor saves, for probes that need the editor's half of the loop. */
+  syncFiles(request: RuntimeSyncRequest): Promise<FileSyncReport> {
+    return this.#supervisor.syncFiles(request);
   }
 
   /** What a program wrote, which the project snapshot cannot show. */
@@ -112,6 +118,22 @@ export class InProcessClient implements RuntimeClient {
       method: "GET",
       url: wireUrl,
       headers: {},
+      body: new Uint8Array(0),
+    });
+    return { status: response.statusCode, body: new TextDecoder().decode(response.body) };
+  }
+
+  /**
+   * The same gateway path with headers of the probe's choosing.
+   *
+   * Exists for requests whose SHAPE is the question: a websocket handshake is an ordinary GET plus `Connection: Upgrade`, so sending that
+   * shape and reading the status is how the preview's ability to carry one gets measured rather than assumed.
+   */
+  async probeWith(url: string, headers: Record<string, string>): Promise<HttpProbe> {
+    const response = await this.#supervisor.handleTransport({
+      method: "GET",
+      url: previewRequestUrl(url),
+      headers,
       body: new Uint8Array(0),
     });
     return { status: response.statusCode, body: new TextDecoder().decode(response.body) };

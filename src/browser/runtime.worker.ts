@@ -166,6 +166,26 @@ scope.onmessage = (event: MessageEvent<ClientMessage>): void => {
     case "stop-servers":
       post({ type: "servers-stopped", id: message.id, ports: supervisor.stopServers(message.ports) });
       return;
+    case "sync-files":
+      // Deliberately not queued behind runs: an editor's save must reach the running dev server even while a command is executing, and the
+      // supervisor's mirroring is synchronous filesystem work that cannot interleave with a run's own turn.
+      void supervisor.syncFiles({
+        ...(message.projectId === undefined ? {} : { projectId: message.projectId }),
+        files: message.files,
+        ...(message.removed === undefined ? {} : { removed: message.removed }),
+      })
+        .then((report) => {
+          post({ type: "files-synced", id: message.id, live: report.live, written: report.written, removed: report.removed });
+        })
+        .catch((error: unknown) => {
+          post({
+            type: "error",
+            id: message.id,
+            code: "SYNC_ERROR",
+            message: error instanceof Error ? error.message : String(error),
+          });
+        });
+      return;
     case "input":
       // Dropped when no run owns that process id: typing into a program that has exited is a no-op, not an error.
       terminals.get(message.processId)?.write(message.text);

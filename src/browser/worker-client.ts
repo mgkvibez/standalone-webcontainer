@@ -11,7 +11,7 @@
  * A fresh Worker is started lazily by the next run, so termination costs nothing until it is needed.
  */
 
-import type { RuntimeClient, RuntimeRunOutcome, RuntimeRunRequest } from "../container/types.js";
+import type { FileSyncReport, RuntimeClient, RuntimeRunOutcome, RuntimeRunRequest, RuntimeSyncRequest } from "../container/types.js";
 import type { ClientMessage, RunRequest, ServerMessage } from "./protocol.js";
 
 interface Pending {
@@ -28,6 +28,8 @@ export class WorkerRuntimeClient implements RuntimeClient {
   #worker: Worker | null = null;
   #nextId = 1;
   readonly #pending = new Map<number, Pending>();
+  /** Sync replies, kept apart from runs because they carry a report rather than an outcome and share only the id space. */
+  readonly #syncs = new Map<number, { readonly resolve: (report: FileSyncReport) => void; readonly reject: (error: Error) => void }>();
   #lastError: string | null = null;
 
   /** Why the host last failed, for the UI. Never thrown: an uncaught Worker error would take the page's listener with it. */
@@ -96,12 +98,39 @@ export class WorkerRuntimeClient implements RuntimeClient {
     this.#worker.postMessage({ type: "resize", processId, columns, rows } satisfies ClientMessage);
   }
 
+  /**
+   * Push the page's files into the loaded runtime, without a run.
+   *
+   * A client with no Worker has no runtime to receive them, so it answers `live: false` immediately rather than starting one: an editor's save
+   * is not a reason to boot a host, and the next run mirrors the snapshot regardless.
+   */
+  syncFiles(request: RuntimeSyncRequest): Promise<FileSyncReport> {
+    const worker = this.#worker;
+    if (worker === null) return Promise.resolve({ live: false, written: [], removed: [] });
+    const id = this.#nextId++;
+    const outcome = new Promise<FileSyncReport>((resolve, reject) => {
+      this.#syncs.set(id, { resolve, reject });
+    });
+    worker.postMessage({
+      type: "sync-files",
+      id,
+      ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
+      files: request.files,
+      ...(request.removed === undefined ? {} : { removed: request.removed }),
+    } satisfies ClientMessage);
+    return outcome;
+  }
+
   /** Kill the host and settle everything in flight. The next `run` starts a new Worker. */
   reset(): void {
     const worker = this.#worker;
     this.#worker = null;
     if (worker !== null) {
       worker.terminate();
+    }
+    for (const [id, sync] of this.#syncs) {
+      this.#syncs.delete(id);
+      sync.resolve({ live: false, written: [], removed: [] });
     }
     for (const [id, pending] of this.#pending) {
       this.#pending.delete(id);
@@ -141,6 +170,19 @@ export class WorkerRuntimeClient implements RuntimeClient {
   }
 
   #receive(message: ServerMessage): void {
+    if (message.type === "files-synced") {
+      const sync = this.#syncs.get(message.id);
+      this.#syncs.delete(message.id);
+      sync?.resolve({ live: message.live, written: message.written, removed: message.removed });
+      return;
+    }
+    if (message.type === "error" && this.#syncs.has(message.id)) {
+      const sync = this.#syncs.get(message.id);
+      this.#syncs.delete(message.id);
+      this.#lastError = message.message;
+      sync?.reject(new Error(message.message));
+      return;
+    }
     if (message.type === "pong" || message.type === "servers-stopped" || message.type === "transport-disconnected") return;
     const pending = this.#pending.get(message.id);
     if (pending === undefined) return; // Late output from a killed run: dropped, never rendered.
@@ -181,6 +223,10 @@ export class WorkerRuntimeClient implements RuntimeClient {
 
   #fail(message: string): void {
     this.#lastError = message;
+    for (const [id, sync] of this.#syncs) {
+      this.#syncs.delete(id);
+      sync.resolve({ live: false, written: [], removed: [] });
+    }
     for (const [id, pending] of this.#pending) {
       this.#pending.delete(id);
       pending.onOutput("stderr", `${message}\n`);

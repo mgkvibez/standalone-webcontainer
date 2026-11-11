@@ -84,12 +84,29 @@ export interface StopServersRequest {
   readonly ports: readonly number[];
 }
 
+/**
+ * The page's current files, pushed to a runtime that is already loaded.
+ *
+ * A run carries its snapshot, which covers every command-driven change. This covers the other direction: an editor saving a file while a dev
+ * server is running, where the next run may be minutes away and the program serving the preview needs the bytes now.
+ */
+export interface SyncFilesRequest {
+  readonly type: "sync-files";
+  readonly id: number;
+  readonly projectId?: string;
+  /** Absolute path -> contents. Bytes travel by structured clone, so nothing here may be JSON-encoded. */
+  readonly files: Readonly<Record<string, ProjectFileContents>>;
+  /** Paths the page deleted. Named, because a partial sync cannot infer a deletion from an omission. */
+  readonly removed?: readonly string[];
+}
+
 export type ClientMessage =
   | RunRequest
   | PingRequest
   | ConnectTransportMessage
   | DisconnectTransportMessage
   | StopServersRequest
+  | SyncFilesRequest
   | InputMessage
   | ResizeMessage;
 
@@ -144,7 +161,7 @@ export interface RunResultMessage {
 export interface FailureMessage {
   readonly type: "error";
   readonly id: number;
-  readonly code: "RUNTIME_ERROR" | "BAD_REQUEST";
+  readonly code: "RUNTIME_ERROR" | "BAD_REQUEST" | "SYNC_ERROR";
   readonly message: string;
   readonly stack?: string;
 }
@@ -160,4 +177,25 @@ export interface ServersStoppedMessage {
   readonly ports: readonly number[];
 }
 
-export type ServerMessage = OutputChunk | RunResultMessage | FailureMessage | PongMessage | ServersStoppedMessage | TransportDisconnectedMessage;
+/**
+ * What a sync did, addressed to the request that asked.
+ *
+ * `live: false` says the runtime had no loaded project to receive the files, which is not an error: the next run mirrors the snapshot. It is
+ * reported so the page does not mark a preview current on the strength of a reply that pushed nothing.
+ */
+export interface FilesSyncedMessage {
+  readonly type: "files-synced";
+  readonly id: number;
+  readonly live: boolean;
+  readonly written: readonly string[];
+  readonly removed: readonly string[];
+}
+
+export type ServerMessage =
+  | OutputChunk
+  | RunResultMessage
+  | FailureMessage
+  | PongMessage
+  | ServersStoppedMessage
+  | TransportDisconnectedMessage
+  | FilesSyncedMessage;

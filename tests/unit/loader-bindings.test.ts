@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { declaresOwnBinding } from "../../src/runtime/commonjs.js";
+import { CommonJsLoader, declaresOwnBinding, rewriteDynamicImport } from "../../src/runtime/commonjs.js";
+import { FileSystem } from "../../src/vfs/index.js";
+import { createFsShim } from "../../src/shims/fs.js";
 import { EventEmitter } from "../../src/shims/events.js";
 import { Duplex, PassThrough, Readable, Stream, Transform, Writable } from "../../src/shims/stream.js";
 
@@ -50,6 +52,45 @@ describe("the module wrapper omits a binding a module declares for itself", () =
   });
 });
 
+/**
+ * The scan above decides, from text, whether a module declares a global for itself. Text cannot always answer that, and the answer that matters
+ * is the one V8 gives at compile time. These two tests pin the limit and the backstop together, because either one alone reads as the other
+ * working.
+ */
+describe("a module whose own declaration the scan cannot see still loads", () => {
+  // Real shape: vite's `publicUtils.cjs` is 6 000 lines of bundled code, and the walk below counts braces in text that is not only code. A regex
+  // literal containing an opening brace leaves it one deep for the rest of the file, so every top-level declaration after it reads as nested.
+  const source = `const openingBrace = /{/;
+const crypto = { marker: "own" };
+module.exports = crypto.marker;
+`;
+
+  const load = (contents: string): unknown => {
+    const vfs = new FileSystem();
+    vfs.writeFileSync("/app/bundle.cjs", contents);
+    const loader = new CommonJsLoader({ fs: createFsShim(vfs as never), builtins: {} });
+    return loader.require("/app/bundle.cjs", "/app");
+  };
+
+  it("is a case the scan gets wrong, which is why the loader cannot rely on it alone", () => {
+    expect(declaresOwnBinding(source, "crypto")).toBe(false);
+  });
+
+  it("loads anyway, and the module's own binding wins over the injected global", () => {
+    // Before the backstop this threw `SyntaxError: /app/bundle.cjs: Identifier 'crypto' has already been declared` and the dependency never
+    // ran. Node's behaviour, which this restores: a module-level binding shadows the global of the same name.
+    expect(load(source)).toBe("own");
+  });
+
+  it("keeps a module's own `require`, a divergence from Node that predates the backstop", () => {
+    // Node's wrapper passes `require` as a parameter, so `const require = createRequire(import.meta.url)` is a SyntaxError there. This loader has
+    // always withdrawn the parameter for such a module on purpose (see the `__require` binding), and the backstop does not change that: it only
+    // makes the withdrawal happen for the names the scan misses too. Recorded here because "we do it on purpose" and "we forgot" look identical
+    // from outside.
+    expect(load(`const require = 1;\nmodule.exports = require;\n`)).toBe(1);
+  });
+});
+
 describe("the emitter works on an object that is not an instance of it", () => {
   it("accepts on/emit through a mixed-in prototype, the way express builds an app", () => {
     const app = Object.create(EventEmitter.prototype) as EventEmitter;
@@ -87,5 +128,57 @@ describe("require('stream') is the legacy Stream constructor, with the classes a
     expect(typeof streamModule).toBe("function");
     expect(streamModule.Readable).toBe(Readable);
     expect(typeof streamModule.prototype.on).toBe("function");
+  });
+});
+
+/**
+ * `import()` from a CommonJS module.
+ *
+ * `new Function` has no dynamic-import callback, so the keyword reaches V8 and the whole module fails to compile with
+ * `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING` before it runs. Node does better only because it compiles through `vm`, which takes one; the loader
+ * compiles with `new Function`, so it rewrites the keyword and supplies the callback itself. vite 5's CJS entry is the module that found this.
+ */
+describe("a CommonJS module may import() dynamically", () => {
+  const loadWith = (files: Record<string, string>, entry: string): unknown => {
+    const vfs = new FileSystem();
+    for (const [path, contents] of Object.entries(files)) vfs.writeFileSync(path, contents);
+    const loader = new CommonJsLoader({ fs: createFsShim(vfs as never), builtins: {} });
+    return loader.require(entry, "/app");
+  };
+
+  it("rewrites the keyword and not a mention inside a string", () => {
+    const source = `const note = "import(x)";\nconst pattern = /import\\(/;\nimport("/app/target.mjs");\n`;
+    const { code, rewritten } = rewriteDynamicImport(source, "__dyn");
+
+    expect(rewritten).toBe(true);
+    expect(code).toContain(`const note = "import(x)"`);
+    expect(code).toContain("/import\\(/");
+    expect(code).toContain(`__dyn("/app/target.mjs")`);
+    expect(code).not.toMatch(/(^|[^_"])\bimport\(/m);
+  });
+
+  it("leaves a file that does not parse exactly as it was", () => {
+    // A syntax error must stay the module's own: a half-rewritten file would report a position that no longer matches its source.
+    const broken = `import( "unclosed ;`;
+    expect(rewriteDynamicImport(broken, "__dyn")).toEqual({ code: broken, rewritten: false });
+  });
+
+  it("resolves the target and returns its namespace", async () => {
+    const exported = loadWith(
+      {
+        "/app/entry.cjs": `module.exports = import("/app/target.mjs").then((namespace) => namespace.default);\n`,
+        "/app/target.mjs": `export default "from an ES module";\n`,
+      },
+      "/app/entry.cjs",
+    );
+
+    await expect(exported).resolves.toBe("from an ES module");
+  });
+
+  it("compiles a module that calls import() without calling it, where V8 alone cannot", () => {
+    // The failure this replaces was at compile time, so a module that merely contains the keyword died. This is that shape.
+    const value = loadWith({ "/app/quiet.cjs": `module.exports = () => import("/app/never.mjs");\n` }, "/app/quiet.cjs");
+
+    expect(typeof value).toBe("function");
   });
 });

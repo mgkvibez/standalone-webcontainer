@@ -1,4 +1,4 @@
-import type { ProjectFileContents, RuntimeRunOutcome, RuntimeRunRequest } from "../container/types.js";
+import type { FileSyncReport, ProjectFileContents, RuntimeRunOutcome, RuntimeRunRequest, RuntimeSyncRequest } from "../container/types.js";
 import { InProcessRuntime } from "../runtime/in-process.js";
 import { FileSystem } from "../vfs/index.js";
 import type { WireRequest, WireResponse } from "../shims/http.js";
@@ -130,7 +130,12 @@ export class RuntimeSupervisor {
     this.#processes.clear();
   }
 
-  #loadProject(projectId: string, files: Readonly<Record<string, ProjectFileContents>>): void {
+  /**
+   * Load a project's files, creating its runtime the first time a project is seen.
+   *
+   * Returns what the mirroring did, so a caller can tell an applied change from a no-op instead of assuming both are the same thing.
+   */
+  #loadProject(projectId: string, files: Readonly<Record<string, ProjectFileContents>>): FileSyncReport {
     if (this.#projectId !== projectId) {
       this.dispose();
       const vfs = new FileSystem();
@@ -138,14 +143,47 @@ export class RuntimeSupervisor {
       this.#runtime = new InProcessRuntime(vfs);
       this.#projectId = projectId;
     }
+    return this.#mirror(files);
+  }
+
+  /**
+   * Bring a loaded project's VFS up to date without starting a run.
+   *
+   * The VFS is the live filesystem: a program already running keeps the paths it opened, so a write here is what an editor's save looks like
+   * from inside a dev server. Nothing is invented when no runtime is loaded — that is reported as `live: false`, because the next run mirrors
+   * the snapshot and a caller told otherwise would believe a preview had been updated when nothing had been pushed.
+   */
+  async syncFiles(request: RuntimeSyncRequest): Promise<FileSyncReport> {
+    const projectId = request.projectId ?? "default";
+    if (this.#vfs === null || this.#projectId !== projectId) {
+      return { live: false, written: [], removed: [] };
+    }
+    return this.#mirror(request.files, { authoritative: false, removed: request.removed ?? [] });
+  }
+
+  /**
+   * Mirror files into the live VFS: write what differs, remove what is gone, leave everything else untouched.
+   *
+   * `authoritative` is the difference between a run and a save. A run carries the whole project, so a path it no longer mentions was deleted by
+   * the page and must go. A save names only what it touched, so silence about a path means nothing and only the explicit list removes.
+   */
+  #mirror(
+    files: Readonly<Record<string, ProjectFileContents>>,
+    options: { readonly authoritative: boolean; readonly removed: readonly string[] } = { authoritative: true, removed: [] },
+  ): FileSyncReport {
     const vfs = this.#vfs;
     if (vfs === null) throw new Error("runtime supervisor has no VFS");
 
+    const written: string[] = [];
+    const removed: string[] = [];
     const nextPaths = new Set(Object.keys(files));
-    for (const path of this.#mirroredFiles) {
-      if (nextPaths.has(path)) continue;
+    const gone = options.authoritative
+      ? [...this.#mirroredFiles].filter((path) => !nextPaths.has(path))
+      : options.removed;
+    for (const path of gone) {
       try {
         vfs.unlinkSync(path);
+        removed.push(path);
       } catch {
         // A runtime may already have removed the page-owned file; the incoming snapshot is authoritative.
       }
@@ -164,9 +202,16 @@ export class RuntimeSupervisor {
       const parent = path.slice(0, Math.max(0, path.lastIndexOf("/")));
       if (parent !== "") vfs.mkdirSync(parent, { recursive: true });
       vfs.writeFileSync(path, contents);
+      written.push(path);
     }
-    this.#mirroredFiles.clear();
-    for (const path of nextPaths) this.#mirroredFiles.add(path);
+    if (options.authoritative) {
+      this.#mirroredFiles.clear();
+      for (const path of nextPaths) this.#mirroredFiles.add(path);
+    } else {
+      for (const path of nextPaths) this.#mirroredFiles.add(path);
+      for (const path of removed) this.#mirroredFiles.delete(path);
+    }
+    return { live: true, written, removed };
   }
 }
 
