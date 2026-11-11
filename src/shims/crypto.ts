@@ -213,6 +213,63 @@ export function generateKeyPairSync(): never {
   throw UNSUPPORTED("generateKeyPairSync");
 }
 
+/**
+ * A uniform integer in [0, range), by rejection sampling.
+ *
+ * The modulo shortcut is not used on purpose: `random % range` biases towards the low values whenever range does not divide 2^32, and a
+ * session id or a shuffled index that leans is a defect nobody notices until it matters. Drawing again when the value lands in the
+ * unrepresentable tail is the standard fix and it terminates with probability 1.
+ */
+const randomBelow = (range: number): number => {
+  if (!Number.isInteger(range) || range <= 0 || range > 0x100000000) {
+    throw Object.assign(new RangeError(`The value of "max - min" is out of range. It must be > 0 && <= 281474976710656. Received ${String(range)}`), {
+      code: "ERR_OUT_OF_RANGE",
+    });
+  }
+  const limit = Math.floor(0x100000000 / range) * range;
+  const draw = new Uint32Array(1);
+  for (;;) {
+    getRandomValues(draw);
+    // Indexed once into a local, because a typed array's element type is optional under this project's strict settings while the VALUE a draw
+    // returns is always there.
+    const value = draw[0] as number;
+    if (value < limit) return value % range;
+  }
+};
+
+/**
+ * `crypto.randomInt([min,] max)`, the range-safe random every modern package reaches for instead of `Math.random`.
+ *
+ * Synchronous, as Node's is, over the same `getRandomValues` the rest of this shim uses. `max` is EXCLUSIVE and `min` is inclusive, which is
+ * the part callers get wrong, so the differential case checks the bounds rather than only that a number came back.
+ */
+export function randomInt(max: number): number;
+export function randomInt(min: number, max: number): number;
+export function randomInt(minOrMax: number, maybeMax?: number): number {
+  const min = maybeMax === undefined ? 0 : minOrMax;
+  const max = maybeMax === undefined ? minOrMax : maybeMax;
+  if (!Number.isInteger(min) || !Number.isInteger(max)) {
+    throw Object.assign(new TypeError(`The "min" and "max" arguments must be integers`), { code: "ERR_INVALID_ARG_TYPE" });
+  }
+  if (min >= max) {
+    throw Object.assign(new RangeError(`The value of "max" is out of range. It must be greater than the value of "min" (${min}). Received ${max}`), {
+      code: "ERR_OUT_OF_RANGE",
+    });
+  }
+  return min + randomBelow(max - min);
+}
+
+/**
+ * The hash algorithms `createHash` actually accepts, in Node's spelling.
+ *
+ * Not a longer list: a caller uses `getHashes()` to decide whether the digest it needs is available, so promising md5 and then throwing from
+ * `createHash("md5")` would move the failure to a worse place. MD5 is deliberately refused there because this runtime's implementation
+ * disagreed with Node's (digest.ts), and an honest short list is the same statement.
+ */
+export function getHashes(): string[] {
+  return ["sha1", "sha256"];
+}
+
 export const constants = { RSA_PKCS1_PADDING: 1, RSA_PSS_SALTLEN_DIGEST: -1, SSL_OP_ALL: 0 };
 
 export default {
@@ -222,6 +279,8 @@ export default {
   randomFillSync,
   randomUUID,
   timingSafeEqual,
+  randomInt,
+  getHashes,
   webcrypto,
   getRandomValues,
   subtle,

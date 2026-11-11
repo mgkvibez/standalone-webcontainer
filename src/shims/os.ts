@@ -48,6 +48,8 @@ export interface OsShim {
   type(): string;
   release(): string;
   cpus(): readonly unknown[];
+  /** Logical cores the browser reports, or 1 where it reports nothing. Never a guess. */
+  availableParallelism(): number;
   homedir(): string;
   tmpdir(): string;
   readonly EOL: string;
@@ -75,6 +77,17 @@ export function createOsShim(options: OsShimOptions): OsShim {
     type: () => "Browser",
     release: () => "",
     cpus: () => [],
+    /**
+     * How modern tools decide their worker count, so it is answered rather than absent.
+     *
+     * `navigator.hardwareConcurrency` is the only honest source a browser gives, and it is a hint: it reports logical cores, not available
+     * ones, which is exactly what Node's availableParallelism is allowed to do. Where the browser does not expose it (a Worker without it, or a
+     * test lane), 1 is the honest answer: "you may run one thing at a time", not a guess at 4.
+     */
+    availableParallelism: () => {
+      const reported = (globalThis as { navigator?: { hardwareConcurrency?: number } }).navigator?.hardwareConcurrency;
+      return typeof reported === "number" && Number.isFinite(reported) && reported >= 1 ? Math.floor(reported) : 1;
+    },
     EOL: "\n",
     // Named refusals rather than absent members: `os.totalmem is not a function` reads as a bug in this runtime, while the message
     // above says what is true and what to do about it.

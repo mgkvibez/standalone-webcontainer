@@ -34,6 +34,7 @@
     "guard:identifiers": "vite-node tools/checks/forbidden-identifiers.ts",
     "guard:licences": "vite-node tools/checks/licences.ts",
     "diff:event-loop": "vite-node tools/differential/event-loop.ts",
+    "diff:api": "vite-node tools/differential/api.ts",
     "bench:syscall-metadata": "vite-node tools/bench/syscall-metadata.ts",
     "diff:modules": "vite-node tools/differential/modules.ts",
     "diff:modules:strict": "vite-node tools/differential/modules.ts --strict",

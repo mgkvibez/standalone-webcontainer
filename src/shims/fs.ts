@@ -73,14 +73,74 @@ const toNodeError = (error: unknown, syscall: string, path: FsPath): NodeFsError
   throw error;
 };
 
+/**
+ * Node's `Stats`, as a class, because that is what callers check.
+ *
+ * The members were already right and the CLASS was absent: `fs.Stats` did not exist, so `statSync(p) instanceof fs.Stats` was false and a
+ * package that stores a stat and asks later whether it is a file had no answer. `lstatSync` reports through the same class, because nothing
+ * in this VFS is a symbolic link (docs/audit/api-surface-p0.md records the decision the audit says this needs before symlinks exist).
+ */
+export class Stats implements StatsShim {
+  readonly size: number;
+  readonly mtimeMs: number;
+  readonly birthtimeMs: number;
+  readonly mtime: Date;
+  readonly birthtime: Date;
+  readonly #kind: "file" | "dir";
+
+  constructor(stats: VfsStatsPort) {
+    this.#kind = stats.kind;
+    this.size = stats.size;
+    this.mtimeMs = stats.modifiedAt;
+    this.mtime = new Date(stats.modifiedAt);
+    this.birthtimeMs = stats.createdAt;
+    this.birthtime = new Date(stats.createdAt);
+  }
+
+  isFile(): boolean {
+    return this.#kind === "file";
+  }
+
+  isDirectory(): boolean {
+    return this.#kind === "dir";
+  }
+
+  /** Always false. There are no links in this VFS, which is why `lstatSync` and `statSync` agree rather than diverge. */
+  isSymbolicLink(): boolean {
+    return false;
+  }
+
+  /** Node returns false rather than throwing for a kind this VFS cannot have, so a caller's `if` keeps working. */
+  isFIFO(): boolean {
+    return false;
+  }
+
+  isSocket(): boolean {
+    return false;
+  }
+
+  isBlockDevice(): boolean {
+    return false;
+  }
+
+  isCharacterDevice(): boolean {
+    return false;
+  }
+}
+
 /** One place where a port stat becomes the Node-shaped one, so `statSync` and `statManySync` cannot drift apart. */
-const asStats = (stats: VfsStatsPort): StatsShim => ({
-  isFile: () => stats.kind === "file",
-  isDirectory: () => stats.kind === "dir",
-  size: stats.size,
-  mtimeMs: stats.modifiedAt,
-  birthtimeMs: stats.createdAt,
-});
+const asStats = (stats: VfsStatsPort): StatsShim => new Stats(stats);
+
+/**
+ * The access constants, with Node's values and no O_* flags.
+ *
+ * Every one of these is HONOURED below: the four access modes are answered by existence (this VFS has no permission bits), and
+ * COPYFILE_EXCL is checked by `copyFileSync`. `open` takes string flags here, so shipping `O_RDONLY` and friends would be five more names
+ * that change nothing — and a name that lies is worse than a name that is missing.
+ */
+const ACCESS_CONSTANTS = { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, COPYFILE_EXCL: 1 } as const;
+
+export const FS_CONSTANTS: Readonly<typeof ACCESS_CONSTANTS> = ACCESS_CONSTANTS;
 
 /**
  * Node's encoding names, normalised the way Node normalises them, or a refusal.
@@ -206,6 +266,16 @@ const direntsOf = (vfs: FileSystemPort, directory: string, names: readonly strin
 export interface StatsShim {
   isFile(): boolean;
   isDirectory(): boolean;
+  /**
+   * Always false. There are no links in this VFS, which is why `lstatSync` and `statSync` agree; declared here because a caller reads it and a
+   * missing member would be `undefined is not a function` at the call site.
+   */
+  isSymbolicLink(): boolean;
+  /** Node answers false rather than throwing for a kind this VFS cannot have. */
+  isFIFO(): boolean;
+  isSocket(): boolean;
+  isBlockDevice(): boolean;
+  isCharacterDevice(): boolean;
   size: number;
   mtimeMs: number;
   birthtimeMs: number;
@@ -270,6 +340,28 @@ export interface FsShim {
   rmdirSync(path: FsPath): void;
   renameSync(from: FsPath, to: FsPath): void;
   /**
+   * The synchronous twins of the members this shim already had as promises.
+   *
+   * These are not new capability — every one composes over VFS calls that already exist — they are names that real tools call and that were
+   * absent from this file entirely. `fs.rmSync` in particular is how every modern tool deletes a tree (vite, rimraf replacements, build
+   * scripts), and its absence failed with no output at all, because the throw happens before the program prints anything.
+   * tools/differential/api-cases.ts holds the cases; docs/audit/api-surface-p0.md records the measurement.
+   */
+  rmSync(path: FsPath, options?: { recursive?: boolean; force?: boolean }): void;
+  appendFileSync(path: FsPath, data: string | Uint8Array, encoding?: string): void;
+  copyFileSync(from: FsPath, to: FsPath, mode?: number): void;
+  /** Existence only: the mode is accepted and ignored, because there are no permission bits here. */
+  accessSync(path: FsPath, mode?: number): void;
+  /** Returns the directory it created, in the CALLER's shape: a relative prefix yields a relative path, as in Node. */
+  mkdtempSync(prefix: string): string;
+  truncateSync(path: FsPath, length?: number): void;
+  /** No symlinks exist in this VFS, so `lstatSync` is `statSync` with `lstat` as its syscall. Documented rather than silently absent. */
+  lstatSync(path: FsPath): StatsShim;
+  /** The `Stats` class itself, because callers do `instanceof` against it. */
+  Stats: typeof Stats;
+  /** F_OK/R_OK/W_OK/X_OK and COPYFILE_EXCL. See ACCESS_CONSTANTS for what is deliberately omitted. */
+  constants: Readonly<typeof ACCESS_CONSTANTS>;
+  /**
    * Node's callback forms, one beside each promise form.
    *
    * A program can see the difference: vite loads a bundled config by writing a temp `.mjs`, importing it, then calling `fs.unlink(tmp, () => {})` in
@@ -284,6 +376,18 @@ export interface FsShim {
   rename(from: FsPath, to: FsPath, callback: CallbackOnly): void;
   rm(path: FsPath, optionsOrCallback?: { recursive?: boolean; force?: boolean } | CallbackOnly, maybeCallback?: CallbackOnly): void;
   access(path: FsPath, callback: CallbackOnly): void;
+  /** `(path, data[, encoding], callback)`, Node's shape for the append that creates its target. */
+  appendFile(
+    path: FsPath,
+    data: string | Uint8Array,
+    optionsOrCallback?: string | CallbackOnly,
+    maybeCallback?: CallbackOnly,
+  ): void;
+  /** `(from, to[, mode], callback)`, where mode carries COPYFILE_EXCL. */
+  copyFile(from: FsPath, to: FsPath, modeOrCallback?: number | CallbackOnly, maybeCallback?: CallbackOnly): void;
+  /** A prefix, not a path to create: the callback receives the directory that was made. */
+  mkdtemp(prefix: string, callback: (error: unknown, made?: string) => void): void;
+  truncate(path: FsPath, lengthOrCallback?: number | CallbackOnly, maybeCallback?: CallbackOnly): void;
   /**
    * `fs.watch`. The listener may be passed second, as in Node, and the returned handle is the FSWatcher-shaped object.
    *
@@ -346,6 +450,10 @@ export interface FsShim {
     rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
     rmdir(path: string, options?: { recursive?: boolean }): Promise<void>;
     rename(from: string, to: string): Promise<void>;
+    appendFile(path: string, data: string | Uint8Array, encoding?: string): Promise<void>;
+    copyFile(from: string, to: string, mode?: number): Promise<void>;
+    mkdtemp(prefix: string): Promise<string>;
+    truncate(path: string, length?: number): Promise<void>;
     watch(path: string, options?: WatchOptions): WatchAsyncIterator;
   };
 }
@@ -417,7 +525,19 @@ const absoluteWatch = (
 };
 
 /** The members this layer DERIVES from its promise forms rather than writing out, so the literal below is typed without them. */
-type DerivedFromPromises = "readFile" | "writeFile" | "mkdir" | "unlink" | "rmdir" | "rename" | "rm" | "access";
+type DerivedFromPromises =
+  | "readFile"
+  | "writeFile"
+  | "mkdir"
+  | "unlink"
+  | "rmdir"
+  | "rename"
+  | "rm"
+  | "access"
+  | "appendFile"
+  | "copyFile"
+  | "mkdtemp"
+  | "truncate";
 
 /** The absolute layer as written: everything except the derived callback forms and the `.native` carriage the outer wrapper adds. */
 type WrittenAbsoluteFsShim = Omit<FsShim, DerivedFromPromises | "promises" | "realpathSync"> & { realpathSync: (path: FsPath) => string };
@@ -526,6 +646,135 @@ AbsoluteFsShim => {
     );
   };
   const vfs = pathAccepting(port);
+
+  /**
+   * The operations the sync twins and their promise forms share, written once.
+   *
+   * Every one of them is built out of VFS calls that already existed: this VFS has whole-file reads and writes, so append is read + concat +
+   * write rather than a new port method that a Worker-backed substrate would then have to implement twice. The names were missing, not the
+   * capability, and that distinction is the whole finding (docs/audit/api-surface-p0.md).
+   */
+
+  /** Whether a path exists, without throwing: the same probe `existsSync` is built on. */
+  const exists = (path: string): boolean => {
+    try {
+      vfs.statSync(path);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  /** Bytes for a write-shaped argument: a string is encoded the way Node encodes it, bytes pass through untouched. */
+  const bytesOf = (data: string | Uint8Array, encoding: unknown): Uint8Array =>
+    typeof data === "string"
+      ? new Uint8Array(Buffer.from(data, (encodingOf(encoding) ?? "utf8") as Parameters<Buffer["toString"]>[0]))
+      : data;
+
+  const concatBytes = (first: Uint8Array, second: Uint8Array): Uint8Array => {
+    const joined = new Uint8Array(first.length + second.length);
+    joined.set(first, 0);
+    joined.set(second, first.length);
+    return joined;
+  };
+
+  /**
+   * Appends, creating the file when it is absent.
+   *
+   * A missing file is not an error here, and that is the whole point of the call: a reporter that appends its first line must not have to
+   * check first, which is why `appendFileSync` is everywhere in build tooling.
+   */
+  const appendBytes = (path: string, data: string | Uint8Array, encoding: unknown): void => {
+    const next = bytesOf(data, encoding);
+    const existing = exists(path) ? (vfs.readFileSync(path) as Uint8Array) : new Uint8Array(0);
+    vfs.writeFileSync(path, concatBytes(existing, next));
+  };
+
+  /** Copies bytes. `mode` carries COPYFILE_EXCL and nothing else, because that is the only bit Node documents for copyFile. */
+  const copyBytes = (from: string, to: string, mode?: number): void => {
+    if (mode !== undefined && (mode & ACCESS_CONSTANTS.COPYFILE_EXCL) !== 0 && exists(to)) {
+      throw Object.assign(new Error(`EEXIST: file already exists, copyfile '${from}' -> '${to}'`), {
+        code: "EEXIST",
+        errno: -17,
+        syscall: "copyfile",
+        path: to,
+      });
+    }
+    // The source is read before the destination is opened, so copying a file onto itself cannot truncate it first.
+    vfs.writeFileSync(to, vfs.readFileSync(from) as Uint8Array);
+  };
+
+  /** Truncates or extends to `length` zero bytes. Both directions are truncation in Node's sense. */
+  const truncateBytes = (path: string, length = 0): void => {
+    if (!Number.isInteger(length) || length < 0) {
+      throw Object.assign(new TypeError(`The "len" argument must be a non-negative integer. Received ${String(length)}`), {
+        code: "ERR_OUT_OF_RANGE",
+      });
+    }
+    const current = vfs.readFileSync(path) as Uint8Array;
+    if (current.length === length) return;
+    const next = new Uint8Array(length);
+    next.set(current.subarray(0, length), 0);
+    vfs.writeFileSync(path, next);
+  };
+
+  /**
+   * A fresh directory under `prefix`, retried on collision.
+   *
+   * Node's suffix is six random characters. The alphabet here is base36, a smaller space than Node's, which is why the retry is not
+   * decoration: EEXIST means "draw another name", and any other failure (a missing parent, a full VFS) must surface instead of spinning.
+   */
+  const makeTempDir = (prefix: string): string => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const suffix = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
+      const candidate = `${prefix}${suffix}`;
+      if (exists(candidate)) continue;
+      vfs.mkdirSync(candidate, {});
+      return candidate;
+    }
+    throw Object.assign(new Error(`EEXIST: file already exists, mkdtemp '${prefix}'`), {
+      code: "EEXIST",
+      errno: -17,
+      syscall: "mkdtemp",
+      path: prefix,
+    });
+  };
+
+  /**
+   * Recursive removal: the sync twin of `promises.rm`, children before parents.
+   *
+   * The promise form already walked a tree and `rmSync` did not exist at all, which meant the same operation had two behaviours depending on
+   * which layer you called, and the sync one was a missing name rather than a different policy.
+   */
+  const removeTree = (path: string, recursive: boolean, force: boolean): void => {
+    if (!exists(path)) {
+      // `force` is Node's "missing is fine"; without it a missing path is ENOENT, not a silent success.
+      if (force) return;
+      throw Object.assign(new Error(`ENOENT: no such file or directory, rm '${path}'`), {
+        code: "ENOENT",
+        errno: -2,
+        syscall: "rm",
+        path,
+      });
+    }
+    if (vfs.statSync(path).kind === "dir") {
+      if (!recursive) {
+        throw Object.assign(new Error(`EISDIR: illegal operation on a directory, rm '${path}'`), {
+          code: "EISDIR",
+          errno: -21,
+          syscall: "rm",
+          path,
+        });
+      }
+      for (const entry of vfs.readdirSync(path)) {
+        removeTree(`${path === "/" ? "" : path}/${entry}`, true, true);
+      }
+      vfs.rmdirSync(path);
+      return;
+    }
+    vfs.unlinkSync(path);
+  };
+
   const shim: WrittenAbsoluteFsShim = {
   watch: (path, listenerOrOptions, maybeListener) =>
     absoluteWatch(watches, path, listenerOrOptions, maybeListener),
@@ -741,6 +990,67 @@ AbsoluteFsShim => {
     }
   },
 
+  rmSync(path, options) {
+    try {
+      removeTree(pathOf(path), options?.recursive === true, options?.force === true);
+    } catch (error) {
+      throw toNodeError(error, "rm", path);
+    }
+  },
+
+  appendFileSync(path, data, encoding) {
+    try {
+      appendBytes(pathOf(path), data, encoding);
+    } catch (error) {
+      throw toNodeError(error, "open", path);
+    }
+  },
+
+  copyFileSync(from, to, mode) {
+    try {
+      copyBytes(pathOf(from), pathOf(to), mode);
+    } catch (error) {
+      throw toNodeError(error, "copyfile", from);
+    }
+  },
+
+  accessSync(path) {
+    try {
+      vfs.statSync(path);
+    } catch (error) {
+      throw toNodeError(error, "access", path);
+    }
+  },
+
+  mkdtempSync(prefix) {
+    try {
+      return makeTempDir(prefix);
+    } catch (error) {
+      throw toNodeError(error, "mkdtemp", prefix);
+    }
+  },
+
+  truncateSync(path, length) {
+    try {
+      truncateBytes(pathOf(path), length);
+    } catch (error) {
+      throw toNodeError(error, "open", path);
+    }
+  },
+
+  /** `statSync` with `lstat` as its syscall, because nothing here is a link: the same answer, reported under the name that was asked for. */
+  lstatSync(path) {
+    try {
+      return asStats(vfs.statSync(path));
+    } catch (error) {
+      throw toNodeError(error, "lstat", path);
+    }
+  },
+
+  Stats,
+
+  constants: ACCESS_CONSTANTS,
+
   };
 
   /**
@@ -857,6 +1167,36 @@ AbsoluteFsShim => {
         throw toNodeError(error, "rename", from);
       }
     },
+    // The promise surface trails the callback surface in Node, and here it trailed in BOTH directions: these are the same helpers the sync
+    // members call, so the two conventions cannot disagree about what appending or truncating means.
+    async appendFile(path, data, encoding) {
+      try {
+        appendBytes(pathOf(path), data, encoding);
+      } catch (error) {
+        throw toNodeError(error, "open", path);
+      }
+    },
+    async copyFile(from, to, mode) {
+      try {
+        copyBytes(pathOf(from), pathOf(to), mode);
+      } catch (error) {
+        throw toNodeError(error, "copyfile", from);
+      }
+    },
+    async mkdtemp(prefix) {
+      try {
+        return makeTempDir(prefix);
+      } catch (error) {
+        throw toNodeError(error, "mkdtemp", prefix);
+      }
+    },
+    async truncate(path, length) {
+      try {
+        truncateBytes(pathOf(path), length);
+      } catch (error) {
+        throw toNodeError(error, "open", path);
+      }
+    },
   };
 
   // The callback forms Node exposes beside each promise form, derived rather than reimplemented. Bound through arrow wrappers because several promise
@@ -873,6 +1213,12 @@ AbsoluteFsShim => {
     rename: asCallback((from: FsPath, to: FsPath) => promises.rename(pathOf(from), pathOf(to))),
     rm: asCallback((path: FsPath, rmOptions?: { recursive?: boolean; force?: boolean }) => promises.rm(pathOf(path), rmOptions)),
     access: asCallback((path: FsPath) => promises.access(pathOf(path))),
+    appendFile: asCallback((path: FsPath, data: string | Uint8Array, encoding?: string) =>
+      promises.appendFile(pathOf(path), data, encoding),
+    ),
+    copyFile: asCallback((from: FsPath, to: FsPath, mode?: number) => promises.copyFile(pathOf(from), pathOf(to), mode)),
+    mkdtemp: asCallback((prefix: string) => promises.mkdtemp(prefix)),
+    truncate: asCallback((path: FsPath, length?: number) => promises.truncate(pathOf(path), length)),
   };
 };
 
@@ -893,6 +1239,18 @@ export const createFsShim = (
     const path = pathOf(value);
     return path.startsWith("/") ? path : nodePath.resolve(cwd, path);
   };
+  /**
+   * The path `mkdtemp` created, written the way the caller wrote its prefix.
+   *
+   * `at()` resolves and may normalise the prefix; Node reports the path it made, so the random suffix is appended to the caller's own string
+   * instead of an absolutised one. The suffix is whatever follows the resolved prefix, which is why the two lengths are compared rather than
+   * assumed.
+   */
+  const asGiven = (prefix: string, resolvedPrefix: string, created: string): string => {
+    const base = resolvedPrefix.endsWith("/") && resolvedPrefix !== "/" ? resolvedPrefix.slice(0, -1) : resolvedPrefix;
+    return `${prefix.replace(/\/+$/, "")}${created.slice(base.length)}`;
+  };
+
   const inner = createAbsoluteFsShim(vfs, options.watches);
 
   /**
@@ -961,9 +1319,42 @@ export const createFsShim = (
       inner.rm(at(path), rmOptions as { recursive?: boolean; force?: boolean } | undefined, callback);
     },
     access: (path, callback) => inner.access(at(path), callback),
+    appendFile: (path, data, optionsOrCallback, maybeCallback) => {
+      const [encoding, callback] = callbackOf(optionsOrCallback, maybeCallback);
+      inner.appendFile(at(path), data, encoding as string | undefined, callback);
+    },
+    copyFile: (from, to, modeOrCallback, maybeCallback) => {
+      const [mode, callback] = callbackOf(modeOrCallback, maybeCallback);
+      inner.copyFile(at(from), at(to), mode as number | undefined, callback);
+    },
+    truncate: (path, lengthOrCallback, maybeCallback) => {
+      const [length, callback] = callbackOf(lengthOrCallback, maybeCallback);
+      inner.truncate(at(path), length as number | undefined, callback);
+    },
+    // `mkdtemp`'s prefix is a PATH like any other, and its answer has to come back in the caller's own shape: Node returns the path it
+    // created, not an absolutised one, so `mkdtempSync("./run-")` yields "./run-abc123" here too.
+    mkdtemp: (prefix, callback) => {
+      const base = at(prefix);
+      inner.mkdtemp(base, (error: unknown, made?: string) =>
+        (callback as (error: unknown, made?: string) => void)(error, made === undefined ? undefined : asGiven(prefix, base, made)),
+      );
+    },
     unlinkSync: (path) => inner.unlinkSync(at(path)),
     rmdirSync: (path) => inner.rmdirSync(at(path)),
     renameSync: (from, to) => inner.renameSync(at(from), at(to)),
+    rmSync: (path, rmOptions) => inner.rmSync(at(path), rmOptions),
+    appendFileSync: (path, data, encoding) => inner.appendFileSync(at(path), data, encoding),
+    copyFileSync: (from, to, mode) => inner.copyFileSync(at(from), at(to), mode),
+    accessSync: (path) => inner.accessSync(at(path)),
+    truncateSync: (path, length) => inner.truncateSync(at(path), length),
+    lstatSync: (path) => inner.lstatSync(at(path)),
+    mkdtempSync: (prefix) => {
+      const base = at(prefix);
+      return asGiven(prefix, base, inner.mkdtempSync(base));
+    },
+    // Passed through rather than reconstructed: one class, so `instanceof` agrees with the object a stat actually returns.
+    Stats,
+    constants: ACCESS_CONSTANTS,
     watch: (path, listenerOrOptions, maybeListener) =>
       inner.watch(at(path), listenerOrOptions, maybeListener),
     promises: {
@@ -977,6 +1368,13 @@ export const createFsShim = (
       lstat: (path) => inner.promises.lstat(at(path)),
       realpath: (path) => inner.promises.realpath(at(path)),
       access: (path) => inner.promises.access(at(path)),
+      appendFile: (path, data, encoding) => inner.promises.appendFile(at(path), data, encoding),
+      copyFile: (from, to, mode) => inner.promises.copyFile(at(from), at(to), mode),
+      truncate: (path, length) => inner.promises.truncate(at(path), length),
+      mkdtemp: (prefix) => {
+        const base = at(prefix);
+        return inner.promises.mkdtemp(base).then((made) => asGiven(prefix, base, made));
+      },
       rm: (path, rmOptions) => inner.promises.rm(at(path), rmOptions),
       rmdir: (path, rmdirOptions) => inner.promises.rmdir(at(path), rmdirOptions),
       rename: (from, to) => inner.promises.rename(at(from), at(to)),
