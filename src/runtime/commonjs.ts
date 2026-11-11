@@ -9,14 +9,19 @@
  * is where "package X breaks on call Y" actually happens (`exports` maps,
  * condition order, directory mains). Owning it means a failure is diagnosable.
  *
- * Known, documented gaps (ADR-0004, D-4): `exports`/`imports` maps, `browser`
- * field substitution, `.node` binaries (would need a per-package WASM build), and
- * dynamic `require(expr)` outside the pre-resolved set are not supported.
+ * Known, documented gaps (ADR-0004, D-4): `imports` maps (#-specifiers), `browser`
+ * field substitution, `.node` binaries (would need a per-package WASM build),
+ * dynamic `require(expr)` outside the pre-resolved set, and `import()` inside a
+ * CommonJS module (an ES module's `import()` works through the transformed path).
+ * `exports` maps ARE supported now, for subpaths, conditions and patterns, because
+ * a fixture demanded them and the rules were measured against Node first: see
+ * ./exports-field.ts.
  */
 import { path as nodePath } from "../shims/path.js";
 import { transformEsm } from "./esm.js";
 import type { FsShim } from "../shims/fs.js";
 import { ProcessRefusal } from "./refusal.js";
+import { resolveExports, type ResolutionKind } from "./exports-field.js";
 import { INIT_HOOKS } from "./init-hooks.js";
 import { createRealmGlobals } from "./realm-globals.js";
 import type { RequireFunction } from "../shims/module.js";
@@ -244,16 +249,6 @@ interface PendingInit {
 
 type InitQueue = Map<string, PendingInit>;
 
-const NATIVE_PROCESS_BUILTINS: ReadonlySet<string> = new Set(["child_process"]);
-
-/** The package a file belongs to, for a diagnostic that names an owner rather than a directory. */
-function packageNameOf(dir: string): string | null {
-  // The LAST match, because a nested conflict puts one package inside another's node_modules and the innermost one is the owner.
-  const matches = [...dir.matchAll(/node_modules\/((?:@[^/]+\/)?[^/]+)/g)];
-  const last = matches[matches.length - 1];
-  return last?.[1] ?? null;
-}
-
 export class CommonJsLoader {
   readonly #deps: LoaderDeps;
   readonly #cache = new Map<string, ModuleRecord>();
@@ -318,25 +313,17 @@ export class CommonJsLoader {
     }
   }
 
-  /** Resolve a specifier to an absolute VFS path, or return a builtin name. */
-  resolve(specifier: string, fromDir: string): { kind: "builtin"; name: string } | { kind: "file"; path: string } {
+  /**
+   * Resolve a specifier to an absolute VFS path, or return a builtin name.
+   *
+   * `kind` is which edge is asking, because a package's `exports` map may offer different files for `import` and `require` and resolving one as the
+   * other would load the wrong file silently. It defaults to `require`, which is what every caller here was before the map existed.
+   */
+  resolve(specifier: string, fromDir: string, kind: ResolutionKind = "require"): { kind: "builtin"; name: string } | { kind: "file"; path: string } {
     const bare = specifier.startsWith("node:") ? specifier.slice(5) : specifier;
-    // A builtin that needs a native process is refused on purpose, with evidence, instead of reported as a missing module: "Cannot find
-    // module 'child_process'" reads as a defect in this loader, and the honest statement is that the runtime cannot spawn a process.
-    if (NATIVE_PROCESS_BUILTINS.has(bare)) {
-      const owner = packageNameOf(fromDir);
-      const frame = new Error().stack?.split("\n").slice(1).find((line) => !line.includes("commonjs.ts"))?.trim();
-      throw new ProcessRefusal({
-        code: "NATIVE_PROCESS_EXEC_REFUSED",
-        capability: "native process spawn",
-        message:
-          `Cannot load ${bare}: this runtime cannot spawn a native process${owner === null ? "" : `, which ${owner} needs`}. ` +
-          "A package that needs one must ship a WASM build or be replaced through a substitution." +
-          (frame === undefined ? "" : ` (${frame})`),
-        subject: `${bare} required from ${fromDir}`,
-      });
-    }
-
+    // `child_process` is NOT refused here. Node has the builtin, so requiring it is legal, and refusing at load stopped vite's dependency chunk
+    // on its own import line (`import require$$2$1 from 'child_process'`) without any code having asked to spawn anything. The refusal belongs to
+    // the call, where the command is known: see src/shims/child_process.ts.
     if (Object.prototype.hasOwnProperty.call(this.#deps.builtins, bare)) {
       return { kind: "builtin", name: bare };
     }
@@ -347,6 +334,11 @@ export class CommonJsLoader {
       if (found !== undefined) return { kind: "file", path: found };
       throw new ModuleNotFoundError(specifier, fromDir);
     }
+
+    // A package with an `exports` map is resolved by THAT map first, because the map is authoritative in Node: a subpath it does not list is not
+    // reachable even when the file exists on disk. Only a package without one falls through to the legacy walk below.
+    const viaExports = this.#resolveThroughExports(specifier, fromDir, kind);
+    if (viaExports !== undefined) return { kind: "file", path: viaExports };
 
     // Bare specifier: walk up the directory chain looking in node_modules, which
     // is what makes nested dependency trees resolve the way npm laid them out.
@@ -360,6 +352,46 @@ export class CommonJsLoader {
       current = parent;
     }
     throw new ModuleNotFoundError(specifier, fromDir);
+  }
+
+  /**
+   * Resolve a bare specifier through a package's `exports` map, or `undefined` when the package has none.
+   *
+   * The walk is the same upward `node_modules` search the legacy path does, because which package is found must not change: what changes is what
+   * the found package offers. A package that has an `exports` map and does not list the subpath is an ERROR (`ERR_PACKAGE_PATH_NOT_EXPORTED`),
+   * not a miss: Node makes the map authoritative, so falling through to a file probe would load something Node would refuse.
+   */
+  #resolveThroughExports(specifier: string, fromDir: string, kind: ResolutionKind): string | undefined {
+    // A relative, absolute or "#" specifier is never a package; "#" is an "imports" map, which stays a recorded gap.
+    if (specifier.startsWith("#") || specifier.startsWith(".") || nodePath.isAbsolute(specifier)) return undefined;
+    const segments = specifier.split("/");
+    const nameLength = specifier.startsWith("@") ? 2 : 1;
+    if (segments.length < nameLength || segments.slice(0, nameLength).some((part) => part === "")) return undefined;
+    const packageName = segments.slice(0, nameLength).join("/");
+    const rest = segments.slice(nameLength).join("/");
+    const subpath = rest === "" ? "." : `./${rest}`;
+
+    let current = nodePath.normalize(fromDir);
+    for (;;) {
+      const packageDir = nodePath.join(current, "node_modules", packageName);
+      const manifestPath = nodePath.join(packageDir, "package.json");
+      const manifest = this.#readManifestQuietly(manifestPath);
+      if (manifest !== null) {
+        const exportsField = manifest.exports;
+        if (exportsField === undefined) return undefined;
+        const target = resolveExports(exportsField, subpath, kind, manifestPath);
+        if (target === undefined) return undefined;
+        // An exports target is exact: Node does not guess extensions on it, so neither does this.
+        const resolved = nodePath.normalize(nodePath.join(packageDir, target));
+        const stats = this.#deps.fs.statManySync([resolved]);
+        if (stats[0]?.isFile() === true) return resolved;
+        // The map named a file the package does not ship. That is a broken package, and Node's answer is a missing module at the target.
+        throw new ModuleNotFoundError(specifier, fromDir);
+      }
+      const parent = nodePath.dirname(current);
+      if (parent === current) return undefined;
+      current = parent;
+    }
   }
 
   /**
@@ -649,7 +681,7 @@ export class CommonJsLoader {
    * this runtime already returned for dynamic import, and changing the shape is a separate decision with its own evidence.
    */
   async importModule(specifier: string, fromDir: string): Promise<unknown> {
-    const resolution = this.resolve(specifier, fromDir);
+    const resolution = this.resolve(specifier, fromDir, "import");
     if (resolution.kind === "builtin") return this.#deps.builtins[resolution.name];
     return (await this.loadFileAsync(resolution.path)).exports;
   }
@@ -699,7 +731,7 @@ export class CommonJsLoader {
    * implemented. The importer is passed through unmodified so the message can name both files.
    */
   importSync(specifier: string, fromDir: string, importer: string): unknown {
-    const resolution = this.resolve(specifier, fromDir);
+    const resolution = this.resolve(specifier, fromDir, "import");
     if (resolution.kind === "builtin") return this.#deps.builtins[resolution.name];
     // Refused during the load, before the body runs, so a module that awaits at its top level never executes on a path that cannot wait for it.
     return this.loadFile(resolution.path, { refuseAsync: importer }).exports;

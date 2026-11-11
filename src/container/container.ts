@@ -25,6 +25,7 @@ import {
 import type {
   LogLine,
   ProcessRecord,
+  ProjectFileContents,
   ProjectFiles,
   RuntimeClient,
   RuntimeRunOutcome,
@@ -59,7 +60,7 @@ export class Container {
   readonly #runtime: RuntimeClient;
   readonly #files: ProjectFiles;
   readonly #registry: RegistryClient | undefined;
-  readonly #dependencies = new Map<string, string>();
+  readonly #dependencies = new Map<string, ProjectFileContents>();
   #dependencyProjectId: string | undefined;
   #runtimeProjectId: string | null = null;
   readonly #timeoutMs: number;
@@ -335,7 +336,9 @@ export class Container {
    * used by every lookup here, is what keeps that from becoming a habit.
    */
   #readInstalled(path: string): string | null {
-    return this.#dependencies.get(path) ?? this.#files.read(path);
+    const found = this.#dependencies.get(path) ?? this.#files.read(path);
+    // The callers are manifest and shebang readers, so bytes become text here rather than at every call site.
+    return typeof found === "string" || found === null ? found : new TextDecoder().decode(found);
   }
 
   /** The entry file a package's `bin` field declares for `name`, or null when nothing provides it. */
@@ -433,7 +436,7 @@ export class Container {
         return contents;
       } }, root);
       if (subcommand === "ci" && lockfile === null) throw new Error("npm ci requires package-lock.json");
-      const staged = new Map<string, string>();
+      const staged = new Map<string, ProjectFileContents>();
       const report = await installDependencies(manifest, {
         registry: this.#registry,
         root,
@@ -441,9 +444,11 @@ export class Container {
         requireLockfile: subcommand === "ci",
         includeDev: !flags.includes("--omit=dev") && !flags.includes("--production"),
         writeLockfile: subcommand !== "ci",
+        // Staged as-is. The installer hands over `Uint8Array` for every file it extracts from a tarball, and a decode here is what turned
+        // esbuild's wasm into an unloadable module: a package's bytes are part of its interface, not an encoding detail.
         vfs: {
           mkdirSync: () => undefined,
-          writeFileSync: (path, data) => staged.set(path, typeof data === "string" ? data : new TextDecoder().decode(data)),
+          writeFileSync: (path, data) => staged.set(path, data),
         },
       });
       if (subcommand === "ci" && !report.usedLockfile) throw new Error("npm ci requires a lockfile that pins the installed versions");
@@ -454,8 +459,15 @@ export class Container {
       if (requested.length > 0 && manifestExists) {
         this.#files.write(`${root}package.json`, `${JSON.stringify(manifest, null, 2)}\n`);
       }
-      const lockText = staged.get(`${root}package-lock.json`);
-      if (lockText !== undefined) this.#files.write(`${root}package-lock.json`, lockText);
+      const lockContents = staged.get(`${root}package-lock.json`);
+      // The lockfile is text by definition, so it is decoded here rather than at the staging write, which has to stay byte-faithful for every
+      // other file: decoding at the write is what corrupted esbuild's wasm.
+      if (lockContents !== undefined) {
+        this.#files.write(
+          `${root}package-lock.json`,
+          typeof lockContents === "string" ? lockContents : new TextDecoder().decode(lockContents),
+        );
+      }
       this.#dependencies.clear();
       for (const [path, contents] of staged) if (path.includes("/node_modules/")) this.#dependencies.set(path, contents);
       this.#line(session, "stdout", `added ${report.packages.length} package(s) from ${this.#registry.origin ?? "the registry"}`);
@@ -752,13 +764,13 @@ export class Container {
 
   // ---------------------------------------------------------------- plumbing
 
-  #snapshotFiles(): Record<string, string> {
+  #snapshotFiles(): Record<string, ProjectFileContents> {
     const projectId = this.#files.projectId ?? "default";
     if (this.#dependencyProjectId !== projectId) {
       this.#dependencies.clear();
       this.#dependencyProjectId = projectId;
     }
-    const snapshot: Record<string, string> = { ...Object.fromEntries(this.#dependencies) };
+    const snapshot: Record<string, ProjectFileContents> = { ...Object.fromEntries(this.#dependencies) };
     for (const path of this.#files.list()) {
       const contents = this.#files.read(path);
       if (contents !== null) snapshot[path] = contents;
