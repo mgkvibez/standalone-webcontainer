@@ -20,6 +20,10 @@
  * `prependListener`, `setMaxListeners` enforcement (we do not warn at 11 listeners), promise-based
  * `events.once()`, and `captureRejections`. None are needed by the APIs we shim, and implementing them
  * half-heartedly would be worse than not having them.
+ *
+ * What the MODULE is, as opposed to the class, is decided at the bottom of this file: in Node
+ * `require("events")` IS the EventEmitter constructor, with the class attached to itself, and a package
+ * that writes `class X extends require("events")` depends on that rather than on a namespace object.
  */
 
 type Listener = (...args: unknown[]) => void;
@@ -131,3 +135,57 @@ export class EventEmitter {
 }
 
 export type { Listener as EventListener };
+
+/**
+ * Node's module object, which IS the class.
+ *
+ * `require("events")` returns the EventEmitter constructor itself, with the class hung off it as a property: in Node
+ * `require("events") === require("events").EventEmitter` (measured, node v20.20.2). Packages rely on the module value being
+ * usable as a base class, and vite's bundled chunk does exactly that (`import require$$0$7 from 'events'` then
+ * `class WebSocket extends require$$0$7`), so a namespace object here is not a smaller version of the module: it is a different
+ * thing, and it fails as `Class extends value #<Object> is not a constructor`.
+ *
+ * Two members are attached, both because they are VALUES rather than behaviour this runtime would have to fake:
+ *
+ * - `EventEmitter`, the self-reference above, so both call styles address the same class.
+ * - `defaultMaxListeners`, with Node's own validation: a non-number is a `TypeError` with `ERR_INVALID_ARG_TYPE`, and a negative
+ *   or NaN value is a `RangeError` with `ERR_OUT_OF_RANGE`, messages and codes measured against node v20.20.2 rather than
+ *   recalled. Nothing WARNS at the limit, which is the boundary the header already describes: the number is readable and
+ *   writable, and no listener count is checked against it.
+ *
+ * Still absent, and absent rather than stubbed because presence would promise behaviour: `events.once()`, `events.on()`,
+ * `getEventListeners`, `errorMonitor`, `captureRejectionSymbol`, `captureRejections` and `EventEmitterAsyncResource`.
+ */
+let defaultMaxListeners = 10;
+
+Object.defineProperties(EventEmitter, {
+  EventEmitter: { value: EventEmitter, enumerable: true, writable: true, configurable: true },
+  defaultMaxListeners: {
+    enumerable: true,
+    configurable: false,
+    get: () => defaultMaxListeners,
+    set: (value: unknown) => {
+      if (typeof value !== "number") {
+        // Node names the type it received, and quotes a string value: `Received type string ('x')`.
+        const received = value === null ? "null" : typeof value === "string" ? `string ('${value}')` : typeof value;
+        throw Object.assign(new TypeError(`The "defaultMaxListeners" argument must be of type number. Received type ${received}`), {
+          code: "ERR_INVALID_ARG_TYPE",
+        });
+      }
+      if (Number.isNaN(value) || value < 0) {
+        throw Object.assign(new RangeError(`The value of "defaultMaxListeners" is out of range. It must be >= 0. Received ${String(value)}`), {
+          code: "ERR_OUT_OF_RANGE",
+        });
+      }
+      defaultMaxListeners = value;
+    },
+  },
+});
+
+/** What the loader serves for `events` and `node:events`: the class itself, with Node's module members attached. */
+export type EventsModule = typeof EventEmitter & {
+  readonly EventEmitter: typeof EventEmitter;
+  defaultMaxListeners: number;
+};
+
+export const eventsModule = EventEmitter as EventsModule;

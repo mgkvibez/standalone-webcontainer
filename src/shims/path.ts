@@ -15,9 +15,35 @@
  */
 import * as pathe from "pathe";
 
-export interface PathShim {
+/**
+ * What `path.posix` and `path.win32` expose.
+ *
+ * A named type because Node's two namespaces are the same function set over a different separator convention, so the type is what makes it
+ * checkable that `posix` really is complete rather than "whatever we happened to remember".
+ */
+export interface PathNamespace {
+  readonly sep: string;
+  readonly delimiter: string;
+  normalize(p: string): string;
+  join(...parts: string[]): string;
+  resolve(...parts: string[]): string;
+  isAbsolute(p: string): boolean;
+  dirname(p: string): string;
+  basename(p: string, ext?: string): string;
+  extname(p: string): string;
+  relative(from: string, to: string): string;
+  parse(p: string): ReturnType<typeof pathe.parse>;
+  format(pathObject: Parameters<typeof pathe.format>[0]): string;
+  toNamespacedPath(p: string): string;
+}
+
+export interface PathShim extends PathNamespace {
   readonly sep: "/";
   readonly delimiter: ":";
+  /** Node's POSIX view. Complete here, because POSIX is what this runtime implements. */
+  readonly posix: PathNamespace;
+  /** Node's Windows view. Present and REFUSING, because answering POSIX rules under this name would compute wrong paths. */
+  readonly win32: PathNamespace;
   normalize(p: string): string;
   join(...parts: string[]): string;
   resolve(...parts: string[]): string;
@@ -86,7 +112,36 @@ const join = (...parts: string[]): string => {
   return joined === "" ? "." : normalizeNodeWidth(joined);
 };
 
-export const path: PathShim = {
+/**
+ * `path.win32`, refused by name.
+ *
+ * Every member throws `ERR_NOT_IMPLEMENTED_IN_THIS_RUNTIME` and says which one and why, so a caller that probes `path.win32.join` finds a
+ * function (Node has one) and a caller that CALLS it learns the truth immediately, rather than receiving a POSIX answer under a Windows name.
+ */
+function win32Namespace(): PathNamespace {
+  const refuse = (member: string) => (): never => {
+    throw Object.assign(
+      new Error(`path.win32.${member} is not implemented: this runtime resolves POSIX paths only, and answering with POSIX rules would compute the wrong path`),
+      { code: "ERR_NOT_IMPLEMENTED_IN_THIS_RUNTIME" },
+    );
+  };
+  const names = [
+    "normalize", "join", "resolve", "isAbsolute", "dirname", "basename", "extname", "relative", "parse", "format", "toNamespacedPath",
+  ] as const;
+  const namespace = { sep: "\\", delimiter: ";" } as PathNamespace;
+  for (const name of names) {
+    Object.defineProperty(namespace, name, { value: refuse(name), enumerable: true });
+  }
+  return namespace;
+}
+
+/**
+ * The POSIX implementation, built once.
+ *
+ * `path` spreads this and `path.posix` IS this, which is Node's own arrangement: `path.posix.normalize === path.normalize`. Building it as a
+ * value before `path` exists is also what keeps `path.posix` from being a use-before-definition.
+ */
+const posixNamespace: PathNamespace = {
   sep: "/",
   delimiter: ":",
   normalize: normalizeNodeWidth,
@@ -102,6 +157,23 @@ export const path: PathShim = {
   // Browser-side there are no Windows device paths, so this is the POSIX
   // identity. Node documents `path.posix.toNamespacedPath` as a no-op too.
   toNamespacedPath: (p) => p,
+  // Node's `path.posix` is the POSIX view, which is the only view this runtime implements: the same functions, available under the name a
+  // program reaches for when it wants to be explicit about separator convention. rollup does exactly that (`path.posix.sep`), and the property
+  // being undefined is a crash rather than a fallback.
+};
+
+/**
+ * `path` itself: the POSIX functions, plus the two namespaces Node hangs off them.
+ *
+ * `win32` is a NAMED refusal rather than a silent POSIX answer: a program that asks for Windows path semantics and gets POSIX ones back would
+ * compute wrong paths quietly, which is worse than a throw it can see and catch.
+ */
+export const path: PathShim = {
+  ...posixNamespace,
+  sep: "/",
+  delimiter: ":",
+  posix: posixNamespace,
+  win32: win32Namespace(),
 };
 
 export const pathShim = path;

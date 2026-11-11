@@ -5,7 +5,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { EventEmitter } from "../../src/shims/events.js";
+import { EventEmitter, eventsModule } from "../../src/shims/events.js";
 
 describe("EventEmitter", () => {
   it("calls listeners in registration order", () => {
@@ -119,5 +119,83 @@ describe("EventEmitter", () => {
     const listed = emitter.listeners("x");
     expect(listed).toEqual([listener]);
     expect(Object.isFrozen(listed)).toBe(false);
+  });
+});
+
+/**
+ * `require("events")` is the class, not a namespace holding it.
+ *
+ * This is the wall vite's boot hit: its bundled chunk opens a module with `import require$$0$7 from 'events'` and then writes
+ * `class WebSocket extends require$$0$7`, and Node answers that because the module's value IS the constructor. Handing back
+ * `{ EventEmitter }` produced `Class extends value #<Object> is not a constructor`, from a line that named no shim.
+ *
+ * The shape below is checked against node v20.20.2, not recalled: `require("events") === require("events").EventEmitter` is true
+ * there, `defaultMaxListeners` reads 10, and setting it to a non-number or a negative value throws the two errors pinned here.
+ */
+describe("the events module object", () => {
+  it("is the EventEmitter class, with the class attached to itself", () => {
+    expect(typeof eventsModule).toBe("function");
+    expect(eventsModule).toBe(EventEmitter);
+    expect(eventsModule.EventEmitter).toBe(eventsModule);
+    // The two call styles a package can use, both reaching the same constructor.
+    const viaModule = new eventsModule();
+    const viaProperty = new eventsModule.EventEmitter();
+    expect(viaModule).toBeInstanceOf(eventsModule);
+    expect(viaProperty).toBeInstanceOf(EventEmitter);
+    expect(viaModule.listenerCount("nothing")).toBe(0);
+  });
+
+  it("can be extended directly, which is what a default import of it produces", () => {
+    class WebSocket extends eventsModule {}
+    const socket = new WebSocket();
+    const seen: unknown[] = [];
+    socket.on("open", (value: unknown) => seen.push(value));
+    socket.emit("open", "upgrade");
+    expect(seen).toEqual(["upgrade"]);
+  });
+
+  it("carries defaultMaxListeners with Node's own validation and no warning of its own", () => {
+    expect(eventsModule.defaultMaxListeners).toBe(10);
+    try {
+      eventsModule.defaultMaxListeners = 5;
+      expect(eventsModule.defaultMaxListeners).toBe(5);
+      // A string is a TypeError, and Node names the type and quotes the value.
+      let wrongType: unknown;
+      try {
+        // @ts-expect-error the point of the test is the runtime refusal, which TypeScript would not allow to be written.
+        eventsModule.defaultMaxListeners = "x";
+      } catch (error) {
+        wrongType = error;
+      }
+      expect(wrongType).toBeInstanceOf(TypeError);
+      expect(wrongType).toMatchObject({
+        code: "ERR_INVALID_ARG_TYPE",
+        message: 'The "defaultMaxListeners" argument must be of type number. Received type string (\'x\')',
+      });
+      // A negative value and NaN are both out of range, as a RangeError.
+      for (const value of [-1, Number.NaN]) {
+        let outOfRange: unknown;
+        try {
+          eventsModule.defaultMaxListeners = value;
+        } catch (error) {
+          outOfRange = error;
+        }
+        expect(outOfRange).toBeInstanceOf(RangeError);
+        expect(outOfRange).toMatchObject({ code: "ERR_OUT_OF_RANGE" });
+      }
+      // The refusal left the previous value intact rather than storing the bad one.
+      expect(eventsModule.defaultMaxListeners).toBe(5);
+    } finally {
+      eventsModule.defaultMaxListeners = 10;
+    }
+  });
+
+  it("does not claim the members this runtime cannot honour", () => {
+    // Absent rather than stubbed: `errorMonitor` and `captureRejections` promise observation and rejection capture that this emitter does
+    // not do, so their presence would be a quiet lie rather than a smaller feature.
+    const dynamic = eventsModule as unknown as Record<string, unknown>;
+    for (const name of ["once", "on", "getEventListeners", "errorMonitor", "captureRejectionSymbol", "captureRejections"]) {
+      expect(dynamic[name], `${name} must be absent rather than stubbed`).toBeUndefined();
+    }
   });
 });

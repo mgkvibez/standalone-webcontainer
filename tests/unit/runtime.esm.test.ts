@@ -436,3 +436,27 @@ describe("transformEsm", () => {
     expect(result.specifiers).toEqual(["one", "two"]);
   });
 });
+
+describe("a default import of events is the class", () => {
+  it("extends it, which is the exact expression that stopped vite's boot", async () => {
+    // `import require$$0$7 from 'events'` then `class WebSocket extends require$$0$7`: the interop rule for a value without
+    // `__esModule` hands the default the value itself, so the base class is the EventEmitter constructor and not a namespace.
+    const result = await run(
+      {
+        "/app/package.json": JSON.stringify({ name: "app", type: "module" }),
+        "/app/main.js": [
+          'import events from "events";',
+          'import { EventEmitter } from "events";',
+          "class WebSocket extends events {}",
+          'const socket = new WebSocket();',
+          'socket.on("open", () => console.log("extends:" + (events === EventEmitter)));',
+          'socket.emit("open");',
+        ].join("\n"),
+      },
+      "main.js",
+    );
+
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("extends:true\n");
+  });
+});

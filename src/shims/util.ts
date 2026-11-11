@@ -151,6 +151,15 @@ export function _extend(origin: Record<string, unknown>, ...additions: readonly 
 }
 
 export function promisify<T extends (...args: never[]) => unknown>(fn: T): T {
+  // Node's own first act, and the one that matters here: a member this shim does not implement arrives as `undefined`, and reading a symbol off
+  // it crashed with "Cannot read properties of undefined (reading 'Symbol(nodejs.util.promisify.custom)')" from a line that named neither the
+  // missing function nor the argument. Node refuses with a typed error instead, so the next gap is reported as itself.
+  if (typeof fn !== "function") {
+    throw Object.assign(
+      new TypeError(`The "original" argument must be of type function. Received ${typeof fn === "undefined" ? "undefined" : typeof fn}`),
+      { code: "ERR_INVALID_ARG_TYPE" },
+    );
+  }
   const custom = (fn as unknown as Record<symbol, unknown>)[customPromisify];
   if (typeof custom === "function") return custom as T;
   const wrapped = (...args: unknown[]): Promise<unknown> =>

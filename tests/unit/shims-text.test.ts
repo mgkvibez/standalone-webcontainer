@@ -177,3 +177,22 @@ describe("async_hooks", () => {
     expect(storage.getStore()).toBeUndefined();
   });
 });
+
+describe("promisify's own argument check", () => {
+  it("refuses a non-function with Node's code and message instead of crashing on a symbol read", () => {
+    // The failure this replaces: a builtin member this runtime does not implement arrives as `undefined`, and promisify read
+    // `Symbol(nodejs.util.promisify.custom)` off it, so the report was "Cannot read properties of undefined" from a line naming neither the
+    // missing function nor the argument. Node's own answer is a typed refusal, and `Received undefined` is its exact text for this case.
+    let caught: unknown;
+    try {
+      promisify(undefined as unknown as () => void);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(TypeError);
+    expect(caught).toMatchObject({
+      code: "ERR_INVALID_ARG_TYPE",
+      message: 'The "original" argument must be of type function. Received undefined',
+    });
+  });
+});
