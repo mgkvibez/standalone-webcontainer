@@ -76,6 +76,18 @@ export const SUBSTITUTIONS: readonly Substitution[] = [
     reason:
       "native esbuild spawns its platform binary from child_process at module scope; esbuild-wasm is the same codebase compiled to WebAssembly, on a matching version line, with no dependencies",
   },
+  {
+    // Found by running fixture-01 rather than by looking: after the resolver learned exports maps, vite's graph loaded rollup and died in
+    // rollup/dist/native.js with "Your current platform ... is not yet supported by the native Rollup build. Please use the WASM build
+    // @rollup/wasm-node instead." rollup declares its platform binaries as optional dependencies and picks one at first use, which is the same
+    // structural fact as esbuild's, one layer along: the package's published default build cannot run here and a wasm build of the same
+    // codebase exists on the same version line (4.68.2 for 4.68.2, measured on the registry, with the same ./parseAst subpath that put us here).
+    requested: "rollup",
+    substitute: "@rollup/wasm-node",
+    rule: "range",
+    reason:
+      "native rollup loads an optional platform binary (@rollup/rollup-<platform>-<arch>) at first use; @rollup/wasm-node is the same codebase compiled to WebAssembly on a matching version line, with the same exports map",
+  },
 ];
 
 const PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
