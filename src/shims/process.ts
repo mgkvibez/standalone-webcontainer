@@ -12,6 +12,7 @@
  *   a compatibility claim, not a claim to be Node's runtime.
  */
 import type { TickQueue } from "../runtime/ticks.js";
+import { VIRTUAL_ENVIRONMENT } from "../runtime/environment.js";
 import type { Terminal, TerminalInput } from "../terminal/pty.js";
 export class ProcessExit extends Error {
   readonly code: number;
@@ -61,6 +62,16 @@ export interface ProcessShim {
   /** Registers a listener for a signal this runtime can deliver. Unknown events are accepted and never fired. */
   readonly on: (event: string, listener: () => void) => ProcessShim;
   readonly off: (event: string, listener: () => void) => ProcessShim;
+  /**
+   * `on`, removed the first time it fires.
+   *
+   * Present because vite's dev server opens with `process.once('SIGTERM', …)` (its `setupSIGTERMListener`), and its absence was a
+   * `TypeError` that aborted the server before it ever listened: "error when starting dev server: process.once is not a function".
+   */
+  readonly once: (event: string, listener: () => void) => ProcessShim;
+  /** Node's other two names for `on` and `off`. Same functions, because Node documents them as identical. */
+  readonly addListener: (event: string, listener: () => void) => ProcessShim;
+  readonly removeListener: (event: string, listener: () => void) => ProcessShim;
   /**
    * Drops every signal registration made through this shim.
    *
@@ -151,7 +162,10 @@ export const createProcessShim = (options: ProcessOptions = {}): ProcessShim => 
   const cwd = options.cwd ?? "/";
 
   const shim: ProcessShim = {
-    env: { ...(options.env ?? {}) },
+    // The VM's declared environment underneath whatever the caller passed, so a program starts with the same HOME and TMPDIR whether it
+    // runs in-process or inside a Worker. `os.homedir()` reads this very object, which is what makes the two agree by construction rather
+    // than by coincidence (see runtime/environment.ts).
+    env: { ...VIRTUAL_ENVIRONMENT, ...(options.env ?? {}) },
     argv,
     execArgv: [],
     platform: "browser",
@@ -205,6 +219,20 @@ export const createProcessShim = (options: ProcessOptions = {}): ProcessShim => 
       }
       return shim;
     },
+    once: (event, listener) => {
+      // The wrapper is what gets registered, so the removal has to name the wrapper: `off(event, listener)` would look up a key this
+      // shim never stored. Building it here and unmounting from inside itself is Node's own shape.
+      let fired = false;
+      const wrapper = (): void => {
+        if (fired) return;
+        fired = true;
+        shim.off(event, wrapper);
+        listener();
+      };
+      return shim.on(event, wrapper);
+    },
+    addListener: (event, listener) => shim.on(event, listener),
+    removeListener: (event, listener) => shim.off(event, listener),
     dispose: () => {
       for (const registrations of signalRegistrations.values()) for (const unsubscribe of registrations.values()) unsubscribe();
       signalRegistrations.clear();

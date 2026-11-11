@@ -271,3 +271,47 @@ describe("builtin module shapes the loader serves", () => {
     expect(result.stdout).toBe("true\ntrue\n");
   });
 });
+
+describe("the virtual machine's declared environment", () => {
+  it("gives a program a home and a temp directory, and os agrees with process.env by construction", async () => {
+    // The wall this replaces: lilconfig, inside vite's postcss config search, calls os.homedir() and the shim refused, so vite died in
+    // config loading. Node answers that call by reading $HOME, which this VM can declare (runtime/environment.ts).
+    const { vfs, root } = boot({
+      "/app/main.js": [
+        'const os = require("os");',
+        'console.log("HOME=" + process.env.HOME);',
+        'console.log("homedir=" + os.homedir());',
+        'console.log("tmpdir=" + os.tmpdir());',
+        'console.log("TMPDIR=" + process.env.TMPDIR);',
+      ].join("\n"),
+    });
+    const result = await new InProcessRuntime(vfs).run(`${root}/main.js`);
+
+    expect(result.stderr).toBe("");
+    const lines = result.stdout.trim().split("\n");
+    expect(lines[0]).toBe("HOME=/home/user");
+    // The two routes to the same fact agree, which is the invariant: a package that caches under `path.join(os.homedir(), ".cache")` and
+    // one that reads process.env.HOME must arrive at the same directory.
+    expect(lines[1]).toBe(`homedir=${(lines[0] ?? "").slice("HOME=".length)}`);
+    expect(lines[2]).toBe("tmpdir=/tmp");
+    expect(lines[3]).toBe("TMPDIR=/tmp");
+  });
+
+  it("lets the caller's environment win over the declared one, on both routes", async () => {
+    const { vfs, root } = boot({
+      "/app/main.js": ['const os = require("os");', 'console.log(process.env.HOME + "|" + os.homedir());'].join("\n"),
+    });
+    const result = await new InProcessRuntime(vfs).run(`${root}/main.js`, { env: { HOME: "/elsewhere" } });
+
+    expect(result.stdout).toBe("/elsewhere|/elsewhere\n");
+  });
+
+  it("keeps PWD alongside the declared variables rather than replacing them", async () => {
+    const { vfs, root } = boot({
+      "/app/main.js": ["console.log(process.env.PWD + \"|\" + process.env.HOME);"].join("\n"),
+    });
+    const result = await new InProcessRuntime(vfs).run(`${root}/main.js`, { env: { PWD: "/work" } });
+
+    expect(result.stdout).toBe("/work|/home/user\n");
+  });
+});

@@ -5,13 +5,13 @@
     "command": "npm install",
     "state": "ran",
     "termination": "ok",
-    "detail": "builtin command reported a failure: npm error: SNAPSHOT_MISSING: esbuild-wasm is not in this snapshot. A snapshot holds only the versions an install resolved; rebuild it with `npm run snapshot:build` rather than falling back to the network, which would make the lane non-hermetic.",
-    "elapsedMs": 3,
+    "detail": "builtin command completed: added 8 package(s) from snapshot \"vite\" (8 pinned packages)",
+    "elapsedMs": 240,
     "record": {
       "index": 0,
-      "exitCode": 1,
-      "stdout": "",
-      "stderr": "npm error: SNAPSHOT_MISSING: esbuild-wasm is not in this snapshot. A snapshot holds only the versions an install resolved; rebuild it with `npm run snapshot:build` rather than falling back to the network, which would make the lane non-hermetic."
+      "exitCode": 0,
+      "stdout": "added 8 package(s) from snapshot \"vite\" (8 pinned packages)",
+      "stderr": "npm warning: rollup@^4.20.0 is served by @rollup/wasm-node@4.68.2: native rollup loads an optional platform binary (@rollup/rollup-<platform>-<arch>) at first use; @rollup/wasm-node is the same codebase compiled to WebAssembly on a matching version line, with the same exports map\nnpm warning: esbuild@^0.21.3 is served by esbuild-wasm@0.21.5: native esbuild spawns its platform binary from child_process at module scope; esbuild-wasm is the same codebase compiled to WebAssembly, on a matching version line, with no dependencies\nnpm warning: fsevents skipped (optional, required by vite@5.4.21): SNAPSHOT_MISSING: fsevents is not in this snapshot. A snapshot holds only the versions an install resolved; rebuild it with `npm run snapshot:build` rather than falling back to the network, which would make the lane non-hermetic.\nnpm warning: fsevents skipped (optional, required by rollup@4.68.2): SNAPSHOT_MISSING: fsevents is not in this snapshot. A snapshot holds only the versions an install resolved; rebuild it with `npm run snapshot:build` rather than falling back to the network, which would make the lane non-hermetic.\nnpm warning: @napi-rs/lzma-linux-x64-gnu skipped (optional, required by rollup@4.68.2): SNAPSHOT_MISSING: @napi-rs/lzma-linux-x64-gnu is not in this snapshot. A snapshot holds only the versions an install resolved; rebuild it with `npm run snapshot:build` rather than falling back to the network, which would make the lane non-hermetic."
     }
   },
   {
@@ -20,13 +20,13 @@
     "command": "npm run dev -- --port 3000 --host 127.0.0.1",
     "state": "ran",
     "termination": "ok",
-    "detail": "builtin command completed: > fixture-01-vite@0.0.0 dev",
-    "elapsedMs": 0,
+    "detail": "process 1 exited with exit 0",
+    "elapsedMs": 918,
     "record": {
       "index": 1,
       "exitCode": 0,
-      "stdout": "> fixture-01-vite@0.0.0 dev\n> vite --port 3000 --host 127.0.0.1",
-      "stderr": "vite: not a command in this container, and no installed package provides a \"vite\" binary"
+      "stdout": "",
+      "stderr": "error when starting dev server:\nTypeError: Cannot read properties of null (reading 'on')\n    at setupSIGTERMListener (/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:17662:19)\n    at _createServer (/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:63273:5)\n    at processTicksAndRejections (node:internal/process/task_queues:95:5)\n    at CAC.eval (/node_modules/vite/dist/node/cli.js:743:20)\n"
     }
   }
 ]
