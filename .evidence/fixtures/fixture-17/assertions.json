@@ -2,9 +2,9 @@
   {
     "index": 0,
     "kind": "file-exists",
-    "state": "failed",
-    "passed": false,
+    "state": "passed",
+    "passed": true,
     "stepAvailable": true,
-    "detail": "dist/bundle.js does not exist"
+    "detail": "dist/bundle.js exists"
   }
 ]

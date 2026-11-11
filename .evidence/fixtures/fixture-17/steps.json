@@ -5,13 +5,13 @@
     "command": "npm install",
     "state": "ran",
     "termination": "ok",
-    "detail": "builtin command reported a failure: npm error: MISSING_PACKAGE_JSON: no package.json at /package.json",
-    "elapsedMs": 0,
+    "detail": "builtin command completed: added 8 package(s) from snapshot \"vite\" (8 pinned packages)",
+    "elapsedMs": 220,
     "record": {
       "index": 0,
-      "exitCode": 1,
-      "stdout": "",
-      "stderr": "npm error: MISSING_PACKAGE_JSON: no package.json at /package.json"
+      "exitCode": 0,
+      "stdout": "added 8 package(s) from snapshot \"vite\" (8 pinned packages)",
+      "stderr": "npm warning: rollup@^4.20.0 is served by @rollup/wasm-node@4.68.2: native rollup loads an optional platform binary (@rollup/rollup-<platform>-<arch>) at first use; @rollup/wasm-node is the same codebase compiled to WebAssembly on a matching version line, with the same exports map\nnpm warning: esbuild@^0.21.3 is served by esbuild-wasm@0.21.5: native esbuild spawns its platform binary from child_process at module scope; esbuild-wasm is the same codebase compiled to WebAssembly, on a matching version line, with no dependencies\nnpm warning: fsevents skipped (optional, required by vite@5.4.21): SNAPSHOT_MISSING: fsevents is not in this snapshot. A snapshot holds only the versions an install resolved; rebuild it with `npm run snapshot:build` rather than falling back to the network, which would make the lane non-hermetic.\nnpm warning: fsevents skipped (optional, required by rollup@4.68.2): SNAPSHOT_MISSING: fsevents is not in this snapshot. A snapshot holds only the versions an install resolved; rebuild it with `npm run snapshot:build` rather than falling back to the network, which would make the lane non-hermetic.\nnpm warning: @napi-rs/lzma-linux-x64-gnu skipped (optional, required by rollup@4.68.2): SNAPSHOT_MISSING: @napi-rs/lzma-linux-x64-gnu is not in this snapshot. A snapshot holds only the versions an install resolved; rebuild it with `npm run snapshot:build` rather than falling back to the network, which would make the lane non-hermetic."
     }
   },
   {
@@ -20,13 +20,13 @@
     "command": "npm run build",
     "state": "ran",
     "termination": "ok",
-    "detail": "builtin command reported a failure: npm: unsupported command run",
-    "elapsedMs": 0,
+    "detail": "process 2 exited with exit 0",
+    "elapsedMs": 1907,
     "record": {
       "index": 1,
-      "exitCode": 1,
-      "stdout": "",
-      "stderr": "npm: unsupported command run"
+      "exitCode": 0,
+      "stdout": "vite v5.4.21 building for production...\ntransforming...\n✓ 304 modules transformed.\nrendering chunks...\ncomputing gzip size...\ndist/index.html  0.23 kB │ gzip: 0.17 kB\ndist/bundle.js   6.32 kB │ gzip: 2.57 kB\n✓ built in 251ms\n",
+      "stderr": ""
     }
   }
 ]

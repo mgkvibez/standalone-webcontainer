@@ -34,6 +34,14 @@
     "RUNTIME_INCOMPATIBILITY"
   ],
   "knownLimits": [
-    "A TIMEOUT is a legitimate result and must be recorded, never retried until it passes. Charter \u00a74.5 fixes the budget at 240s for builds."
-  ]
+    "A TIMEOUT is a legitimate result and must be recorded, never retried until it passes. Charter \u00a74.5 fixes the budget at 240s for builds.",
+    "This is a deliberate probe, not a pass/fail gate: 300 generated modules of ~40 kB each is ~12 MB of source, enough to walk the graph for real but not a tuned attempt to find the exact ceiling. The runtime has no memory instrumentation yet, so what this records is whether that build completes inside the budget, not how close to a limit it ran."
+  ],
+  "files": {
+    "package.json": "{\n  \"name\": \"fixture-17-large\",\n  \"private\": true,\n  \"version\": \"0.0.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"build\": \"node gen.mjs && vite build\"\n  },\n  \"devDependencies\": {\n    \"vite\": \"^5.4.0\"\n  }\n}\n",
+    "gen.mjs": "import { mkdirSync, writeFileSync } from \"node:fs\";\n\nconst COUNT = 300;\nconst PAYLOAD = \"x\".repeat(40000);\n\nmkdirSync(\"src/generated\", { recursive: true });\nfor (let index = 0; index < COUNT; index += 1) {\n  writeFileSync(\n    `src/generated/module-${index}.js`,\n    `export const payload${index} = ${JSON.stringify(PAYLOAD)};\\nexport const value${index} = ${index};\\n`,\n  );\n}\nwriteFileSync(\n  \"src/generated/index.js\",\n  Array.from({ length: COUNT }, (_unused, index) => `export { value${index} } from \"./module-${index}.js\";`).join(\"\\n\") + \"\\n\",\n);\nconsole.log(`generated ${COUNT} modules`);\n",
+    "vite.config.js": "export default {\n  build: {\n    // Named output so the assertion can name one file, whatever rollup decides to call its hashed default.\n    rollupOptions: { output: { entryFileNames: \"bundle.js\", chunkFileNames: \"chunk-[name].js\" } },\n  },\n};\n",
+    "index.html": "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\" />\n    <title>fixture-17</title>\n  </head>\n  <body>\n    <div id=\"root\"></div>\n    <script type=\"module\" src=\"/src/main.js\"></script>\n  </body>\n</html>\n",
+    "src/main.js": "import * as generated from \"./generated/index.js\";\n\nconst total = Object.values(generated).reduce((sum, value) => sum + value, 0);\nconst root = document.querySelector(\"#root\");\nif (root !== null) root.textContent = `sum = ${total}`;\n"
+  }
 }

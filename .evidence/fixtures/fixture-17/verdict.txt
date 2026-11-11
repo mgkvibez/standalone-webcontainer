@@ -1,4 +1,4 @@
 fixture: fixture-17
-evidence schema: 2
-classification: RUNTIME_INCOMPATIBILITY
-reason: assertion failed: file-exists: dist/bundle.js does not exist
+evidence schema: 3
+classification: PASS
+reason: all 1 assertion(s) passed
