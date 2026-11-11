@@ -18,6 +18,7 @@
  * ./exports-field.ts.
  */
 import { path as nodePath } from "../shims/path.js";
+import { fileURLToPath } from "../shims/url.js";
 import { transformEsm } from "./esm.js";
 import type { FsShim } from "../shims/fs.js";
 import { ProcessRefusal } from "./refusal.js";
@@ -326,6 +327,16 @@ export class CommonJsLoader {
     // the call, where the command is known: see src/shims/child_process.ts.
     if (Object.prototype.hasOwnProperty.call(this.#deps.builtins, bare)) {
       return { kind: "builtin", name: bare };
+    }
+
+    // A `file:` URL names a FILE, not a package, and Node's ESM loader accepts one. vite needs it: it writes the bundled config to a temp `.mjs`
+    // and does `await import(pathToFileURL(temp).href)`. Without this branch the URL is treated as a bare specifier and the build dies on
+    // `Cannot find module 'file:///vite.config.js.timestamp-...mjs'` AFTER the config had bundled correctly.
+    if (specifier.startsWith("file:")) {
+      const fromUrl = nodePath.normalize(fileURLToPath(specifier));
+      const foundByUrl = this.#resolveFileOrDirectory(fromUrl);
+      if (foundByUrl !== undefined) return { kind: "file", path: foundByUrl };
+      throw new ModuleNotFoundError(specifier, fromDir);
     }
 
     if (nodePath.isAbsolute(specifier) || isRelative(specifier)) {
