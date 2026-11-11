@@ -163,13 +163,71 @@ describe("Open, which is not POSIX open", () => {
     expect(call((callback) => fs.readdir("/app/nope", callback)).error).toMatchObject({ code: "ENOENT" });
   });
 
-  it("refuses read, because esbuild replaces it with a stdin-only implementation", () => {
-    // Documented refusal rather than a silent stub: file bytes cannot cross into the Go side at all, because esbuild's in-thread service assigns
-    // `fs.read` unconditionally after the host object is installed and its version serves stdin only. No fd read can ever reach this one.
-    const { fs } = setup((vfs) => vfs.writeFileSync("/app/main.js", "x"));
+});
+
+describe("read, the member esbuild tries to take away", () => {
+  // The recorded failure this closes: `vite build` with a `vite.config.js` bundles that config with esbuild, and esbuild's in-thread service assigns
+  // its own stdin-only `read` (`throw new Error("Bad read")` for any fd but 0). A build whose entry point is a file on disk therefore died inside the
+  // Go runtime. The host's `read` is installed as an accessor so the later assignment cannot replace it; these tests hold both halves of that.
+
+  const readInto = (fs: ReturnType<typeof createCompleteHostFs>, fd: number, size: number, position: number | null): { error: unknown; count: number; text: string } => {
+    const buffer = new Uint8Array(size);
+    let error: unknown;
+    let count = 0;
+    member(fs, "read")(fd, buffer, 0, size, position, (raised: unknown, read?: unknown) => {
+      error = raised;
+      count = typeof read === "number" ? read : 0;
+    });
+    return { error, count, text: new TextDecoder().decode(buffer.subarray(0, count)) };
+  };
+
+  it("returns a file's bytes, which is what a bundler's entry point needs", () => {
+    const { fs } = setup((vfs) => vfs.writeFileSync("/app/main.js", "export const x = 1;\n"));
     const fd = call((callback) => fs.open("/app/main.js", 0, 0, callback)).value as number;
-    const { error } = call((callback) => member(fs, "read")(fd, new Uint8Array(4), 0, 4, null, callback));
-    expect(error).toMatchObject({ code: "ENOSYS" });
+    const read = readInto(fs, fd, 64, null);
+    expect(read.error).toBeNull();
+    expect(read.text).toBe("export const x = 1;\n");
+  });
+
+  it("advances the handle on an unpositioned read and holds it on a positioned one", () => {
+    // Go's `Read` loops until it sees a short read, so a host whose offset never moved would either loop forever or truncate a file silently.
+    const { fs } = setup((vfs) => vfs.writeFileSync("/app/data.txt", "abcdefghij"));
+    const fd = call((callback) => fs.open("/app/data.txt", 0, 0, callback)).value as number;
+
+    expect(readInto(fs, fd, 3, null).text).toBe("abc");
+    expect(readInto(fs, fd, 3, null).text).toBe("def");
+    // A positional read does not disturb the handle.
+    expect(readInto(fs, fd, 2, 8).text).toBe("ij");
+    expect(readInto(fs, fd, 4, null).text).toBe("ghij");
+  });
+
+  it("answers EOF with 0 rather than an error, so a reader knows to stop", () => {
+    const { fs } = setup((vfs) => vfs.writeFileSync("/app/short.txt", "ab"));
+    const fd = call((callback) => fs.open("/app/short.txt", 0, 0, callback)).value as number;
+    expect(readInto(fs, fd, 8, null)).toMatchObject({ error: null, count: 2, text: "ab" });
+    expect(readInto(fs, fd, 8, null)).toMatchObject({ error: null, count: 0, text: "" });
+    expect(readInto(fs, fd, 8, 99)).toMatchObject({ error: null, count: 0, text: "" });
+  });
+
+  it("serves stdin as EOF and an unknown fd as EBADF", () => {
+    // There is no fs-level stdin in this runtime (it reaches a program as `process.stdin`), and a Go program that asks should see the end of the
+    // input rather than a panic. An fd this object never handed out is a real mistake and gets a code Go's mapJSError recognises.
+    const { fs } = setup();
+    expect(readInto(fs, 0, 4, null)).toMatchObject({ error: null, count: 0 });
+    expect(readInto(fs, 99, 4, null).error).toMatchObject({ code: "EBADF" });
+  });
+
+  it("survives the assignment esbuild makes after the object exists", () => {
+    // This is the whole point, written as esbuild writes it: an unconditional assignment of a function that throws unless fd is 0. If the host's
+    // accessor did not hold, a real build dies with `panic: JavaScript error: Bad read` and nothing in this file would explain why.
+    const { fs } = setup((vfs) => vfs.writeFileSync("/app/main.js", "bytes"));
+    const fd = call((callback) => fs.open("/app/main.js", 0, 0, callback)).value as number;
+    (fs as unknown as Record<string, unknown>)["read"] = () => {
+      throw new Error("Bad read");
+    };
+    const read = readInto(fs, fd, 16, null);
+    expect(read.error).toBeNull();
+    expect(read.text).toBe("bytes");
   });
 });
 
