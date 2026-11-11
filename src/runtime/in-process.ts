@@ -40,6 +40,12 @@ import { createOsShim } from "../shims/os.js";
 import { createPerfHooksShim } from "../shims/perf-hooks.js";
 import querystring from "../shims/querystring.js";
 import stringDecoder from "../shims/string-decoder.js";
+import childProcess from "../shims/child_process.js";
+import dns from "../shims/dns.js";
+import readline from "../shims/readline.js";
+import tls from "../shims/tls.js";
+import v8 from "../shims/v8.js";
+import workerThreads from "../shims/worker_threads.js";
 import url from "../shims/url.js";
 import util from "../shims/util.js";
 import zlib from "../shims/zlib.js";
@@ -405,6 +411,19 @@ export class InProcessRuntime implements Runtime {
         url,
         string_decoder: stringDecoder,
         assert: assertModule,
+        // Present because Node has it, refusing on every call because this runtime cannot spawn. The dependency chunk vite ships imports it at
+        // module scope without ever asking to spawn on a boot path, which is not the same thing as needing a process.
+        child_process: childProcess,
+        // Node has it and vite imports it at module scope in three files. It answers IP literals and localhost and refuses everything else with a
+        // typed ENOSYS, because there is no resolver in a browser sandbox and a made-up address would be worse than a refusal.
+        dns,
+        // The four vite's dependency chunk imports at module scope, each found by running it rather than by guessing: `v8` for a snapshot question,
+        // `readline` for its banner and shortcut prompt, `tls` because its bundled HTTPS client requires it, and `worker_threads` for plugins that
+        // ask for a worker. Each is a real answer where this runtime has one and a named refusal where it does not.
+        v8,
+        readline,
+        tls,
+        worker_threads: workerThreads,
         net,
         https,
         async_hooks: asyncHooks,
