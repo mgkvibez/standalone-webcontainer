@@ -439,7 +439,7 @@ export class InProcessRuntime implements Runtime {
           createRequire: (from) => loader.createRequire(from),
           builtinNames: () => loader.builtinNames(),
         }),
-        os: createOsShim({ platform: processShim.platform }),
+        os: createOsShim({ platform: processShim.platform, env: processShim.env }),
         // A per-runtime facade rather than the module itself: `createServer` must bind into THIS runtime's
         // registry and attach to THIS runtime's gateway, or a script's server would listen and never be
         // routable. Exported classes are passed through so `instanceof` still works for user code.

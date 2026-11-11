@@ -11,7 +11,9 @@
  *   os.arch()        twice, both inside esbuild's `${process.platform} ${os.arch()} ${os.endianness()}` platform key
  *   os.endianness()  twice, same key
  *
- * Those are implemented. Everything else in Node's `os` is refused by name, because the alternative is returning a zero or an empty
+ * Those are implemented, plus `homedir()` and `tmpdir()`, which are different in kind: Node answers them by reading environment
+ * variables, so they are facts this virtual machine declares rather than observations of a host it cannot see (see
+ * runtime/environment.ts). Everything else in Node's `os` is refused by name, because the alternative is returning a zero or an empty
  * string for a question whose true answer is "this runtime cannot know". A package that reads `os.totalmem()` and gets 0 will
  * misbehave somewhere far away from the cause; a package that calls it and is told the truth fails where the mistake is.
  *
@@ -27,9 +29,18 @@ export interface OsShimOptions {
    * and `os.arch()` together, so a mismatch sends it looking for a package that cannot exist.
    */
   readonly platform: string;
+  /**
+   * Must be the same object `process.env` is built from.
+   *
+   * `homedir()` and `tmpdir()` are defined by Node in terms of environment variables, so reading a different environment here would
+   * let `process.env.HOME` and `os.homedir()` disagree: exactly the two-answers-to-one-question defect the platform option above
+   * exists to prevent, one level along. Required rather than optional for that reason: a caller cannot build this shim without saying
+   * which environment it answers from.
+   */
+  readonly env: Readonly<Record<string, string>>;
 }
 
-/** The six members the measured graph needs, plus the end-of-line constant that costs nothing to be right about. */
+/** The six members the measured graph needs, the two the VM declares, and the end-of-line constant that costs nothing to be right about. */
 export interface OsShim {
   platform(): string;
   arch(): string;
@@ -37,14 +48,17 @@ export interface OsShim {
   type(): string;
   release(): string;
   cpus(): readonly unknown[];
+  homedir(): string;
+  tmpdir(): string;
   readonly EOL: string;
   [member: string]: unknown;
 }
 
-const unsupported = (member: string): Error => {
+const unsupported = (member: string, detail?: string): Error => {
   const error = new Error(
     `ERR_NOT_SUPPORTED: os.${member}() is not available in this runtime: a browser sandbox cannot observe the host machine, and ` +
-      "answering with a zero or an empty string would be a quieter lie than this refusal",
+      "answering with a zero or an empty string would be a quieter lie than this refusal" +
+      (detail === undefined ? "" : ` (${detail})`),
   ) as Error & { code: string };
   error.code = "ERR_NOT_SUPPORTED";
   return error;
@@ -79,11 +93,26 @@ export function createOsShim(options: OsShimOptions): OsShim {
     hostname: () => {
       throw unsupported("hostname");
     },
+    /**
+     * Node's rule on POSIX is `$HOME` and nothing else; if it is unset Node falls back to the password database, which this VM does
+     * not have. So an unset HOME is a refusal that names the missing fallback rather than an invented path.
+     */
     homedir: () => {
-      throw unsupported("homedir");
+      const home = options.env.HOME;
+      if (home !== undefined && home !== "") return home;
+      throw unsupported("homedir", "HOME is not set in this environment, and there is no password database to fall back on");
     },
+    /**
+     * Node's rule, measured on v20.20.2 rather than recalled: `$TMPDIR`, then `$TMP`, then `$TEMP`, then `/tmp`, with an empty string
+     * treated as unset. Node validates nothing, so neither does this: a TMPDIR pointing at a file or a path that does not exist comes
+     * back unchanged, and the caller's next syscall is where that surfaces.
+     */
     tmpdir: () => {
-      throw unsupported("tmpdir");
+      for (const name of ["TMPDIR", "TMP", "TEMP"] as const) {
+        const value = options.env[name];
+        if (value !== undefined && value !== "") return value;
+      }
+      return "/tmp";
     },
     userInfo: () => {
       throw unsupported("userInfo");
