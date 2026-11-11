@@ -23,6 +23,16 @@ export interface StepRecord {
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
+  /**
+   * HTTP observations taken at the END of this step, keyed by target URL.
+   *
+   * Assertions are evaluated after every step has run, so a live fetch at evaluation time can only ever see the world as it is at the
+   * end of the fixture. fixture-13 is the case that makes that fatal: it asserts the served page contains `initial-marker` at the end
+   * of the step that starts the server, and `edited-marker` after a later step rewrites the file. Both assertions name the same URL, so
+   * fetching once at the end answers the first one with the second one's body and the fixture measures nothing. The observation
+   * therefore belongs to the step that was current when it was taken, and this is where it is kept.
+   */
+  readonly http?: Readonly<Record<string, HttpProbe>>;
 }
 
 export interface HttpProbe {
@@ -95,6 +105,16 @@ function truncate(value: string, limit = 200): string {
 
 /** Assertion kinds that read a step's output rather than the environment. */
 const STEP_KINDS: readonly AssertionKind[] = ["exit-code", "stdout-contains", "stderr-contains"];
+
+/**
+ * Where the observation came from, said out loud in the detail.
+ *
+ * Without this a failing line reads "observed <edited body>" for an assertion about an earlier step, and the reader has no way to tell
+ * a stale page from a harness that fetched too late. Naming the step is the difference between a readable failure and a mystery.
+ */
+function observedAt(step: number | undefined, captured: HttpProbe | undefined): string {
+  return captured === undefined ? "" : ` (as observed at the end of step ${String(step)})`;
+}
 
 export async function evaluateAssertion(
   assertion: FixtureAssertion,
@@ -179,17 +199,24 @@ export async function evaluateAssertion(
     );
   }
 
-  // http-status and http-body-contains
+  // http-status and http-body-contains.
+  // A probe taken at the end of the step this assertion names wins over a live one. See StepRecord.http: a live fetch can only answer
+  // "what does this URL serve NOW", which is the wrong question for any assertion that is not about the final state.
+  const captured = steps.find((candidate) => candidate.index === assertion.step)?.http?.[assertion.target];
   let probe: HttpProbe;
-  try {
-    probe = await environment.request(assertion.target);
-  } catch (error) {
+  if (captured !== undefined) {
+    probe = captured;
+  } else {
+    try {
+      probe = await environment.request(assertion.target);
+    } catch (error) {
     // The adapter decided whether this is the network or the harness; here we only carry its verdict.
-    if (error instanceof ProbeFault) throw error;
-    throw new ProbeFault(
-      "NETWORK",
-      `request to ${assertion.target} failed: ${(error as Error).message}`,
-    );
+      if (error instanceof ProbeFault) throw error;
+      throw new ProbeFault(
+        "NETWORK",
+        `request to ${assertion.target} failed: ${(error as Error).message}`,
+      );
+    }
   }
 
   if (assertion.kind === "http-status") {
@@ -197,15 +224,21 @@ export async function evaluateAssertion(
     if (!Number.isFinite(expected)) {
       throw new ProbeFault("HARNESS_BUG", `http-status assertion expects a numeric status, got ${String(assertion.equals)}`);
     }
-    return result(probe.status === expected, `expected status ${expected} from ${assertion.target}, observed ${probe.status}`);
+    return result(
+      probe.status === expected,
+      `expected status ${expected} from ${assertion.target}${observedAt(assertion.step, captured)}, observed ${probe.status}`,
+    );
   }
 
   const needle = normalizeForComparison(assertion.contains ?? "");
   const passed = needle.length > 0 && normalizeForComparison(probe.body).includes(needle);
+  const when = observedAt(assertion.step, captured);
   return result(
     passed,
     passed
-      ? `body of ${assertion.target} contained the expected text`
-      : `body of ${assertion.target} did not contain ${JSON.stringify(truncate(assertion.contains ?? ""))}; observed ${JSON.stringify(truncate(probe.body))}`,
+      ? `body of ${assertion.target}${when} contained the expected text`
+      : `body of ${assertion.target}${when} did not contain ${JSON.stringify(
+          truncate(assertion.contains ?? ""),
+        )}; observed ${JSON.stringify(truncate(probe.body))}`,
   );
 }

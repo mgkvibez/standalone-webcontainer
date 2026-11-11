@@ -6,7 +6,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "builtin command completed: added 68 package(s) from snapshot \"express\" (68 pinned packages)",
-    "elapsedMs": 98,
+    "elapsedMs": 109,
     "record": {
       "index": 0,
       "exitCode": 0,
@@ -21,12 +21,18 @@
     "state": "ran",
     "termination": "ok",
     "detail": "process 1 exited 0 and left a server listening on port(s) 3200",
-    "elapsedMs": 99,
+    "elapsedMs": 306,
     "record": {
       "index": 1,
       "exitCode": 0,
       "stdout": "listening on 3200\n",
-      "stderr": ""
+      "stderr": "",
+      "http": {
+        "http://localhost:3200/": {
+          "status": 200,
+          "body": "express-static-ok"
+        }
+      }
     }
   }
 ]

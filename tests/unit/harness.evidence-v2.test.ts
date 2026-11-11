@@ -43,7 +43,7 @@ function definition(assertions: FixtureDefinition["assertions"]): FixtureDefinit
 
 const record = (index: number) => ({ index, exitCode: 1, stdout: "", stderr: "Cannot load native addon\n" });
 
-describe("evidence schema v2", () => {
+describe("evidence schema version", () => {
   it("records the schema version beside the files rather than inside them", async () => {
     const root = tempDir();
     await runFixture({
@@ -53,8 +53,10 @@ describe("evidence schema v2", () => {
       evidenceRoot: root,
     });
     const schema = JSON.parse(readFileSync(join(root, "fixture-15", "schema.json"), "utf8"));
-    expect(schema.schemaVersion).toBe(2);
-    expect(readFileSync(join(root, "fixture-15", "verdict.txt"), "utf8")).toContain("evidence schema: 2");
+    // 3, because steps.json now carries the HTTP observations taken at the end of each step (see StepRecord.http). A shape a consumer
+    // can observe changing is exactly what this version number exists to announce.
+    expect(schema.schemaVersion).toBe(3);
+    expect(readFileSync(join(root, "fixture-15", "verdict.txt"), "utf8")).toContain("evidence schema: 3");
   });
 
   it("keeps steps.json and assertions.json as bare arrays, so existing consumers keep working", async () => {

@@ -13,7 +13,7 @@
     "state": "passed",
     "passed": true,
     "stepAvailable": true,
-    "detail": "expected status 200 from http://localhost:3200/, observed 200"
+    "detail": "expected status 200 from http://localhost:3200/ (as observed at the end of step 1), observed 200"
   },
   {
     "index": 2,
@@ -21,6 +21,6 @@
     "state": "passed",
     "passed": true,
     "stepAvailable": true,
-    "detail": "body of http://localhost:3200/ contained the expected text"
+    "detail": "body of http://localhost:3200/ (as observed at the end of step 1) contained the expected text"
   }
 ]

@@ -20,7 +20,7 @@
  * diagnosis and accuse the fixture of a fault it did not cause.
  */
 
-import type { AssertionResult, AssertionEnvironment, StepRecord } from "./assertions.js";
+import type { AssertionResult, AssertionEnvironment, HttpProbe, StepRecord } from "./assertions.js";
 import { evaluateAssertion, ProbeFault } from "./assertions.js";
 import type { FixtureDefinition, FixtureStep, TimeoutClass } from "./definition.js";
 import { writeEvidence } from "./evidence.js";
@@ -315,6 +315,42 @@ export function decideVerdict(
   return { classification: "PASS", reason: `all ${assertions.length} assertion(s) passed` };
 }
 
+/**
+ * Fetch the HTTP targets this step's assertions name, and hang them on the step's record.
+ *
+ * A capture that fails is deliberately not a step failure. The step itself succeeded; what failed is the probe, and the honest place for
+ * that is the assertion, which will fall back to a live fetch and report NETWORK through its own fault path. Recording nothing here keeps
+ * the two verdicts separate instead of letting a flaky probe condemn a program that ran correctly.
+ */
+async function captureStepObservations(
+  input: FixtureRunInput,
+  index: number,
+  record: StepRecord | null,
+): Promise<StepRecord | null> {
+  if (record === null) return null;
+  // The loop owns the numbering, so the record it keeps carries that number whatever the executor said. Assertions find their step by
+  // index, and a record whose index disagreed with its position would silently make every assertion on it read the wrong observation.
+  const numbered: StepRecord = record.index === index ? record : { ...record, index };
+  const targets = new Set<string>();
+  for (const assertion of input.definition.assertions) {
+    if (!("step" in assertion) || assertion.step !== index) continue;
+    if (assertion.kind !== "http-status" && assertion.kind !== "http-body-contains") continue;
+    if (assertion.target === undefined) continue;
+    targets.add(assertion.target);
+  }
+  if (targets.size === 0) return numbered;
+
+  const http: Record<string, HttpProbe> = {};
+  for (const target of targets) {
+    try {
+      http[target] = await input.environment.request(target);
+    } catch {
+      // See the doc comment: a probe that could not be taken is left absent on purpose.
+    }
+  }
+  return Object.keys(http).length === 0 ? numbered : { ...numbered, http };
+}
+
 async function writeRunEvidence(
   input: FixtureRunInput,
   steps: readonly StepRun[],
@@ -332,11 +368,11 @@ async function writeRunEvidence(
     // The version therefore lives in schema.json and in verdict.txt, beside the files rather than inside them.
     "steps.json": `${JSON.stringify(steps, null, 2)}\n`,
     "assertions.json": `${JSON.stringify(assertions, null, 2)}\n`,
-    "schema.json": `${JSON.stringify({ schemaVersion: 2, fixture: input.definition.slug }, null, 2)}\n`,
+    "schema.json": `${JSON.stringify({ schemaVersion: 3, fixture: input.definition.slug }, null, 2)}\n`,
     // The verdict is text so a human reading the evidence directory sees it without a tool.
     "verdict.txt":
       `fixture: ${input.definition.slug}\n` +
-      `evidence schema: 2\n` +
+      `evidence schema: 3\n` +
       `classification: ${verdict.classification}\n` +
       `reason: ${verdict.reason}\n`,
   };
@@ -344,7 +380,7 @@ async function writeRunEvidence(
     files["refusals.json"] =
       `${JSON.stringify(
         {
-          schemaVersion: 2,
+          schemaVersion: 3,
           stepIndex: refusedStep.index,
           exitCode: refusedStep.record?.exitCode ?? null,
           refusal: refusedStep.refusal,
@@ -398,6 +434,9 @@ export async function runFixture(input: FixtureRunInput): Promise<FixtureRunRepo
     }
 
     const execution = result.value;
+    // Take this step's HTTP observations now, while the world still looks the way the step left it. Only targets an assertion actually
+    // names are fetched: probing arbitrary URLs would turn the harness into a crawler, and a fixture pays for what it asserts on.
+    const observed = await captureStepObservations(input, index, execution.record);
     steps.push({
       index,
       kind: step.kind,
@@ -406,12 +445,14 @@ export async function runFixture(input: FixtureRunInput): Promise<FixtureRunRepo
       termination: execution.termination,
       detail: execution.detail,
       elapsedMs: result.elapsedMs,
-      record: execution.record,
+      // The captured record, not the raw one: what a step left behind is evidence, and evidence a human cannot read in steps.json is
+      // evidence they have to take on trust from assertions.json.
+      record: observed,
       ...(execution.refusal === undefined ? {} : { refusal: execution.refusal }),
       ...(execution.restriction === undefined ? {} : { restriction: execution.restriction }),
     });
     availability.set(index, "ran");
-    if (execution.record !== null) records.push(execution.record);
+    if (observed !== null) records.push(observed);
     // A step that timed out, was refused, or errored cannot be followed by a meaningful one: continuing would
     // produce assertions against a world that never got built.
     if (execution.termination !== "ok") {
