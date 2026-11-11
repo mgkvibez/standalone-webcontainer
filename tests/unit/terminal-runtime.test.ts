@@ -25,7 +25,6 @@ describe("a program's view of the terminal", () => {
   it("has no tty facts at all when no terminal is attached", async () => {
     const { runtime } = stage(`
       const tty = require("tty");
-      console.log("stdin:", process.stdin === null ? "null" : "stream");
       console.log("isTTY:", String(process.stdout.isTTY));
       console.log("isatty1:", tty.isatty(1));
     `);
@@ -33,9 +32,33 @@ describe("a program's view of the terminal", () => {
     const result = await runtime.run("/app/main.js");
 
     // A fixture or a piped worker has no terminal, and every answer says so rather than defaulting to a friendly lie.
-    expect(result.stdout).toContain("stdin: null");
     expect(result.stdout).toContain("isTTY: undefined");
     expect(result.stdout).toContain("isatty1: false");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("presents stdin as a stream that never speaks, rather than as null", async () => {
+    const { runtime } = stage(`
+      console.log("stdin:", process.stdin === null ? "null" : "stream");
+      console.log("stdinIsTTY:", String(process.stdin.isTTY));
+      process.stdin.on("data", () => console.log("DATA-FIRED"));
+      process.stdin.once("end", () => console.log("END-FIRED"));
+      console.log("listeners:", process.stdin.listeners("data") + ":" + process.stdin.listeners("end"));
+    `);
+
+    const result = await runtime.run("/app/main.js");
+
+    // Node always presents stdin as an object, and vite's dev server dereferences it (`process.stdin.on("end", …)` in its
+    // setupSIGTERMListener) unless process.env.CI is "true". The old `null` was a TypeError that stopped the server.
+    expect(result.stdout).toContain("stdin: stream");
+    // Undefined, not false: Node's answer for a pipe, and not a claim about a descriptor this VM does not have.
+    expect(result.stdout).toContain("stdinIsTTY: undefined");
+    // Nothing is ever delivered and the stream never ends, because there is no input device and no writer to close one.
+    expect(result.stdout).not.toContain("DATA-FIRED");
+    expect(result.stdout).not.toContain("END-FIRED");
+    // The listeners are accepted and visible, so code that counts them sees the shape it registered.
+    expect(result.stdout).toContain("listeners: 1:1");
+    // And the program still finishes: inert stdin does not keep a run alive waiting for input that cannot arrive.
     expect(result.exitCode).toBe(0);
   });
 

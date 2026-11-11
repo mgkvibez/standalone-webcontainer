@@ -181,11 +181,23 @@ describe("the tty shim", () => {
 });
 
 describe("the process shim reports the terminal honestly", () => {
-  it("has no tty facts and no stdin when no terminal is attached", () => {
+  it("has no tty facts when no terminal is attached, and stdin is inert rather than absent", () => {
     const shim = createProcessShim();
     expect(shim.stdout.isTTY).toBeUndefined();
     expect(shim.stdout.columns).toBeUndefined();
-    expect(shim.stdin).toBeNull();
+    // Not null: Node always presents stdin as a stream, and vite's dev server dereferences it. See createInertInput for why each
+    // answer it gives (isTTY undefined, no data, never ends, live() false) is the truthful one for a VM with no input device.
+    expect(shim.stdin).not.toBeNull();
+    expect(shim.stdin.isTTY).toBeUndefined();
+    expect(shim.stdin.live()).toBe(false);
+    const inert = shim.stdin;
+    const seen: string[] = [];
+    inert.on("data", () => seen.push("data"));
+    inert.once("end", () => seen.push("end"));
+    inert.resume();
+    expect(seen).toEqual([]);
+    expect(inert.listeners("data")).toBe(1);
+    expect(inert.listeners("end")).toBe(1);
   });
 
   it("exposes live dimensions and the terminal's stdin when one is attached", () => {

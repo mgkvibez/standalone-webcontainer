@@ -35,6 +35,21 @@ export interface GatewayOptions {
   readonly mountPath?: string;
 }
 
+/**
+ * Ensures the request carries a `Host` header, which HTTP/1.1 requires and which this layer has to supply.
+ *
+ * Found by running vite: its dev server refuses with 403 "This host (undefined) is not allowed" when `req.headers.host` is missing,
+ * and every request through the preview gateway was missing it. The absence is structural, not an oversight in one caller: `Host` is
+ * a forbidden header name, so a browser neither exposes it to a service worker nor lets the worker set it, and a Node-side probe has
+ * no network stack to add it. On a real network the server's HTTP parser always produces it, so the gateway is the last place that can
+ * put it back. The authority is the preview origin the browser addressed (`localhost:<port>`), which is also what the fixture's own
+ * `http://localhost:<port>/` target names.
+ */
+const withHost = (headers: Readonly<Record<string, string>>, port: number): Record<string, string> => {
+  const present = Object.keys(headers).some((name) => name.toLowerCase() === "host");
+  return present ? { ...headers } : { ...headers, host: `localhost:${port}` };
+};
+
 export interface ResolvedTarget {
   readonly protocol: ServeProtocol;
   readonly port: number;
@@ -98,7 +113,7 @@ export class PreviewGateway {
     const startedAt = this.#now();
     const pending = this.#requests.open({ deadline: startedAt + this.#timeoutMs, now: startedAt });
 
-    void server.dispatch({ ...wire, url: target.path }).then(
+    void server.dispatch({ ...wire, url: target.path, headers: withHost(wire.headers, target.port) }).then(
       (response) => this.#requests.settle(pending.id, response),
       (error: unknown) => this.#requests.fail(pending.id, error),
     );

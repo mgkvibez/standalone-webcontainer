@@ -183,3 +183,46 @@ describe("PreviewGateway.handle", () => {
     expect((await gateway.handle(request("/preview/3000/"))).statusCode).toBe(404);
   });
 });
+
+describe("the Host header a preview request carries", () => {
+  /** A real server whose handler records the request headers it was handed. */
+  const serveAndRecord = (
+    ports: PortRegistry,
+    gateway: PreviewGateway,
+  ): { headers: () => Record<string, string> | undefined } => {
+    let seen: Record<string, string> | undefined;
+    const server = new Server(
+      (request, response) => {
+        seen = request.headers;
+        response.end("ok");
+      },
+      { registry: ports },
+    );
+    server.listen(3000);
+    gateway.attach(server);
+    return { headers: () => seen };
+  };
+
+  it("supplies localhost:<port> when the caller has no host header", async () => {
+    const { ports, gateway } = setup({ timeoutMs: 500 });
+    const served = serveAndRecord(ports, gateway);
+
+    const response = await gateway.handle(request("/preview/3000/"));
+
+    expect(response.statusCode).toBe(200);
+    // vite's dev server answers 403 "This host (undefined) is not allowed" without this, and Host is a forbidden header name, so a
+    // browser service worker can neither read it nor set it: the gateway is the only layer left that can put it back.
+    expect(served.headers()?.host).toBe("localhost:3000");
+  });
+
+  it("keeps a host header the caller did supply, in any casing", async () => {
+    const { ports, gateway } = setup({ timeoutMs: 500 });
+    const served = serveAndRecord(ports, gateway);
+
+    await gateway.handle(request("/preview/3000/", { headers: { Host: "example.test:8080" } }));
+
+    expect(served.headers()?.Host).toBe("example.test:8080");
+    // And it does not also add a second, conflicting lowercase copy.
+    expect(served.headers()?.host).toBeUndefined();
+  });
+});

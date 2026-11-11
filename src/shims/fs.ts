@@ -82,8 +82,126 @@ const asStats = (stats: VfsStatsPort): StatsShim => ({
   birthtimeMs: stats.createdAt,
 });
 
+/**
+ * Node's encoding names, normalised the way Node normalises them, or a refusal.
+ *
+ * Found by running vite: it reads `index.html` and its own package manifests with `readFileSync(path, "utf-8")` — dash and all — and
+ * this shim only understood the exact string `"utf8"`. Everything read that way came back as a Buffer, so `html.search(...)` was
+ * `TypeError: html.search is not a function` inside vite's HTML plugin and `data.contents` arrived at esbuild as a Buffer, which is
+ * `raw.replace is not a function` inside esbuild-wasm. One missing alias, two hundred lines apart in two different packages.
+ *
+ * Node lowercases the name and drops its dash (`utf-8`, `UTF-8`, `utf8` are one encoding), and refuses anything it does not know with
+ * `ERR_UNKNOWN_ENCODING`. Both halves are copied: silently decoding to utf8 what a caller asked for as `hex` would be a wrong answer
+ * that looks like a right one.
+ */
+const normalizeEncoding = (value: unknown): string | undefined => {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") {
+    throw Object.assign(new TypeError(`The "encoding" argument must be of type string. Received ${typeof value}`), {
+      code: "ERR_INVALID_ARG_TYPE",
+    });
+  }
+  const name = value.toLowerCase().replace(/-/g, "");
+  switch (name) {
+    case "utf8":
+    case "utf16le":
+    case "ucs2":
+    case "latin1":
+    case "binary":
+    case "ascii":
+    case "base64":
+    case "base64url":
+    case "hex":
+      return name;
+    default:
+      throw Object.assign(new Error(`Unknown encoding: ${value}`), { code: "ERR_UNKNOWN_ENCODING" });
+  }
+};
+
+/** The encoding from either of Node's shapes: a bare name, or an options object carrying `encoding`. */
+const encodingOf = (options: unknown): string | undefined => {
+  if (typeof options === "string") return normalizeEncoding(options);
+  if (typeof options === "object" && options !== null) return normalizeEncoding((options as { encoding?: unknown }).encoding);
+  return undefined;
+};
+
+/** Decodes bytes the way a caller's encoding asks for, over the encoder Node itself uses. */
+const decodeAs = (bytes: Uint8Array, encoding: string): string =>
+  encoding === "utf8" ? new TextDecoder().decode(bytes) : Buffer.from(bytes).toString(encoding as Parameters<Buffer["toString"]>[0]);
+
 const asBuffer = (data: string | Uint8Array): Buffer =>
   typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data);
+
+/**
+ * Options `readdir` accepts, as far as this shim honours them.
+ *
+ * `withFileTypes` is the one that matters and it is not optional in practice: fast-glob, bundled inside vite, calls
+ * `fs.readdir(dir, { withFileTypes: true }, cb)` and then calls `dirent.isSymbolicLink()`. Handing it plain strings produced
+ * `TypeError: entry.dirent.isSymbolicLink is not a function` from inside vite's own scanner. `encoding` is accepted and ignored for the
+ * same reason Node ignores it for names: this VFS stores names as strings.
+ */
+export interface ReaddirOptions {
+  readonly withFileTypes?: boolean;
+  readonly encoding?: string;
+}
+
+/**
+ * Node's `fs.Dirent`, reduced to the predicates this VFS can answer honestly.
+ *
+ * Node's Dirent carries a `name`, a `parentPath` (and the deprecated `path` alias it kept for years), and a set of `is*` methods that
+ * describe what the entry is. Here an entry is a file or a directory and nothing else: this VFS has no symbolic links, FIFOs, sockets or
+ * device nodes, so every other predicate answers `false` because the answer is genuinely no, not because it is unknown.
+ */
+export class Dirent {
+  readonly name: string;
+  readonly parentPath: string;
+  /** Node's deprecated alias for `parentPath`. Packages read it; removing it would be a break for no gain. */
+  readonly path: string;
+  readonly #kind: "file" | "dir";
+
+  constructor(name: string, parentPath: string, kind: "file" | "dir") {
+    this.name = name;
+    this.parentPath = parentPath;
+    this.path = parentPath;
+    this.#kind = kind;
+  }
+
+  isFile(): boolean {
+    return this.#kind === "file";
+  }
+
+  isDirectory(): boolean {
+    return this.#kind === "dir";
+  }
+
+  isSymbolicLink(): boolean {
+    return false;
+  }
+
+  isFIFO(): boolean {
+    return false;
+  }
+
+  isSocket(): boolean {
+    return false;
+  }
+
+  isCharacterDevice(): boolean {
+    return false;
+  }
+
+  isBlockDevice(): boolean {
+    return false;
+  }
+}
+
+/** `readdir` with Dirents: each child's kind comes from the VFS, so a name can never be described more confidently than it is. */
+const direntsOf = (vfs: FileSystemPort, directory: string, names: readonly string[]): Dirent[] =>
+  names.map((name) => {
+    const child = directory === "/" ? `/${name}` : `${directory}/${name}`;
+    const kind = vfs.statSync(child).kind === "dir" ? "dir" : "file";
+    return new Dirent(name, directory, kind);
+  });
 
 export interface StatsShim {
   isFile(): boolean;
@@ -135,11 +253,11 @@ const pathAccepting = (vfs: FileSystemPort) => ({
 });
 
 export interface FsShim {
-  readFileSync(path: FsPath, encoding?: "utf8"): Buffer | string;
+  readFileSync(path: FsPath, encoding?: string | { encoding?: string }): Buffer | string;
   writeFileSync(path: FsPath, data: string | Uint8Array): void;
   existsSync(path: FsPath): boolean;
   mkdirSync(path: FsPath, options?: { recursive?: boolean }): void;
-  readdirSync(path: FsPath): string[];
+  readdirSync(path: FsPath, options?: ReaddirOptions | string): string[] | Dirent[];
   statSync(path: FsPath): StatsShim;
   /**
    * Stat several paths at once: one entry per path, `null` where it does not exist.
@@ -198,10 +316,10 @@ export interface FsShim {
   /** Node's callback form, `(path[, options], callback)`. */
   realpath: RealpathCallback;
   promises: {
-    readFile(path: string, encoding?: "utf8"): Promise<Buffer | string>;
+    readFile(path: string, encoding?: string | { encoding?: string }): Promise<Buffer | string>;
     writeFile(path: string, data: string | Uint8Array): Promise<void>;
     mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
-    readdir(path: string): Promise<string[]>;
+    readdir(path: string, options?: ReaddirOptions | string): Promise<string[] | Dirent[]>;
     unlink(path: string): Promise<void>;
     stat(path: string): Promise<StatsShim>;
     /** No symlinks exist in this VFS, so `lstat` is `stat`. Documented rather than silently aliased. */
@@ -225,7 +343,7 @@ export interface FsShim {
 export type FileDescriptor = number;
 
 /** Callback shapes for the three promisified members: `(error) | (error, value)`. */
-export type ReaddirCallback = (error: unknown, entries?: string[]) => void;
+export type ReaddirCallback = (error: unknown, entries?: string[] | Dirent[]) => void;
 export type StatCallback = (error: unknown, stats?: StatsShim) => void;
 
 /** The synchronous realpath, plus the `.native` property Node hangs off it (and that vite reads as `realpathSync.native`). */
@@ -363,10 +481,19 @@ Omit<FsShim, "realpathSync"> & { realpathSync: (path: FsPath) => string } => {
     absoluteWatch(watches, path, listenerOrOptions, maybeListener),
 
   readFileSync(path, encoding) {
+    let wanted: string | undefined;
     try {
-      const out = encoding === "utf8" ? vfs.readFileSync(path, "utf8") : vfs.readFileSync(path);
-      return typeof out === "string" ? out : asBuffer(out);
+      wanted = encodingOf(encoding);
     } catch (error) {
+      throw error;
+    }
+    try {
+      const out = wanted === "utf8" ? vfs.readFileSync(path, "utf8") : vfs.readFileSync(path);
+      if (wanted === undefined) return typeof out === "string" ? asBuffer(out) : asBuffer(out);
+      return typeof out === "string" && wanted === "utf8" ? out : decodeAs(typeof out === "string" ? Buffer.from(out) : out, wanted);
+    } catch (error) {
+      // An encoding refusal names the encoding, not a file, so it must not be dressed up as an fs error with a path and syscall.
+      if ((error as { code?: string }).code === "ERR_UNKNOWN_ENCODING") throw error;
       throw toNodeError(error, "open", path);
     }
   },
@@ -397,9 +524,11 @@ Omit<FsShim, "realpathSync"> & { realpathSync: (path: FsPath) => string } => {
     }
   },
 
-  readdirSync(path) {
+  readdirSync(path, options) {
+    const resolvedPath = pathOf(path);
     try {
-      return vfs.readdirSync(path);
+      const names = vfs.readdirSync(resolvedPath);
+      return typeof options === "object" && options?.withFileTypes === true ? direntsOf(vfs, resolvedPath, names) : names;
     } catch (error) {
       throw toNodeError(error, "scandir", path);
     }
@@ -449,11 +578,16 @@ Omit<FsShim, "realpathSync"> & { realpathSync: (path: FsPath) => string } => {
 
   /** Callback `readdir`. The error, when there is one, is the same mapped error the sync form throws: one source of truth for the code. */
   readdir(path: FsPath, optionsOrCallback?: object | string | ReaddirCallback, maybeCallback?: ReaddirCallback) {
+    // Node's overloads: `readdir(path, callback)` and `readdir(path, options, callback)`, where options may be just an encoding.
     const callback = typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback;
+    const options = typeof optionsOrCallback === "function" ? undefined : optionsOrCallback;
     const resolvedPath = pathOf(path);
-    let entries: string[];
+    let entries: string[] | Dirent[];
     try {
-      entries = vfs.readdirSync(resolvedPath);
+      const names = vfs.readdirSync(resolvedPath);
+      entries = typeof options === "object" && (options as ReaddirOptions).withFileTypes === true
+        ? direntsOf(vfs, resolvedPath, names)
+        : names;
     } catch (error) {
       callback?.(toNodeError(error, "scandir", resolvedPath));
       return;
@@ -562,10 +696,13 @@ Omit<FsShim, "realpathSync"> & { realpathSync: (path: FsPath) => string } => {
       return toWatchAsyncIterator(absoluteWatch(watches, path, watchOptions));
     },
     async readFile(path, encoding) {
+      const wanted = encodingOf(encoding);
       try {
-        const out = encoding === "utf8" ? await vfs.readFile(path, "utf8") : await vfs.readFile(path);
-        return typeof out === "string" ? out : asBuffer(out);
+        const out = wanted === "utf8" ? await vfs.readFile(path, "utf8") : await vfs.readFile(path);
+        if (wanted === undefined) return asBuffer(out);
+        return typeof out === "string" && wanted === "utf8" ? out : decodeAs(typeof out === "string" ? Buffer.from(out) : out, wanted);
       } catch (error) {
+        if ((error as { code?: string }).code === "ERR_UNKNOWN_ENCODING") throw error;
         throw toNodeError(error, "open", path);
       }
     },
@@ -583,9 +720,10 @@ Omit<FsShim, "realpathSync"> & { realpathSync: (path: FsPath) => string } => {
         throw toNodeError(error, "mkdir", path);
       }
     },
-    async readdir(path) {
+    async readdir(path, options) {
       try {
-        return await vfs.readdir(path);
+        const names = await vfs.readdir(path);
+        return typeof options === "object" && options?.withFileTypes === true ? direntsOf(vfs, path, names) : names;
       } catch (error) {
         throw toNodeError(error, "scandir", path);
       }
@@ -677,12 +815,12 @@ export const createFsShim = (
     writeFileSync: (path, data) => inner.writeFileSync(at(path), data),
     existsSync: (path) => inner.existsSync(at(path)),
     mkdirSync: (path, mkdirOptions) => inner.mkdirSync(at(path), mkdirOptions),
-    readdirSync: (path) => inner.readdirSync(at(path)),
+    readdirSync: (path, options) => inner.readdirSync(at(path), options),
     // Every path is rewritten before the batch is sent, so the caller batches relative paths and the port sees absolute ones.
     statManySync: (paths) => inner.statManySync(paths.map(at)),
     statSync: (path) => inner.statSync(at(path)),
     readdir: (path, optionsOrCallback, maybeCallback) =>
-      inner.readdir(at(path), optionsOrCallback as object | string | undefined, maybeCallback),
+      inner.readdir(at(path), optionsOrCallback, maybeCallback),
     open: (path, flags, callback) => inner.open(at(path), flags, callback),
     openSync: (path, flags) => inner.openSync(at(path), flags),
     close: (fd, callback) => inner.close(fd, callback),
@@ -701,7 +839,7 @@ export const createFsShim = (
       readFile: (path, encoding) => inner.promises.readFile(at(path), encoding),
       writeFile: (path, data) => inner.promises.writeFile(at(path), data),
       mkdir: (path, mkdirOptions) => inner.promises.mkdir(at(path), mkdirOptions),
-      readdir: (path) => inner.promises.readdir(at(path)),
+      readdir: (path, options) => inner.promises.readdir(at(path), options),
       unlink: (path) => inner.promises.unlink(at(path)),
       stat: (path) => inner.promises.stat(at(path)),
       lstat: (path) => inner.promises.lstat(at(path)),
