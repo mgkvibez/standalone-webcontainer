@@ -269,6 +269,138 @@ export const assert = (value: unknown, message?: string): void => {
   if (!value) throw new AssertionError({ message: message ?? "assertion failed", actual: value, expected: true, operator: "==" });
 };
 
+/** Node's option descriptor, as far as this parser honours it. */
+export interface ParseArgsOption {
+  readonly type: "string" | "boolean";
+  readonly short?: string;
+  readonly multiple?: boolean;
+}
+
+export interface ParseArgsConfig {
+  readonly args?: readonly string[];
+  readonly options?: Readonly<Record<string, ParseArgsOption>>;
+  readonly strict?: boolean;
+  readonly allowPositionals?: boolean;
+}
+
+export interface ParseArgsResult {
+  readonly values: Record<string, string | boolean | (string | boolean)[] | undefined>;
+  readonly positionals: string[];
+}
+
+/**
+ * `util.parseArgs`, the argument parser modern CLIs use instead of yargs.
+ *
+ * Supported, because they are what callers write: long options (`--name value`, `--name=value`), `--no-flag` for a boolean, a single short
+ * option (`-n value`), the `--` terminator, and `multiple` for a repeatable option. `strict` (Node's default) refuses an unknown option and an
+ * unexpected positional by name, which is the whole point of the member: a typo must fail loudly rather than be read as a positional.
+ *
+ * NOT supported, and refused rather than silently mis-parsed: grouped short booleans (`-abc`). Node reads that as three flags; a parser that
+ * treated it as `-a bc` would hand a program a value it never asked for, so it throws with a message naming the form.
+ */
+export function parseArgs(config: ParseArgsConfig = {}): ParseArgsResult {
+  const options = config.options ?? {};
+  const strict = config.strict ?? true;
+  const allowPositionals = config.allowPositionals ?? false;
+  const args = config.args ?? [];
+  const values: Record<string, string | boolean | (string | boolean)[] | undefined> = {};
+  const positionals: string[] = [];
+  const shorts = new Map<string, string>();
+  for (const [name, option] of Object.entries(options)) {
+    if (option.short !== undefined) shorts.set(option.short, name);
+  }
+  const assign = (name: string, value: string | boolean): void => {
+    const option = options[name];
+    if (option?.multiple === true) {
+      const existing = values[name];
+      const list = Array.isArray(existing) ? existing : existing === undefined ? [] : [existing];
+      list.push(value);
+      values[name] = list;
+      return;
+    }
+    values[name] = value;
+  };
+  let index = 0;
+  while (index < args.length) {
+    const token = args[index] as string;
+    index += 1;
+    if (token === "--") {
+      // Everything after the terminator is positional, by definition, even if it looks like a flag.
+      positionals.push(...args.slice(index));
+      break;
+    }
+    if (token.startsWith("--")) {
+      const body = token.slice(2);
+      const equals = body.indexOf("=");
+      const name = equals === -1 ? body : body.slice(0, equals);
+      const negated = equals === -1 && name.startsWith("no-") && options[name.slice(3)]?.type === "boolean";
+      const resolved = negated ? name.slice(3) : name;
+      const option = options[resolved];
+      if (option === undefined) {
+        if (!strict) {
+          positionals.push(token);
+          continue;
+        }
+        throw Object.assign(new TypeError(`Unknown option '${token}'. To specify a negated option, pass '--no-${name}'.`), {
+          code: "ERR_PARSE_ARGS_UNKNOWN_OPTION",
+        });
+      }
+      if (option.type === "boolean") {
+        assign(resolved, !negated);
+        continue;
+      }
+      if (equals !== -1) {
+        assign(resolved, body.slice(equals + 1));
+        continue;
+      }
+      const next = args[index];
+      if (next === undefined) {
+        throw Object.assign(new TypeError(`Option '--${resolved} <value>' argument missing`), { code: "ERR_PARSE_ARGS_INVALID_OPTION_VALUE" });
+      }
+      index += 1;
+      assign(resolved, next);
+      continue;
+    }
+    if (token.startsWith("-") && token.length > 1) {
+      if (token.length > 2 && !token.includes("=")) {
+        throw Object.assign(
+          new Error(`Grouped short options ('${token}') are not supported by this runtime: write them separately`),
+          { code: "ERR_NOT_IMPLEMENTED_IN_THIS_RUNTIME" },
+        );
+      }
+      const name = shorts.get(token.slice(1, 2));
+      if (name === undefined) {
+        if (!strict) {
+          positionals.push(token);
+          continue;
+        }
+        throw Object.assign(new TypeError(`Unknown option '${token}'`), { code: "ERR_PARSE_ARGS_UNKNOWN_OPTION" });
+      }
+      const option = options[name] as ParseArgsOption;
+      if (option.type === "boolean") {
+        assign(name, true);
+        continue;
+      }
+      const next = args[index];
+      if (next === undefined) {
+        throw Object.assign(new TypeError(`Option '-${token.slice(1, 2)} <value>' argument missing`), {
+          code: "ERR_PARSE_ARGS_INVALID_OPTION_VALUE",
+        });
+      }
+      index += 1;
+      assign(name, next);
+      continue;
+    }
+    if (!allowPositionals && strict) {
+      throw Object.assign(new TypeError(`Unexpected argument '${token}'. This command does not take positional arguments`), {
+        code: "ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL",
+      });
+    }
+    positionals.push(token);
+  }
+  return { values, positionals };
+}
+
 export const promisifyCustomSymbol = customPromisify;
 
 export default {
@@ -278,6 +410,7 @@ export default {
   inherits,
   _extend,
   promisify,
+  parseArgs,
   callbackify,
   deprecate,
   debuglog,

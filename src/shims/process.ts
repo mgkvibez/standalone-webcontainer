@@ -46,6 +46,14 @@ export interface ProcessShim {
   readonly versions: { readonly node: string };
   readonly browser: boolean;
   readonly pid: number;
+  /**
+   * `process.exitCode`: the status the process will exit with, set without exiting.
+   *
+   * The difference from `process.exit()` is the whole reason both exist: a CLI that reports a failure this way still lets buffered output
+   * flush and any pending `finally` run. Left `undefined` until a program sets it, so "not set" and "set to 0" stay distinguishable, which is
+   * what Node does and what lets the runner apply it only when the run did not already fail.
+   */
+  exitCode?: number | undefined;
   cwd(): string;
   exit(code?: number): never;
   nextTick(callback: () => void, ...args: unknown[]): void;
@@ -175,6 +183,7 @@ export const createProcessShim = (options: ProcessOptions = {}): ProcessShim => 
     versions: { node: "20.0.0" },
     browser: true,
     pid: 1,
+    exitCode: undefined,
     cwd: () => cwd,
     exit: (code = 0) => {
       throw new ProcessExit(code);

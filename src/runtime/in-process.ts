@@ -41,6 +41,8 @@ import net from "../shims/net.js";
 import { createModuleShim } from "../shims/module.js";
 import { createOsShim } from "../shims/os.js";
 import { createPerfHooksShim } from "../shims/perf-hooks.js";
+import { createTimersPromisesShim, createTimersShim } from "../shims/timers.js";
+import { bufferModule } from "../shims/buffer.js";
 import querystring from "../shims/querystring.js";
 import stringDecoder from "../shims/string-decoder.js";
 import childProcess from "../shims/child_process.js";
@@ -500,6 +502,9 @@ export class InProcessRuntime implements Runtime {
     // One clock instance, because `perf_hooks.performance` and the `performance` global must be the same object: a package that
     // measures itself would otherwise disagree with the scheduler its timers run on.
     const virtualPerformance = createVirtualPerformance(scheduler);
+    // The modules the globals were always sourced from. Built from THIS run's scheduler, not from the platform's timers, so `require("timers")`
+    // and a bare `setTimeout` are the same clock: virtual time, ref/unref and the callback budget all apply to both (docs/audit/api-surface-p0.md).
+    const timers = createTimersShim(scheduler);
     // Annotated because the builtin table below closes over `loader` to reach `createRequire`, and inference cannot resolve a type
     // from a value that mentions itself.
     const loader: CommonJsLoader = new CommonJsLoader({
@@ -511,7 +516,8 @@ export class InProcessRuntime implements Runtime {
         "fs/promises": fsShim.promises,
         path,
         process: processShim,
-        buffer: { Buffer },
+        // The module, not just the class: `const { isUtf8 } = require("buffer")` was a destructure of undefined while `Buffer` was a global.
+        buffer: bufferModule,
         // The module IS the class, as in Node: vite's chunk writes `class WebSocket extends require$$0$7` after a default import from
         // `events`, and a namespace object fails there with "Class extends value #<Object> is not a constructor" despite the class
         // being present inside it. Same arrangement as `stream` below, for the same reason.
@@ -552,6 +558,10 @@ export class InProcessRuntime implements Runtime {
         // The front-end lane's first two modules, found by the same audit that ordered the express work, now extended to read ESM
         // specifiers as well: `import { performance } from "node:perf_hooks"` was invisible to a scan that only matched require().
         perf_hooks: createPerfHooksShim(virtualPerformance),
+        // Registered rather than merely implemented. Both were absent from this table while the substrate they wrap was already here, so
+        // `require("timers")` failed with MODULE_NOT_FOUND and nothing in the gate noticed: it exercises what exists, never what a program asks for.
+        timers,
+        "timers/promises": createTimersPromisesShim(scheduler),
         // `createRequire` is what a modern ES module opens with. Both members resolve through the loader rather than duplicating its
         // table here, and the closures run long after the loader exists, so one source of truth is possible.
         module: createModuleShim({
@@ -741,6 +751,9 @@ export class InProcessRuntime implements Runtime {
 
     // An exit requested from a callback or an input handler replaces the default code, and never looks like a clean run.
     if (exitRequested !== undefined) exitCode = exitRequested;
+    // `process.exitCode = 3` decides the status without ending the program, and it applies only to a run that had not already failed: Node still
+    // exits 1 when a set exitCode is followed by a throw, so this can never mask a crash as a chosen status.
+    if (exitRequested === undefined && exitCode === 0 && processShim.exitCode !== undefined) exitCode = processShim.exitCode;
 
     // The program is over; its signal listeners go with it. The terminal stays (the caller owns it) but nothing from this run
     // is still attached to it, so the next resize cannot re-enter a scheduler that has already drained.

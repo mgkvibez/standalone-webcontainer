@@ -192,10 +192,18 @@ describe("the events module object", () => {
 
   it("does not claim the members this runtime cannot honour", () => {
     // Absent rather than stubbed: `errorMonitor` and `captureRejections` promise observation and rejection capture that this emitter does
-    // not do, so their presence would be a quiet lie rather than a smaller feature.
+    // not do, so their presence would be a quiet lie rather than a smaller feature. `once`, `on`, `listenerCount` and `getEventListeners`
+    // USED to be on this list and are now implemented (docs/audit/api-surface-p0.md), which is why they are asserted present below instead.
     const dynamic = eventsModule as unknown as Record<string, unknown>;
-    for (const name of ["once", "on", "getEventListeners", "errorMonitor", "captureRejectionSymbol", "captureRejections"]) {
+    for (const name of ["errorMonitor", "captureRejectionSymbol", "captureRejections"]) {
       expect(dynamic[name], `${name} must be absent rather than stubbed`).toBeUndefined();
+    }
+  });
+
+  it("exposes the module members it now implements", () => {
+    // The other half of the guard above: a name that moved off the absent list must actually be there, or the pair says nothing.
+    for (const name of ["once", "on", "listenerCount", "getEventListeners"]) {
+      expect(typeof (eventsModule as unknown as Record<string, unknown>)[name], `${name} must be callable`).toBe("function");
     }
   });
 });

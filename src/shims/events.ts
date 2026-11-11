@@ -153,8 +153,10 @@ export type { Listener as EventListener };
  *   recalled. Nothing WARNS at the limit, which is the boundary the header already describes: the number is readable and
  *   writable, and no listener count is checked against it.
  *
- * Still absent, and absent rather than stubbed because presence would promise behaviour: `events.once()`, `events.on()`,
- * `getEventListeners`, `errorMonitor`, `captureRejectionSymbol`, `captureRejections` and `EventEmitterAsyncResource`.
+ * `once`, `on`, `listenerCount` and `getEventListeners` are now implemented (docs/audit/api-surface-p0.md): `events.once` is
+ * everywhere in modern packages, and its absence failed at the call site rather than degrading. Still absent, and absent rather than
+ * stubbed because presence would promise behaviour: `errorMonitor`, `captureRejectionSymbol`, `captureRejections` and
+ * `EventEmitterAsyncResource`.
  */
 let defaultMaxListeners = 10;
 
@@ -182,10 +184,101 @@ Object.defineProperties(EventEmitter, {
   },
 });
 
+/**
+ * `events.once`, over the emitter's own public surface.
+ *
+ * Registered SYNCHRONOUSLY and before the promise is returned, because that is the contract a caller writes against:
+ * `once(emitter, "x").then(..)` followed by `emitter.emit("x")` in the same turn must resolve. An `async function` would still do that (its
+ * body runs to the first `await` immediately), but a promise built by hand cannot drift into a different registration order by accident.
+ *
+ * An `error` event while waiting for anything else REJECTS the wait, and `once(emitter, "error")` RESOLVES with it, which is Node's split and
+ * the reason a listener on the wrong event is not enough.
+ */
+export function once(
+  emitter: EventEmitter,
+  name: string,
+  options: { readonly signal?: { readonly aborted: boolean; addEventListener?: (type: string, listener: () => void) => void } } = {},
+): Promise<unknown[]> {
+  return new Promise<unknown[]>((resolve, reject) => {
+    const done = (): void => {
+      emitter.removeListener(name, onEvent as never);
+      if (name !== "error") emitter.removeListener("error", onError as never);
+    };
+    function onEvent(...args: unknown[]): void {
+      done();
+      resolve(args);
+    }
+    function onError(error: unknown): void {
+      done();
+      reject(error);
+    }
+    if (options.signal?.aborted === true) {
+      reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError", code: "ABORT_ERR" }));
+      return;
+    }
+    options.signal?.addEventListener?.("abort", () => {
+      done();
+      reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError", code: "ABORT_ERR" }));
+    });
+    emitter.on(name, onEvent as never);
+    if (name !== "error") emitter.on("error", onError as never);
+  });
+}
+
+/**
+ * `events.on`, the async iterator form.
+ *
+ * A queue rather than a stream, because the emitter is synchronous and the consumer is not: an emit that arrives between two `await`s must
+ * be held rather than dropped, and `return()` must unhook the listener or a `break` in the caller's loop leaks it for the process's life.
+ */
+export function on(emitter: EventEmitter, name: string): AsyncIterableIterator<unknown[]> {
+  const buffered: unknown[][] = [];
+  let waiting: ((result: IteratorResult<unknown[]>) => void) | null = null;
+  const push = (...args: unknown[]): void => {
+    if (waiting !== null) {
+      const resolve = waiting;
+      waiting = null;
+      resolve({ value: args, done: false });
+      return;
+    }
+    buffered.push(args);
+  };
+  emitter.on(name, push as never);
+  const iterator: AsyncIterableIterator<unknown[]> = {
+    next: () => {
+      const queued = buffered.shift();
+      if (queued !== undefined) return Promise.resolve({ value: queued, done: false });
+      return new Promise<IteratorResult<unknown[]>>((resolve) => {
+        waiting = resolve;
+      });
+    },
+    return: () => {
+      emitter.removeListener(name, push as never);
+      return Promise.resolve({ value: undefined, done: true });
+    },
+    [Symbol.asyncIterator]: () => iterator,
+  };
+  return iterator;
+}
+
+/** Node's static form: the same count `emitter.listenerCount(name)` answers, so the two cannot disagree. */
+export function listenerCount(emitter: EventEmitter, name: string): number {
+  return emitter.listenerCount(name);
+}
+
+/** The listeners themselves, as a copy: Node returns an array a caller may sort without disturbing the emitter. */
+export function getEventListeners(emitter: EventEmitter, name: string): unknown[] {
+  return emitter.listeners(name) as unknown[];
+}
+
 /** What the loader serves for `events` and `node:events`: the class itself, with Node's module members attached. */
 export type EventsModule = typeof EventEmitter & {
   readonly EventEmitter: typeof EventEmitter;
   defaultMaxListeners: number;
+  readonly once: typeof once;
+  readonly on: typeof on;
+  readonly listenerCount: typeof listenerCount;
+  readonly getEventListeners: typeof getEventListeners;
 };
 
-export const eventsModule = EventEmitter as EventsModule;
+export const eventsModule = Object.assign(EventEmitter, { once, on, listenerCount, getEventListeners }) as EventsModule;
