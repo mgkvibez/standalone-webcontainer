@@ -13,7 +13,7 @@
  */
 import type { TickQueue } from "../runtime/ticks.js";
 import { VIRTUAL_ENVIRONMENT } from "../runtime/environment.js";
-import type { Terminal, TerminalInput } from "../terminal/pty.js";
+import { createInertInput, type ProcessStdin, type Terminal, type TerminalInput } from "../terminal/pty.js";
 export class ProcessExit extends Error {
   readonly code: number;
 
@@ -52,13 +52,15 @@ export interface ProcessShim {
   stdout: WritableSink;
   stderr: WritableSink;
   /**
-   * The program's stdin, or null when no terminal is attached.
+   * The program's stdin. Always an object, as in Node.
    *
-   * Null rather than a fake empty stream: a program that checks `process.stdin` and finds nothing can report "no input"
-   * honestly, whereas a stream that never delivers would leave it waiting forever for input that cannot arrive. Piped input
-   * is a separate, later piece of work (ADR-0023).
+   * This used to be `null` with no terminal attached, on the reasoning that a program which found nothing could report "no input"
+   * honestly. A real package ended that argument: vite's dev server runs `process.stdin.on("end", ...)` unless `process.env.CI` is
+   * "true", and `null` made it `TypeError: Cannot read properties of null (reading 'on')` before the server ever listened. So the
+   * shim now presents inert input: `isTTY` undefined like a pipe, no data ever, never ending, and `live()` false so a program
+   * waiting for input that cannot arrive still finishes instead of hanging. Piped input remains a later piece of work (ADR-0023).
    */
-  readonly stdin: TerminalInput | null;
+  readonly stdin: ProcessStdin;
   /** Registers a listener for a signal this runtime can deliver. Unknown events are accepted and never fired. */
   readonly on: (event: string, listener: () => void) => ProcessShim;
   readonly off: (event: string, listener: () => void) => ProcessShim;
@@ -191,7 +193,8 @@ export const createProcessShim = (options: ProcessOptions = {}): ProcessShim => 
     },
     stdout,
     stderr,
-    stdin: options.stdin ?? (terminal === null ? null : terminal.stdin),
+    // Null from the caller (no terminal, or stdin deliberately detached) still yields Node's shape: an object that never speaks.
+    stdin: options.stdin ?? (terminal === null ? createInertInput() : terminal.stdin),
     on: (event, listener) => {
       // Only signals the terminal can actually deliver are wired. Anything else is accepted to keep chaining code working, but
       // it is never fired and never claimed: a listener that never runs is better than a listener that runs at the wrong time,

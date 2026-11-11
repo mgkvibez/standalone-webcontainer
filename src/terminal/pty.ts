@@ -68,6 +68,87 @@ export interface TerminalSize {
   readonly rows: number;
 }
 
+/**
+ * The program's stdin when there is no terminal attached.
+ *
+ * Node always presents `process.stdin` as a stream object, and a real package relies on it: vite's `setupSIGTERMListener` runs
+ * `process.stdin.on("end", ...)` unless `process.env.CI === "true"`, so a `null` stdin was `TypeError: Cannot read properties of
+ * null (reading 'on')` and the dev server never started. The old choice was documented as "null rather than a fake empty stream",
+ * which fails on the first package that treats stdin as something to listen to.
+ *
+ * What it reports, and why each answer is the truthful one for this VM:
+ *
+ *   isTTY undefined   Node's answer for a pipe. Not `false`, which would be a claim about a file descriptor that does not exist.
+ *   no data, ever     There is no input device. Nothing typed can arrive, because there is no UI attached to read it.
+ *   never ends        An end would claim the writer closed the pipe. Nobody opened one.
+ *   live() false      A program waiting for input that cannot arrive must not be kept alive by it, or a script that reads stdin
+ *                     hangs forever with no way to type at it. This is the one place this deliberately differs from a real stream,
+ *                     and it differs in the direction that lets a program finish instead of hanging.
+ */
+export interface InertInput {
+  readonly isTTY: undefined;
+  readonly readable: false;
+  readonly isRaw: false;
+  on(event: "data" | "end", listener: InputListener | EndListener): InertInput;
+  once(event: "data" | "end", listener: InputListener | EndListener): InertInput;
+  off(event: "data" | "end", listener: InputListener | EndListener): InertInput;
+  setRawMode(mode: boolean): InertInput;
+  setEncoding(encoding: string): InertInput;
+  resume(): InertInput;
+  pause(): InertInput;
+  destroy(): InertInput;
+  readonly listeners: (event: "data" | "end") => number;
+  readonly live: () => boolean;
+}
+
+/** What `process.stdin` is: a terminal's input when one is attached, inert input when none is. */
+export type ProcessStdin = TerminalInput | InertInput;
+
+/**
+ * Builds the stdin a program sees with no terminal.
+ *
+ * One object per process shim, because a program may attach several listeners and Node hands them all the same stream. The
+ * registrations are recorded rather than dropped: nothing will ever call them, but counting them and removing them behaves the way
+ * Node's do, so code that asks `listeners("data")` or removes a listener it added gets a coherent answer instead of a second
+ * surprise.
+ */
+export const createInertInput = (): InertInput => {
+  const dataListeners = new Set<InputListener | EndListener>();
+  const endListeners = new Set<InputListener | EndListener>();
+  const inert: InertInput = {
+    isTTY: undefined,
+    readable: false,
+    isRaw: false,
+    on(event, listener) {
+      (event === "data" ? dataListeners : endListeners).add(listener);
+      return inert;
+    },
+    once(event, listener) {
+      // The wrapper is what gets stored, so a later `off(event, listener)` cannot remove it, exactly as a stream's once wrapper
+      // behaves. It is never invoked here, so it is also never removed on fire.
+      const wrapper = (...args: unknown[]): void => void (listener as (...inner: unknown[]) => void)(...args);
+      return inert.on(event, wrapper as InputListener | EndListener);
+    },
+    off(event, listener) {
+      (event === "data" ? dataListeners : endListeners).delete(listener);
+      return inert;
+    },
+    setRawMode: () => inert,
+    setEncoding: () => inert,
+    resume: () => inert,
+    pause: () => inert,
+    destroy() {
+      dataListeners.clear();
+      endListeners.clear();
+      return inert;
+    },
+    listeners: (event) => (event === "data" ? dataListeners.size : endListeners.size),
+    // Still false: remembered listeners are not a reason to keep a run alive when no bytes can ever arrive.
+    live: () => false,
+  };
+  return inert;
+};
+
 export interface Terminal {
   readonly columns: number;
   readonly rows: number;
