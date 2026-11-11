@@ -33,6 +33,15 @@ export interface GatewayOptions {
   readonly now?: () => number;
   /** Mount prefix. Configurable because the tests do not need to pretend to be the real path. */
   readonly mountPath?: string;
+  /**
+   * Keep the serving runtime's queues turning while a request is outstanding.
+   *
+   * The gateway is the one place that knows a request exists from its first byte until its answer, so it is the one place that can
+   * say when the serving program is doing asynchronous work on a caller's behalf. Without it, a server that outlived its program had
+   * no timer queue behind it: measured, a handler awaiting `setTimeout(..., 0)` never answered. Optional because a gateway with no
+   * runtime behind it (a test double, a static preview) has nothing to pump.
+   */
+  readonly pump?: (pending: Promise<unknown>) => void;
 }
 
 /**
@@ -62,12 +71,14 @@ export class PreviewGateway {
   readonly #timeoutMs: number;
   readonly #now: () => number;
   readonly #mountPath: string;
+  readonly #pump: ((pending: Promise<unknown>) => void) | undefined;
 
   constructor(options: GatewayOptions) {
     this.#registry = options.registry;
     this.#timeoutMs = options.timeoutMs ?? 30_000;
     this.#now = options.now ?? (() => Date.now());
     this.#mountPath = (options.mountPath ?? "/preview").replace(/\/+$/, "");
+    this.#pump = options.pump;
   }
 
   /** How many requests are outstanding. Used by the liveness check and by tests. */
@@ -117,6 +128,10 @@ export class PreviewGateway {
       (response) => this.#requests.settle(pending.id, response),
       (error: unknown) => this.#requests.fail(pending.id, error),
     );
+
+    // The handler is now doing whatever it does, and the runtime's timer queue is the only thing that can resume it. Started,
+    // never awaited: the deadline below is what decides the answer, and a pump that threw must not become the caller's 500.
+    this.#pump?.(pending.settled);
 
     // A single timer per request, cleared when the request settles. The registry does the deciding; the
     // timer only saves it from waiting. Both are needed: without the timer nothing reaps, and without the
