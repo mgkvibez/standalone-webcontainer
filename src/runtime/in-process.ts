@@ -276,6 +276,11 @@ export class InProcessRuntime implements Runtime {
     } finally {
       this.#pumping = false;
     }
+    // LOOK AGAIN. The promise this pump waited on was taken when it STARTED, so it resolves the moment the set empties, and everything after
+    // that is shutdown. A request arriving in that window sees `#pumping === true`, correctly declines to start a second loop over one queue, and
+    // would then have nothing scheduling its work at all: measured as every other request to a live server hanging until the gateway's deadline
+    // (probe order 0, 10, 0, 10, 0 answered 200, hang, 200, 200, hang). The deferred request gets its pump here instead.
+    if (this.#pendingRequests.size > 0) await this.#pumpUntilIdle();
   }
 
   /**

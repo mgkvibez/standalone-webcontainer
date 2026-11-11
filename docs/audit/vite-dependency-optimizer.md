@@ -18,6 +18,13 @@ Fixed in ADR-0013 amendment 4: `Scheduler.pumpWhile(pending, limits)` pumps the 
 outstanding, with its own guard accounting (per request, not per program) bounded under the gateway's deadline. Both probes
 now answer `200`.
 
+**The first fix was too narrow, and the way it failed is worth keeping.** It was verified on a server the run had just
+started, one request each, and it passed. Every OTHER request to a long-lived server still hung: the promise the pump waits
+on is taken when the pump STARTS, so it resolves the moment the outstanding set empties, and a request arriving during the
+shutdown saw the pump flag, correctly declined to start a second loop, and was left with nothing scheduling its work.
+Measured on merged `main` as the sequence `0, 10, 0, 10, 0` answering `200, hang, 200, 200, hang`. The pump now looks again
+after it stops, and two tests pin the shape that was missing: one server, five requests in sequence, and eight at once.
+
 ## 2. esbuild believed it had no filesystem
 
 The optimizer's tool is `esbuild.context({ outdir })` plus a rebuild. `esbuild-wasm`'s browser service builds its channel

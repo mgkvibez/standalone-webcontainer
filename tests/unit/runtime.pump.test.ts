@@ -163,3 +163,57 @@ console.log("listening");
     await settle();
   });
 });
+
+/**
+ * Successive requests on one live server.
+ *
+ * WHY THIS EXISTS SEPARATELY. The tests above each make one request to a server the run had just started, and they all passed while every OTHER
+ * request to a long-lived server hung: the pump's "keep going while something is outstanding" promise was taken when the pump STARTED, so it
+ * resolved the instant the set emptied, and a request arriving during the shutdown saw the pump flag, declined to start a second loop, and was
+ * left with nothing scheduling its work. The probe that found it answered `200, hang, 200, 200, hang` for the delay sequence `0, 10, 0, 10, 0`.
+ *
+ * So the shape here is the one that was missing: ONE server, MANY requests, in sequence and at the same time.
+ */
+describe("a live server answers request after request", () => {
+  const startServer = async (start: (request: string, response: { end: (body: string) => void }) => void) => {
+    const vfs = new FileSystem();
+    vfs.writeFileSync("/app/package.json", JSON.stringify({ name: "app", version: "1.0.0", type: "module" }));
+    vfs.writeFileSync(
+      "/app/s.mjs",
+      `import http from "node:http";
+const server = http.createServer((request, response) => {
+  const wait = Number(new URL(request.url, "http://x").searchParams.get("wait") ?? "10");
+  ${start.toString().includes("immediate") ? "" : "setTimeout(() => response.end(\"ok:\" + request.url), wait);"}
+  if (${String(start.toString().includes("immediate"))}) response.end("ok:" + request.url);
+});
+server.listen(3400);
+console.log("listening");
+`,
+    );
+    const runtime = new InProcessRuntime(vfs);
+    const result = await runtime.run("/app/s.mjs", { cwd: "/app" });
+    expect(result.stdout.trim()).toBe("listening");
+    return runtime;
+  };
+
+  it("answers five requests in a row, mixed delays included", async () => {
+    // The exact sequence the probe used. One hang is the defect.
+    const runtime = await startServer(() => {});
+    const answers: string[] = [];
+    for (const wait of [0, 10, 0, 10, 0]) {
+      const answer = await runtime.gateway.handle({ method: "GET", url: `/preview/3400/?wait=${wait}`, headers: {}, body: new Uint8Array() });
+      answers.push(`${answer.statusCode}:${new TextDecoder().decode(answer.body)}`);
+    }
+    expect(answers).toEqual(["200:ok:/?wait=0", "200:ok:/?wait=10", "200:ok:/?wait=0", "200:ok:/?wait=10", "200:ok:/?wait=0"]);
+  });
+
+  it("answers eight requests made at the same time", async () => {
+    const runtime = await startServer(() => {});
+    const answers = await Promise.all(
+      Array.from({ length: 8 }, (_unused, index) =>
+        runtime.gateway.handle({ method: "GET", url: `/preview/3400/?wait=${index % 2 === 0 ? 0 : 5}`, headers: {}, body: new Uint8Array() }),
+      ),
+    );
+    expect(answers.map((answer) => answer.statusCode)).toEqual([200, 200, 200, 200, 200, 200, 200, 200]);
+  });
+});
