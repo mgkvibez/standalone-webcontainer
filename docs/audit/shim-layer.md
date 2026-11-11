@@ -65,12 +65,19 @@ generation (`crypto`), and the synchronous codecs (`zlib`).
 - **zlib buffers.** The transform collects its input and decodes once, bounded at 64 MB; Node streams incrementally.
 - **`inherits` and the emitter are mixin-shaped, not instance-only**, which is a deviation in the *safe* direction: it accepts more
   programs, and the ones it accepts behave as they do on Node.
+- **The `fs` callback members are DERIVED from the promise members**, one implementation per operation: `readFile`, `writeFile`, `mkdir`,
+  `unlink`, `rmdir`, `rename`, `rm`, `access`. Node layers them the same way, and deriving them means the path rewrite and the error map
+  are the ones already tested on the promise shape. The callback may be in either optional-options position, and a failure arrives as the
+  callback's first argument rather than as a thrown exception. Positional descriptor I/O (`read`, `readSync`) is still refused by name:
+  this VFS reads and writes whole files, and answering a positional read would be inventing a behaviour.
+- **`file:` URL specifiers resolve.** `resolve()` converts one with `fileURLToPath` before the file probe, so `import(pathToFileURL(p).href)`
+  reaches the same file a relative specifier would. Vite's config loading depends on it.
 
 ## Where the release stands
 
-Two fixtures now produce real verdicts: `fixture-04` (6/6 assertions, fs/http/streams/timers) and `fixture-08` (3/3, a real package
-from a real registry serving a real response). The remaining eighteen are still unfrozen definitions with no files, and their
-verdicts wait on the corpus decision rather than on the engine.
-
-The next honest milestone is a second real package that is not express: `vite` (8 packages, an ESM-only tool that resolves plugins)
-would prove the ESM path and the loader's `package.json` field handling at once.
+Eight fixtures now produce real verdicts: `fixture-01`, `fixture-04` (6/6 assertions, fs/http/streams/timers), `fixture-07` (3/3, a
+CLI), `fixture-08` (3/3, express from a real registry serving a real response), and the four front-end ones added on 2026-11-11:
+`fixture-11`, `fixture-13`, `fixture-17`, `fixture-18`, all against the frozen vite snapshot. That milestone was taken, and what it
+found is in `vite-production-build.md`: a script's `&&` second half not running, a suspended program with real work pending being
+declared finished, esbuild's `fs.read` channel having been cut by our own earlier fix, a `file:` URL resolved as a package name, and
+the callback `fs` members above.

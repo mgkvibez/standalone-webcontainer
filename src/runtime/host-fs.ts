@@ -11,12 +11,22 @@
  * `stat`, `open`, `fstat`, `readdir`, `close`, `lstat`, `write`. Everything else keeps the stub's `ENOSYS`, which is honest: nothing has been
  * measured asking for it, and answering a call nobody makes is inventing behaviour.
  *
- * WHY THERE IS NO FILE-BYTE READ, WHICH IS THE INTERESTING PART. It is not omitted for effort. `esbuild-wasm`'s in-thread service assigns
- * `fs.read` and `fs.writeSync` UNCONDITIONALLY, after the host's object is already in place (`lib/browser.js`, in-thread service body, two assignments
- * behind no guard at all), and its `read` is stdin-only: any other fd throws `Bad read`. Measured consequence: a build whose entry point has to be
- * read from disk dies with `panic: JavaScript error: Bad read`, raised by esbuild's own function, not by ours. So in the browser embedder the Go side
- * can learn a file's METADATA but never its BYTES, and module contents have to arrive through `onLoad` plugin callbacks instead. That is exactly what
- * Vite's dependency optimizer does, which is why this is the shape the optimizer needs rather than a compromise.
+ * WHY `read` IS THE INTERESTING MEMBER. `esbuild-wasm`'s in-thread service assigns `fs.read` and `fs.writeSync` UNCONDITIONALLY, after the host's
+ * object is already in place (`lib/browser.js`, in-thread service body, two assignments behind no guard at all), and the `read` it assigns is
+ * stdin-only: `if (fd !== 0 || offset !== 0 || length !== buffer.length || position !== null) throw new Error("Bad read")`. Measured consequence:
+ * every build whose entry point has to be read from disk died with `panic: JavaScript error: Bad read`, raised by esbuild's own function.
+ *
+ * The dependency optimizer survives that by passing contents through `onLoad` callbacks, which is why this shape was enough for it. Ordinary builds do
+ * not: `vite build` with a `vite.config.js` bundles the config with esbuild, and that build's entry point is a real file on disk. So the member is
+ * implemented properly here, and `read` is installed as an ACCESSOR that COMPOSES the two: the assignment is kept for fd 0, which is the service's own
+ * message channel, and every other fd reads this object's files. That is not a trick to look clever: the
+ * alternative is a runtime where a project builds or not depending on whether it has a config file, which is a property of our embedder leaking into a
+ * verdict about somebody's project. `writeSync` keeps the opposite treatment on purpose, because THERE the assigned version is the correct one: it is
+ * what carries the Go side's output to the program's stdout, so `write` delegates through `this`.
+ *
+ * WHAT `read` DOES WITH EACH FD. An fd this object opened reads the file's bytes from the VFS, honouring the caller's offset/length and either a
+ * positional read or the handle's own advancing position, exactly as Node does. fd 0 answers EOF rather than throwing: the runtime has no fs-level
+ * stdin to serve (stdin reaches a program as `process.stdin`), and a Go program that asks gets `0` bytes instead of a panic. Any other fd is `EBADF`.
  *
  * PATH SEMANTICS. Go passes what it was given, so a relative path stays relative: `Open` only prepends `process.cwd()` to the name it records, after
  * the call. Resolving here, against the program's cwd, is what makes `readdir(".")` mean the directory the program was started in.
@@ -25,6 +35,8 @@
 /** The filesystem facts a Go runtime asks for, and nothing wider. */
 export interface HostFsSource {
   readdirSync(path: string): string[];
+  /** A file's bytes. Throws when the path does not exist or is a directory, as Node's does. */
+  readFileSync(path: string): Uint8Array | string;
   statSync(path: string): {
     isFile(): boolean;
     isDirectory(): boolean;
@@ -40,9 +52,14 @@ export interface HostFsSource {
  * `kind` and `modifiedAt` are the VFS's words; `isFile`, `mtimeMs` and `birthtimeMs` are Node's, and Node's is what Go reads. One translation, here,
  * rather than a second stat shape inside the adapter: a VFS that changed its own vocabulary would break in one place.
  */
-export function hostFsSourceFrom(vfs: { readdirSync(path: string): string[]; statSync(path: string): { kind: "file" | "dir"; size: number; modifiedAt: number; createdAt: number } }): HostFsSource {
+export function hostFsSourceFrom(vfs: {
+  readdirSync(path: string): string[];
+  readFileSync(path: string): Uint8Array | string;
+  statSync(path: string): { kind: "file" | "dir"; size: number; modifiedAt: number; createdAt: number };
+}): HostFsSource {
   return {
     readdirSync: (path) => vfs.readdirSync(path),
+    readFileSync: (path) => vfs.readFileSync(path),
     statSync: (path) => {
       const stats = vfs.statSync(path);
       const directory = stats.kind === "dir";
@@ -111,6 +128,8 @@ const statsFor = (stats: ReturnType<HostFsSource["statSync"]>): Record<string, u
 /** An open fd. Directories are opened too: Go's `Open` opens first, then asks `fstat` what it got. */
 interface Handle {
   readonly path: string;
+  /** Where an unpositioned read resumes. Advanced by each read, as a real fd's offset is. */
+  position: number;
 }
 
 /** The object placed at `globalThis.fs` for a program that loads a Go runtime. */
@@ -123,6 +142,7 @@ export interface HostFs {
   stat(path: string, callback: Callback): void;
   lstat(path: string, callback: Callback): void;
   readdir(path: string, callback: Callback): void;
+  read(fd: number, buffer: Uint8Array, offset: number, length: number, position: number | null, callback: Callback): void;
   close(fd: number, callback: Callback): void;
 }
 
@@ -174,7 +194,7 @@ export function createHostFs(source: HostFsSource, options: { readonly cwd: stri
         source.statSync(resolved);
         const fd = nextFd;
         nextFd += 1;
-        handles.set(fd, { path: resolved });
+        handles.set(fd, { path: resolved, position: 0 });
         callback(null, fd);
       } catch (error) {
         callback(error);
@@ -199,6 +219,37 @@ export function createHostFs(source: HostFsSource, options: { readonly cwd: stri
         callback(error);
       }
     },
+    read(fd: number, buffer: Uint8Array, offset: number, length: number, position: number | null, callback: Callback): void {
+      // fd 0 is stdin. EOF, not a throw: the runtime serves stdin as `process.stdin`, so there are no bytes here and a Go program asking for them
+      // should see the end of the input rather than a panic.
+      if (fd === 0) {
+        callback(null, 0);
+        return;
+      }
+      const handle = handles.get(fd);
+      if (handle === undefined) {
+        callback(failure("EBADF", "read", String(fd)));
+        return;
+      }
+      try {
+        const contents = source.readFileSync(handle.path);
+        const bytes = typeof contents === "string" ? new TextEncoder().encode(contents) : contents;
+        const start = position ?? handle.position;
+        if (start >= bytes.length) {
+          callback(null, 0);
+          return;
+        }
+        const end = Math.min(start + length, bytes.length);
+        const slice = bytes.subarray(start, end);
+        buffer.set(slice, offset);
+        // A positional read leaves the handle where it was; an unpositioned one advances it, which is the rule Node follows and the one Go's
+        // `Read` relies on when it loops until it sees a short read.
+        if (position === null) handle.position = end;
+        callback(null, slice.length);
+      } catch (error) {
+        callback(error);
+      }
+    },
     close(fd: number, callback: Callback): void {
       handles.delete(fd);
       callback(null);
@@ -214,6 +265,32 @@ export function createHostFs(source: HostFsSource, options: { readonly cwd: stri
       callback(null, this.writeSync(fd, buffer));
     },
   };
+
+  // `read` is an accessor rather than a data property, because esbuild's in-thread service assigns its own stdin-only `read` onto this object after
+  // the object exists. Read off the object before the accessor replaces it, so the getter closes over the implementation rather than calling itself.
+  //
+  // The assignment is COMPOSED rather than ignored, and both halves are load-bearing. Its function cannot serve a file read: every fd except 0 makes
+  // it throw, which is the `panic: JavaScript error: Bad read` that killed every build with a `vite.config.js`. But it is the ONLY thing that drains
+  // the service's own message protocol, which arrives on fd 0 and is queued in a closure array this object cannot see. Measured: ignoring the
+  // assignment made file reads work and left the service permanently mute. `await esbuild.build(...)` then suspended forever with nothing queued,
+  // which the scheduler reported as a finished program. So fd 0 goes to the assigned reader when one exists and every other fd stays ours.
+  const readImpl = fs.read;
+  let stdinReader: typeof readImpl | null = null;
+  const composedRead: typeof readImpl = (fd, buffer, offset, length, position, callback) => {
+    if (fd === 0 && stdinReader !== null) {
+      stdinReader(fd, buffer, offset, length, position, callback);
+      return;
+    }
+    readImpl(fd, buffer, offset, length, position, callback);
+  };
+  Object.defineProperty(fs, "read", {
+    configurable: true,
+    enumerable: true,
+    get: () => composedRead,
+    set: (value: unknown) => {
+      if (typeof value === "function") stdinReader = value as typeof readImpl;
+    },
+  });
   return fs;
 }
 
@@ -232,7 +309,6 @@ export const REFUSED_HOST_FS_MEMBERS: readonly string[] = [
   "lchown",
   "link",
   "mkdir",
-  "read",
   "readlink",
   "rename",
   "rmdir",

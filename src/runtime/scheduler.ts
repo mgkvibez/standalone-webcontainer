@@ -279,10 +279,14 @@ export class Scheduler {
    * that call does the normal accounting.
    *
    * Termination follows Node rather than a guess: the loop stops when the body has settled and nothing is queued, when a guard fires, or when the
-   * queue is empty and the body is still suspended after the real event loop has had a turn. That last case is Node's own behaviour, where a
-   * process exits with an unresolved entry promise once its loop is empty.
+   * queue is empty, nothing outside the queue is in flight, and the body is still suspended after the real event loop has had a turn. That last case
+   * is Node's own behaviour, where a process exits with an unresolved entry promise once its loop is empty.
+   *
+   * The returned stop reason exists so the runner can tell those two endings apart. A body that never settled is a program that did not finish, and
+   * reporting it as exit 0 is the same silent green this scheduler's guards exist to prevent: measured on `vite build`, which awaited a wasm
+   * instantiation, was declared finished, and reported success for a build that emitted nothing.
    */
-  async drainWhile(evaluation: Promise<void>): Promise<void> {
+  async drainWhile(evaluation: Promise<void>): Promise<{ readonly stop: SchedulerStop; readonly settled: boolean }> {
     let settled = false;
     let rejection: { error: unknown } | undefined;
     void evaluation.then(
@@ -295,23 +299,53 @@ export class Scheduler {
       },
     );
 
+    let stop: SchedulerStop = "queue-empty";
     for (;;) {
-      if (this.#aborted) break;
-      const stop = await this.#drainPass();
+      if (this.#aborted) {
+        stop = "aborted";
+        break;
+      }
+      const pass = await this.#drainPass();
       // A pass that ended on a guard ended this loop too: continuing would run exactly the work the guard exists to stop.
-      if (stop !== "queue-empty") break;
+      if (pass !== "queue-empty") {
+        stop = pass;
+        break;
+      }
       await drainContinuations();
       if (settled && this.#queue.length === 0) break;
       if (this.#queue.length > 0) continue;
-      // Nothing of ours is queued and the body is still suspended. One real turn lets work that is not a timer (a dynamic import settling, an
-      // outside handle) make progress; if neither that nor a new timer appears, this queue has nothing left to offer.
+
+      // Nothing of ours is queued and the body is still suspended. Outside work that settles on a real thread (a wasm instantiation, an open
+      // handle) is work this body is waiting for, and the whole point is to keep the process alive until it lands, exactly as Node does while a
+      // libuv handle is ref'd. Without this the loop gave up after a single real turn, which is how `await esbuild.build(...)` became "exit 0,
+      // no output": esbuild's service is a Go program on a WebAssembly.Module, instantiated on another thread.
+      const outstanding = this.#keepAlive === undefined ? 0 : this.#keepAlive();
+      if (outstanding > 0) {
+        if (this.#idleStart === null) this.#idleStart = Date.now();
+        if (Date.now() - this.#realStart - this.#idleTotal() > this.#maxRealMs) {
+          // Outside work that never lands is a hung program, not a finished one. This is the same ceiling `drain` applies, for the same reason:
+          // waiting on the world is not the program working, so the wall clock is the only honest limit on it.
+          stop = "real-time-limit";
+          this.#chargeIdle();
+          break;
+        }
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, this.#keepAlivePollMs);
+        });
+        continue;
+      }
+
+      // Nothing queued and nothing in flight: one real turn lets work this runtime cannot see (a dynamic import settling) make progress; if
+      // neither that nor a new timer appears, this queue has nothing left to offer and the body will never be resumed.
       await new Promise<void>((resolve) => {
         setTimeout(resolve, 0);
       });
       if (this.#queue.length === 0) break;
     }
 
+    this.#chargeIdle();
     if (rejection !== undefined) throw rejection.error;
+    return { stop, settled };
   }
 
   async drain(): Promise<SchedulerEvidence> {

@@ -460,3 +460,51 @@ describe("a default import of events is the class", () => {
     expect(result.stdout).toBe("extends:true\n");
   });
 });
+
+describe("a `file:` URL specifier", () => {
+  it("imports a module by URL, which is how vite loads a bundled config it just wrote", async () => {
+    // The literal shape: vite writes the bundled config to `/vite.config.js.timestamp-....mjs`, then `await import(pathToFileURL(temp).href)`.
+    const result = await run(
+      {
+        "/app/package.json": JSON.stringify({ name: "app", type: "module" }),
+        "/app/main.js": [
+          'import { pathToFileURL } from "node:url";',
+          'const loaded = await import(pathToFileURL("/app/bundled.config.mjs").href);',
+          "console.log(loaded.default.name, loaded.default.served);",
+        ].join("\n"),
+        "/app/bundled.config.mjs": "export default { name: 'from-url', served: true };",
+      },
+      "main.js",
+    );
+
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("from-url true\n");
+  });
+
+  it("reports a missing URL target as a module-not-found naming the URL", async () => {
+    const result = await run(
+      {
+        "/app/package.json": JSON.stringify({ name: "app", type: "module" }),
+        "/app/main.js": 'await import("file:///app/absent.mjs");',
+      },
+      "main.js",
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("file:///app/absent.mjs");
+  });
+
+  it("percent-decodes the URL, so a path with a space resolves to the file with the space", async () => {
+    const result = await run(
+      {
+        "/app/package.json": JSON.stringify({ name: "app", type: "module" }),
+        "/app/main.js": 'const loaded = await import("file:///app/a%20b.mjs");\nconsole.log(loaded.value);',
+        "/app/a b.mjs": "export const value = 'spaced';",
+      },
+      "main.js",
+    );
+
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("spaced\n");
+  });
+});

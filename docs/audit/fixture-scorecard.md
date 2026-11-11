@@ -78,14 +78,14 @@ corpus is reproducible and a live registry is the product.
 | 08 express | **PASS** (twice) | 68 real packages, express 5 serving a body on port 3200 through the preview gateway, 3/3 assertions — measured both from `registry.npmjs.org` and from the frozen snapshot alone (`--registry=snapshot:fixtures/snapshots/express`), so the verdict no longer depends on the network. See `shim-layer.md` and `registry-lanes.md` | frozen once signed off |
 | 09 is-odd | RUNTIME_INCOMPATIBILITY | install with arguments refused; no files | no |
 | 10 pnpm | RUNTIME_INCOMPATIBILITY | `pnpm install` restricted by D-4 | no |
-| 11 Vite build | RUNTIME_INCOMPATIBILITY | no files; `vite` not in the corpus | no |
+| 11 Vite build | **PASS** — *superseded, see the update below* | was `RUNTIME_INCOMPATIBILITY`: no files, `vite` not in the corpus. Files staged and `vite build` measured against the frozen vite snapshot; see `vite-production-build.md` | yes |
 | 12 tsc build | RUNTIME_INCOMPATIBILITY | no files; `typescript` not in the corpus | no |
-| 13 | RUNTIME_INCOMPATIBILITY (expected) | no files; no runtime loaded | no |
+| 13 | **PASS** — *superseded, see the update below* | was `RUNTIME_INCOMPATIBILITY (expected)`: no files, no runtime loaded. Files staged; both body assertions pass through the preview gateway | yes |
 | 14 cowsay | RUNTIME_INCOMPATIBILITY (expected) | no files; `cowsay` not in the corpus | no |
 | 15 sharp | RUNTIME_INCOMPATIBILITY | no files; native refusal never reached | no |
 | 16 ws | RUNTIME_INCOMPATIBILITY (expected) | no files; `ws` not in the corpus | no |
-| 17 | RUNTIME_INCOMPATIBILITY (expected) | no files; no bundler | no |
-| 18 | RUNTIME_INCOMPATIBILITY | no files; no bundler | no |
+| 17 | **PASS** — *superseded, see the update below* | was `RUNTIME_INCOMPATIBILITY (expected)`: no files, no bundler. Files staged; 300 generated modules through a real `vite build` | yes |
+| 18 | **PASS** — *superseded, see the update below* | was `RUNTIME_INCOMPATIBILITY`: no files, no bundler. Files staged; a `vite.config.js` is bundled, imported by `file:` URL and used | yes |
 | 19 libsql | RUNTIME_INCOMPATIBILITY (expected) | no files; not in the corpus | no |
 | 20 drizzle | RUNTIME_INCOMPATIBILITY (expected) | no files; not in the corpus | no |
 
@@ -112,3 +112,18 @@ code and passes all three. Those are the first verdicts the gate has ever produc
 - One engine, one machine, no network.
 - Evidence is written to `.evidence/` (git-ignored). Nothing here is a frozen outcome: an outcome is only an outcome once a
   definition is frozen and its assertions are signed off.
+
+## Update, 2026-11-11: four front-end fixtures now pass
+
+The table above is the measurement of 2026-11-10 and is left as it was measured. On 2026-11-11, fixtures **11, 13, 17 and 18** were given
+files (their definitions had none) and now pass, all four against the frozen vite snapshot with no network:
+`npm run fixtures:run -- --id <n> --registry=snapshot:fixtures/snapshots/vite`.
+
+- **11** `vite build` over a five-module app with CSS: exit 0, `dist/index.html` written.
+- **13** serves `index.html` on port 3300: both body assertions pass through the preview gateway.
+- **17** `node gen.mjs && vite build` over 300 generated modules of 40 kB each, named `bundle.js` output: the file exists.
+- **18** a `vite.config.js` that the build must bundle, write to a temp `.mjs`, import by `file:` URL and use: exit 0, `dist/index.html`,
+  and `dist/assets/app.js` contains `generated-marker`.
+
+Eight fixtures pass in total now: 01, 04, 07, 08, 11, 13, 17, 18. Four of the eight are in the front-end lane the shippable-isolation gate is
+written against. What writing those four programs found, and what they still do not prove, is in `vite-production-build.md`.

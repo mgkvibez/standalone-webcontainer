@@ -38,7 +38,7 @@ const absolute = (path: string): string => (path.startsWith("/") ? path : `/${pa
 const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /** A project's files as the container sees them: seeded from the definition, mutated by installs. */
-class MapFiles implements ProjectFiles {
+export class MapFiles implements ProjectFiles {
   readonly projectId = "fixture";
   readonly #files = new Map<string, string>();
   readonly #dirs = new Set<string>(["/"]);
@@ -82,7 +82,7 @@ class MapFiles implements ProjectFiles {
 }
 
 /** One runtime per run, in this process rather than a Worker: the supervisor already rebuilds the VFS per run. */
-class InProcessClient implements RuntimeClient {
+export class InProcessClient implements RuntimeClient {
   readonly #supervisor = new RuntimeSupervisor();
 
   run(request: RuntimeRunRequest): Promise<RuntimeRunOutcome> {

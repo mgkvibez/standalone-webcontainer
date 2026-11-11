@@ -2,17 +2,17 @@
   {
     "index": 0,
     "kind": "exit-code",
-    "state": "failed",
-    "passed": false,
+    "state": "passed",
+    "passed": true,
     "stepAvailable": true,
-    "detail": "expected exit code 0, observed 1"
+    "detail": "expected exit code 0, observed 0"
   },
   {
     "index": 1,
     "kind": "file-exists",
-    "state": "failed",
-    "passed": false,
+    "state": "passed",
+    "passed": true,
     "stepAvailable": true,
-    "detail": "dist/index.html does not exist"
+    "detail": "dist/index.html exists"
   }
 ]
