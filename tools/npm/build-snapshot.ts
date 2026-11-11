@@ -93,32 +93,40 @@ const main = async (): Promise<number> => {
     },
   );
 
+  // A substituted package is installed under the REQUESTED name (the tree keeps it, because Node resolves by directory), while substitution asks
+  // the registry only for the SUBSTITUTE. Without this translation the capture walks a name it never fetched and refuses with
+  // "captured no packument entry for esbuild@0.21.5", which reads like an installer fault and is a naming one. Keying the manifest by the
+  // substitute is also what the snapshot lane asks for on reinstall, since it substitutes before it resolves.
+  const servedBy = new Map<string, string>();
+  for (const use of report.substitutions) servedBy.set(use.requested, use.substitute);
+
   const packages: Record<string, SnapshotEntry[]> = {};
   for (const installed of report.packages) {
-    const packument = captured.packuments.get(installed.name);
+    const source = servedBy.get(installed.name) ?? installed.name;
+    const packument = captured.packuments.get(source);
     const version = packument?.versions[installed.version];
     if (packument === undefined || version === undefined) {
       // The installer got this package from somewhere other than a packument it fetched, which for a from-scratch capture means the
       // capture is incomplete: say so rather than write a snapshot with a hole in it.
-      throw new Error(`captured no packument entry for ${installed.name}@${installed.version}`);
+      throw new Error(`captured no packument entry for ${source}@${installed.version}`);
     }
     const url = version.dist.tarball;
     const bytes = captured.tarballs.get(url);
-    if (bytes === undefined) throw new Error(`captured no tarball for ${installed.name}@${installed.version} (${url})`);
+    if (bytes === undefined) throw new Error(`captured no tarball for ${source}@${installed.version} (${url})`);
     const integrity = version.dist.integrity;
     if (integrity === undefined || !integrity.startsWith("sha512-")) {
-      throw new Error(`${installed.name}@${installed.version} publishes no sha512 integrity, so it cannot be pinned`);
+      throw new Error(`${source}@${installed.version} publishes no sha512 integrity, so it cannot be pinned`);
     }
     const entry: SnapshotEntry = {
       version: installed.version,
       integrity,
-      tarball: `tarballs/${fileStem(installed.name, installed.version)}`,
+      tarball: `tarballs/${fileStem(source, installed.version)}`,
       ...(version.dependencies === undefined ? {} : { dependencies: version.dependencies }),
       ...(version.optionalDependencies === undefined ? {} : { optionalDependencies: version.optionalDependencies }),
       ...(version.os === undefined ? {} : { os: version.os }),
       ...(version.cpu === undefined ? {} : { cpu: version.cpu }),
     };
-    (packages[installed.name] ??= []).push(entry);
+    (packages[source] ??= []).push(entry);
     await mkdir(join(out, "tarballs"), { recursive: true });
     await writeFile(join(out, entry.tarball), bytes);
   }

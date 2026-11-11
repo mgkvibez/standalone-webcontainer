@@ -11,8 +11,8 @@ import { makePackageTarball, packument } from "./tarball.js";
 
 export interface FakeVersion {
   readonly version: string;
-  /** Written into the tarball besides package.json. */
-  readonly files?: Record<string, string>;
+  /** Written into the tarball besides package.json. Bytes are allowed: a package can ship a wasm, a font, or an image. */
+  readonly files?: Record<string, string | Uint8Array>;
   /** `main` field for the generated package.json. */
   readonly main?: string;
   /** `bin` field for the generated package.json: a string (named after the package) or a name-to-entry map. */

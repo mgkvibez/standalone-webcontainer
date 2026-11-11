@@ -106,7 +106,7 @@ export function makeTar(entries: readonly WriteEntry[]): Uint8Array {
 
 /** A gzipped package tarball laid out the way npm publishes them: everything under `package/`. */
 export function makePackageTarball(
-  files: Readonly<Record<string, string>>,
+  files: Readonly<Record<string, string | Uint8Array>>,
   packageJson: Record<string, unknown>,
 ): Uint8Array {
   const entries: WriteEntry[] = [

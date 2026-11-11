@@ -1,4 +1,4 @@
-import type { FileSystemPort, VfsStatsPort, WatchSourcePort } from "../vfs/port.js";
+import type { FileSystemPort, MkdirOptionsPort, VfsStatsPort, WatchSourcePort, WriteOptionsPort } from "../vfs/port.js";
 import { toWatchAsyncIterator, type WatchAsyncIterator, type WatchHandlePort } from "../vfs/watch-iterator.js";
 /**
  * `fs` shim: Node's documented `fs` surface, translated onto our VFS.
@@ -14,6 +14,7 @@ import { toWatchAsyncIterator, type WatchAsyncIterator, type WatchHandlePort } f
  * error classes breaks them at the first `catch`.
  */
 import { path as nodePath } from "./path.js";
+import { fileURLToPath } from "./url.js";
 import { VFSError } from "../vfs/errors.js";
 import { Buffer } from "buffer";
 
@@ -50,14 +51,21 @@ const CODE_MAP: Readonly<Record<string, string>> = {
   ENOSPC: "ENOSPC",
 };
 
-const toNodeError = (error: unknown, syscall: string, path: string): NodeFsError => {
+/**
+ * A Node-shaped error for a VFS failure.
+ *
+ * `path` is the `PathLike` the caller gave, because that is what Node puts on the error and a program that compares it expects the same value it
+ * passed. It is formatted into the message, so a URL reads as its href rather than as `[object URL]`.
+ */
+const toNodeError = (error: unknown, syscall: string, path: FsPath): NodeFsError => {
+  const shown = typeof path === "string" ? path : path.href;
   if (error instanceof VFSError) {
     const code = CODE_MAP[error.code] ?? "EIO";
-    const wrapped = new Error(`${code}: ${syscall} '${path}'`) as NodeFsError;
+    const wrapped = new Error(`${code}: ${syscall} '${shown}'`) as NodeFsError;
     wrapped.code = code;
     wrapped.errno = ERRNO[code] ?? -1;
     wrapped.syscall = syscall;
-    wrapped.path = path;
+    wrapped.path = shown;
     return wrapped;
   }
   // Anything that is not a VFS error is a bug in this shim, not user error: do
@@ -85,23 +93,64 @@ export interface StatsShim {
   birthtimeMs: number;
 }
 
+/**
+ * What Node accepts wherever it accepts a path: a string, or a `file:` URL.
+ *
+ * Measured, not speculative. Vite's `dist/node/constants.js` opens its own manifest with
+ * `readFileSync(new URL("../../package.json", import.meta.url))`, which is ordinary Node and failed here with
+ * `TypeError: path.startsWith is not a function` from a line that had nothing to do with the mistake. Buffer paths are deliberately not
+ * supported: nothing in this runtime hands one over, and accepting a type no caller uses is a claim without a test.
+ */
+export type FsPath = string | URL;
+
+/** A `file:` URL becomes the path it names; a string is already what every layer below wants. */
+const pathOf = (value: FsPath): string => (typeof value === "string" ? value : fileURLToPath(value));
+
+/**
+ * The same VFS, accepting a URL wherever a path goes.
+ *
+ * One view rather than a conversion in twenty method bodies: the absolute shim below is written against a `FileSystemPort`, so wrapping the port
+ * is the only place a path can be widened without every method repeating the rule. Wider parameters make this assignable to `FileSystemPort`, so
+ * nothing above needs a cast.
+ */
+const pathAccepting = (vfs: FileSystemPort) => ({
+  readFileSync: (path: FsPath, encoding?: "utf8") => vfs.readFileSync(pathOf(path), encoding),
+  writeFileSync: (path: FsPath, data: string | Uint8Array, options?: WriteOptionsPort) =>
+    vfs.writeFileSync(pathOf(path), data, options),
+  mkdirSync: (path: FsPath, options?: MkdirOptionsPort) => vfs.mkdirSync(pathOf(path), options),
+  readdirSync: (path: FsPath) => vfs.readdirSync(pathOf(path)),
+  statSync: (path: FsPath) => vfs.statSync(pathOf(path)),
+  ...(vfs.statManySync === undefined
+    ? {}
+    : { statManySync: (paths: readonly FsPath[]) => vfs.statManySync!(paths.map(pathOf)) }),
+  unlinkSync: (path: FsPath) => vfs.unlinkSync(pathOf(path)),
+  rmdirSync: (path: FsPath) => vfs.rmdirSync(pathOf(path)),
+  renameSync: (from: FsPath, to: FsPath) => vfs.renameSync(pathOf(from), pathOf(to)),
+  readFile: (path: FsPath, encoding?: "utf8") => vfs.readFile(pathOf(path), encoding),
+  writeFile: (path: FsPath, data: string | Uint8Array, options?: WriteOptionsPort) =>
+    vfs.writeFile(pathOf(path), data, options),
+  mkdir: (path: FsPath, options?: MkdirOptionsPort) => vfs.mkdir(pathOf(path), options),
+  readdir: (path: FsPath) => vfs.readdir(pathOf(path)),
+  unlink: (path: FsPath) => vfs.unlink(pathOf(path)),
+});
+
 export interface FsShim {
-  readFileSync(path: string, encoding?: "utf8"): Buffer | string;
-  writeFileSync(path: string, data: string | Uint8Array): void;
-  existsSync(path: string): boolean;
-  mkdirSync(path: string, options?: { recursive?: boolean }): void;
-  readdirSync(path: string): string[];
-  statSync(path: string): StatsShim;
+  readFileSync(path: FsPath, encoding?: "utf8"): Buffer | string;
+  writeFileSync(path: FsPath, data: string | Uint8Array): void;
+  existsSync(path: FsPath): boolean;
+  mkdirSync(path: FsPath, options?: { recursive?: boolean }): void;
+  readdirSync(path: FsPath): string[];
+  statSync(path: FsPath): StatsShim;
   /**
    * Stat several paths at once: one entry per path, `null` where it does not exist.
    *
    * Always present on the shim so callers have one shape to call, even when the substrate underneath cannot batch: the
    * fallback is the same loop over `statSync`, which is what the caller would have written anyway.
    */
-  statManySync(paths: readonly string[]): readonly (StatsShim | null)[];
-  unlinkSync(path: string): void;
-  rmdirSync(path: string): void;
-  renameSync(from: string, to: string): void;
+  statManySync(paths: readonly FsPath[]): readonly (StatsShim | null)[];
+  unlinkSync(path: FsPath): void;
+  rmdirSync(path: FsPath): void;
+  renameSync(from: FsPath, to: FsPath): void;
   /**
    * `fs.watch`. The listener may be passed second, as in Node, and the returned handle is the FSWatcher-shaped object.
    *
@@ -163,7 +212,7 @@ const absoluteWatch = (
         code: "ERR_INVALID_ARG_VALUE",
       });
     }
-    const handle = watches.watch(path, options.recursive === true ? { recursive: true } : {});
+    const handle = watches.watch(pathOf(path), options.recursive === true ? { recursive: true } : {});
     if (listener !== undefined) {
       handle.on("change", listener as (...args: never[]) => void);
       handle.on("rename", listener as (...args: never[]) => void);
@@ -171,7 +220,9 @@ const absoluteWatch = (
     return handle;
 };
 
-const createAbsoluteFsShim = (vfs: FileSystemPort, watches?: WatchSourcePort): FsShim => ({
+const createAbsoluteFsShim = (port: FileSystemPort, watches?: WatchSourcePort): FsShim => {
+  const vfs = pathAccepting(port);
+  return {
   watch: (path, listenerOrOptions, maybeListener) =>
     absoluteWatch(watches, path, listenerOrOptions, maybeListener),
 
@@ -345,7 +396,8 @@ const createAbsoluteFsShim = (vfs: FileSystemPort, watches?: WatchSourcePort): F
       }
     },
   },
-});
+  };
+};
 
 /**
  * The shim user code sees: Node resolves a relative path against the process working directory, and the VFS only knows
@@ -359,7 +411,11 @@ export const createFsShim = (
   options: { readonly cwd?: string; readonly watches?: WatchSourcePort } = {},
 ): FsShim => {
   const cwd = options.cwd ?? "/";
-  const at = (path: string): string => (path.startsWith("/") ? path : nodePath.resolve(cwd, path));
+  const at = (value: FsPath): string => {
+    // A URL is absolute by construction, so it is converted before the leading-slash test rather than resolved against cwd.
+    const path = pathOf(value);
+    return path.startsWith("/") ? path : nodePath.resolve(cwd, path);
+  };
   const inner = createAbsoluteFsShim(vfs, options.watches);
 
   return {
