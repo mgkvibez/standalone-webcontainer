@@ -270,6 +270,21 @@ export interface FsShim {
   rmdirSync(path: FsPath): void;
   renameSync(from: FsPath, to: FsPath): void;
   /**
+   * Node's callback forms, one beside each promise form.
+   *
+   * A program can see the difference: vite loads a bundled config by writing a temp `.mjs`, importing it, then calling `fs.unlink(tmp, () => {})` in
+   * a `finally`, so a shim holding `unlinkSync` and `promises.unlink` but not `unlink` fails a build that had already bundled its config correctly.
+   * All of these are derived from the promise members and never reimplemented, so both calling conventions share one path rewrite and one error map.
+   */
+  readFile(path: FsPath, optionsOrCallback?: string | { encoding?: string } | CallbackOnly, maybeCallback?: CallbackOnly): void;
+  writeFile(path: FsPath, data: string | Uint8Array, callback: CallbackOnly): void;
+  mkdir(path: FsPath, optionsOrCallback?: { recursive?: boolean } | CallbackOnly, maybeCallback?: CallbackOnly): void;
+  unlink(path: FsPath, callback: CallbackOnly): void;
+  rmdir(path: FsPath, optionsOrCallback?: { recursive?: boolean } | CallbackOnly, maybeCallback?: CallbackOnly): void;
+  rename(from: FsPath, to: FsPath, callback: CallbackOnly): void;
+  rm(path: FsPath, optionsOrCallback?: { recursive?: boolean; force?: boolean } | CallbackOnly, maybeCallback?: CallbackOnly): void;
+  access(path: FsPath, callback: CallbackOnly): void;
+  /**
    * `fs.watch`. The listener may be passed second, as in Node, and the returned handle is the FSWatcher-shaped object.
    *
    * `encoding` is refused rather than ignored: Node uses it to decide whether filenames arrive as strings or Buffers, and
@@ -329,6 +344,8 @@ export interface FsShim {
     /** Existence only: Node's mode argument is accepted and ignored, because there are no permission bits here. */
     access(path: string): Promise<void>;
     rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
+    rmdir(path: string, options?: { recursive?: boolean }): Promise<void>;
+    rename(from: string, to: string): Promise<void>;
     watch(path: string, options?: WatchOptions): WatchAsyncIterator;
   };
 }
@@ -341,6 +358,9 @@ export interface FsShim {
  * THROUGH a descriptor is not implemented, and refuses by name rather than pretending: see the fd table below.
  */
 export type FileDescriptor = number;
+
+/** A Node-style callback as a parameter this file only forwards: the shape a caller supplies, not one this shim constructs. */
+export type CallbackOnly = (...heard: never[]) => void;
 
 /** Callback shapes for the three promisified members: `(error) | (error, value)`. */
 export type ReaddirCallback = (error: unknown, entries?: string[] | Dirent[]) => void;
@@ -396,12 +416,42 @@ const absoluteWatch = (
     return handle;
 };
 
+/** The members this layer DERIVES from its promise forms rather than writing out, so the literal below is typed without them. */
+type DerivedFromPromises = "readFile" | "writeFile" | "mkdir" | "unlink" | "rmdir" | "rename" | "rm" | "access";
+
+/** The absolute layer as written: everything except the derived callback forms and the `.native` carriage the outer wrapper adds. */
+type WrittenAbsoluteFsShim = Omit<FsShim, DerivedFromPromises | "promises" | "realpathSync"> & { realpathSync: (path: FsPath) => string };
+
+/** The absolute layer as it is RETURNED: the written members, the promise members, and the callback forms derived from them. */
+type AbsoluteFsShim = Omit<FsShim, "realpathSync"> & { realpathSync: (path: FsPath) => string };
+
+/**
+ * Node's callback form of a promise-returning member.
+ *
+ * ONE IMPLEMENTATION PER OPERATION. Node is layered this way itself: `fs.unlink` and `fs.promises.unlink` are the same work under two calling
+ * conventions. Deriving one from the other means the path rewrite and error mapping already tested on the promise shape cannot drift from the
+ * callback shape, and the callback stays the last argument, which is Node's contract for every member here.
+ */
+const asCallback = <R>(operation: (...args: never[]) => Promise<R>) => {
+  return (...args: unknown[]): void => {
+    const callback = args[args.length - 1] as (error: unknown, result?: R) => void;
+    (operation as (...inner: unknown[]) => Promise<R>)(...args.slice(0, -1)).then(
+      (result) => {
+        callback(null, result);
+      },
+      (error: unknown) => {
+        callback(error);
+      },
+    );
+  };
+};
+
 const createAbsoluteFsShim = (
   port: FileSystemPort,
   watches?: WatchSourcePort,
 ): // The absolute layer is not the object a program receives, so it does not carry Node's `.native` property: the wrapper below adds that,
 // because `.native` is a property of the function the public `fs` exports and nowhere else.
-Omit<FsShim, "realpathSync"> & { realpathSync: (path: FsPath) => string } => {
+AbsoluteFsShim => {
 
   /**
    * The open-descriptor table.
@@ -476,7 +526,7 @@ Omit<FsShim, "realpathSync"> & { realpathSync: (path: FsPath) => string } => {
     );
   };
   const vfs = pathAccepting(port);
-  return {
+  const shim: WrittenAbsoluteFsShim = {
   watch: (path, listenerOrOptions, maybeListener) =>
     absoluteWatch(watches, path, listenerOrOptions, maybeListener),
 
@@ -691,7 +741,13 @@ Omit<FsShim, "realpathSync"> & { realpathSync: (path: FsPath) => string } => {
     }
   },
 
-  promises: {
+  };
+
+  /**
+   * The promise-returning members, named once so Node's callback forms can be DERIVED from them below rather than reimplemented: both calling
+   * conventions then share one path rewrite and one error map, which is exactly how Node layers them.
+   */
+  const promises: FsShim["promises"] = {
     watch(path, watchOptions) {
       return toWatchAsyncIterator(absoluteWatch(watches, path, watchOptions));
     },
@@ -777,7 +833,46 @@ Omit<FsShim, "realpathSync"> & { realpathSync: (path: FsPath) => string } => {
         throw error;
       }
     },
-  },
+    async rmdir(path, rmdirOptions) {
+      try {
+        // `recursive` is Node's deprecated-but-supported "remove the contents too". The VFS rmdir refuses a non-empty directory by design, so the
+        // recursion lives here: children first, then the directory itself. Without this flag a non-empty directory still fails with ENOTEMPTY.
+        if (rmdirOptions?.recursive === true) {
+          for (const entry of vfs.readdirSync(path)) {
+            const child = `${path === "/" ? "" : path}/${entry}`;
+            const stats = vfs.statSync(child);
+            if (stats.kind === "dir") await promises.rmdir(child, { recursive: true });
+            else vfs.unlinkSync(child);
+          }
+        }
+        vfs.rmdirSync(path);
+      } catch (error) {
+        throw toNodeError(error, "rmdir", path);
+      }
+    },
+    async rename(from, to) {
+      try {
+        vfs.renameSync(from, to);
+      } catch (error) {
+        throw toNodeError(error, "rename", from);
+      }
+    },
+  };
+
+  // The callback forms Node exposes beside each promise form, derived rather than reimplemented. Bound through arrow wrappers because several promise
+  // members call their siblings through `this` (`lstat` is `stat`, `realpath` and `access` confirm through `stat`, `rm` recurses), and a bare method
+  // reference would lose that binding.
+  return {
+    ...shim,
+    promises,
+    readFile: asCallback((path: FsPath, optionsOrEncoding?: string | { encoding?: string }) => promises.readFile(pathOf(path), optionsOrEncoding)),
+    writeFile: asCallback((path: FsPath, data: string | Uint8Array) => promises.writeFile(pathOf(path), data)),
+    mkdir: asCallback((path: FsPath, mkdirOptions?: { recursive?: boolean }) => promises.mkdir(pathOf(path), mkdirOptions)),
+    unlink: asCallback((path: FsPath) => promises.unlink(pathOf(path))),
+    rmdir: asCallback((path: FsPath, rmdirOptions?: { recursive?: boolean }) => promises.rmdir(pathOf(path), rmdirOptions)),
+    rename: asCallback((from: FsPath, to: FsPath) => promises.rename(pathOf(from), pathOf(to))),
+    rm: asCallback((path: FsPath, rmOptions?: { recursive?: boolean; force?: boolean }) => promises.rm(pathOf(path), rmOptions)),
+    access: asCallback((path: FsPath) => promises.access(pathOf(path))),
   };
 };
 
@@ -799,6 +894,21 @@ export const createFsShim = (
     return path.startsWith("/") ? path : nodePath.resolve(cwd, path);
   };
   const inner = createAbsoluteFsShim(vfs, options.watches);
+
+  /**
+   * Node's `(path[, options], callback)` argument shape, resolved before forwarding.
+   *
+   * The callback may be in EITHER position: a caller can write `fs.readFile(p, cb)` or `promisify(fs.readFile)(p, opts)`-style
+   * `fs.readFile(p, { encoding }, cb)`. Passing the raw tail through would leave a derived callback form holding `undefined` as its callback when
+   * the short shape is used, so the two positions are resolved here, once, for every member that takes optional options.
+   */
+  const callbackOf = (
+    optionsOrCallback: unknown,
+    maybeCallback: ((...heard: never[]) => void) | undefined,
+  ): [unknown, (...heard: never[]) => void] => {
+    const callback = (typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback) as (...heard: never[]) => void;
+    return [typeof optionsOrCallback === "function" ? undefined : optionsOrCallback, callback];
+  };
 
   const realpathSync = Object.assign((path: FsPath) => inner.realpathSync(at(path)), {
     native: (path: FsPath) => inner.realpathSync(at(path)),
@@ -829,6 +939,28 @@ export const createFsShim = (
     writeSync: (fd) => inner.writeSync(fd),
     stat: (path, callback) => inner.stat(at(path), callback),
     lstat: (path, callback) => inner.lstat(at(path), callback),
+    // The callback forms, one per promise member. Only the PATH is this layer's business: rewriting before the call is what makes a relative path
+    // mean the program's cwd, exactly as the sync members above do.
+    readFile: (path, optionsOrCallback, maybeCallback) => {
+      const [options, callback] = callbackOf(optionsOrCallback, maybeCallback);
+      inner.readFile(at(path), options as string | { encoding?: string } | undefined, callback);
+    },
+    writeFile: (path, data, callback) => inner.writeFile(at(path), data, callback),
+    mkdir: (path, optionsOrCallback, maybeCallback) => {
+      const [mkdirOptions, callback] = callbackOf(optionsOrCallback, maybeCallback);
+      inner.mkdir(at(path), mkdirOptions as { recursive?: boolean } | undefined, callback);
+    },
+    unlink: (path, callback) => inner.unlink(at(path), callback),
+    rmdir: (path, optionsOrCallback, maybeCallback) => {
+      const [rmdirOptions, callback] = callbackOf(optionsOrCallback, maybeCallback);
+      inner.rmdir(at(path), rmdirOptions as { recursive?: boolean } | undefined, callback);
+    },
+    rename: (from, to, callback) => inner.rename(at(from), at(to), callback),
+    rm: (path, optionsOrCallback, maybeCallback) => {
+      const [rmOptions, callback] = callbackOf(optionsOrCallback, maybeCallback);
+      inner.rm(at(path), rmOptions as { recursive?: boolean; force?: boolean } | undefined, callback);
+    },
+    access: (path, callback) => inner.access(at(path), callback),
     unlinkSync: (path) => inner.unlinkSync(at(path)),
     rmdirSync: (path) => inner.rmdirSync(at(path)),
     renameSync: (from, to) => inner.renameSync(at(from), at(to)),
@@ -846,6 +978,8 @@ export const createFsShim = (
       realpath: (path) => inner.promises.realpath(at(path)),
       access: (path) => inner.promises.access(at(path)),
       rm: (path, rmOptions) => inner.promises.rm(at(path), rmOptions),
+      rmdir: (path, rmdirOptions) => inner.promises.rmdir(at(path), rmdirOptions),
+      rename: (from, to) => inner.promises.rename(at(from), at(to)),
     },
   };
 };
