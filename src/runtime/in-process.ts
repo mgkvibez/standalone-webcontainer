@@ -23,6 +23,8 @@ import {
 import { PortRegistry } from "../network/port-registry.js";
 import { PreviewGateway } from "../network/preview-gateway.js";
 import { createFsShim, type FsShim } from "../shims/fs.js";
+import { pendingAsyncWork } from "./async-work.js";
+import type { SchedulerStop } from "./scheduler.js";
 import { watchUnhandledRejections } from "./unhandled-rejections.js";
 import { createCountedWatchSource } from "../vfs/watch-iterator.js";
 import { createLocalWatchSource, type WatchableFileSystem } from "../process/local-watch.js";
@@ -66,6 +68,14 @@ import { createCompleteHostFs, hostFsSourceFrom } from "./host-fs.js";
 import { createRealmGlobals } from "./realm-globals.js";
 import { createVirtualDate, createVirtualPerformance, Scheduler, type SchedulerEvidence, type TimerHandle } from "./scheduler.js";
 import { ProcessRefusal, type Refusal } from "./refusal.js";
+
+/**
+ * Stop reasons that mean "the program had work left and a guard ended it".
+ *
+ * `queue-empty` and `no-refs-left` are not here on purpose: those are Node's own endings, where a suspended entry promise is dropped because
+ * nothing could ever resume it, and Node exits 0. Everything in this set is a program Node would still be running, so it is reported as a timeout.
+ */
+const UNFINISHED_STOPS: ReadonlySet<SchedulerStop> = new Set(["budget-exhausted", "callback-limit", "real-time-limit"]);
 
 export interface RunOptions {
   /** Bounds awaits only; synchronous loops cannot be interrupted in-process. */
@@ -357,7 +367,9 @@ export class InProcessRuntime implements Runtime {
       {
         // A watcher and a waiting reader are both ref'd handles: either one keeps the loop alive, exactly as in Node. Without
         // the second term a program that only reads stdin exited before its first question could be answered.
-        keepAlive: () => (counted?.open() ?? 0) + (terminal?.stdin.live() === true ? 1 : 0),
+        // ...and work that settles on a real thread (a wasm instantiation) is a ref'd handle too: esbuild-wasm's service is a Go program on a
+        // WebAssembly.Module, and a build waiting for it must keep the process alive. Counted in async-work.ts, which explains why.
+        keepAlive: () => (counted?.open() ?? 0) + (terminal?.stdin.live() === true ? 1 : 0) + pendingAsyncWork(),
         ...(options.workCeilingMs === undefined ? {} : { maxRealMs: options.workCeilingMs }),
       },
       (error: unknown) => {
@@ -557,7 +569,7 @@ export class InProcessRuntime implements Runtime {
     // It is async because a top-level-await entry has to be waited for, not because ordinary programs became asynchronous: with
     // no pending evaluation this function still runs start to finish in one synchronous turn, which is the ordering the
     // event-loop differential pins.
-    const runBody = async (): Promise<number> => {
+    const runBody = async (): Promise<{ code: number; timedOut: boolean }> => {
       try {
         const result = execute();
         if (result.evaluation !== undefined) {
@@ -565,13 +577,19 @@ export class InProcessRuntime implements Runtime {
           // as an entry body deadlocked here until the queue was pumped while it waited. The pump also decides when the body has settled with
           // work still queued, which is the normal case and is left to `drain` below exactly as before.
           try {
-            await scheduler.drainWhile(result.evaluation);
+            const outcome = await scheduler.drainWhile(result.evaluation);
+            if (!outcome.settled && UNFINISHED_STOPS.has(outcome.stop)) {
+              // A guard ended a program that had not finished: a timer past the virtual budget, a callback limit, or outside work that never
+              // landed. Node would still be running, so the honest report is a timeout. Exit 0 here was a lie with consequences: `vite build`
+              // awaited a wasm instantiation, the budget ran out from the polling timers, and the run claimed to have succeeded with no output.
+              return { code: 124, timedOut: true };
+            }
           } catch (error) {
             // A rejection here is a throw from the module's own body after its first await, so it is the program failing.
-            return programFailure(error);
+            return { code: programFailure(error), timedOut: false };
           }
         }
-        return result.code;
+        return { code: result.code, timedOut: false };
       } finally {
         ticks.flushNow();
       }
@@ -593,10 +611,13 @@ export class InProcessRuntime implements Runtime {
         timedOut = true;
         exitCode = 124; // coreutils convention for a timed-out command
       } else {
-        exitCode = outcome;
+        exitCode = outcome.code;
+        timedOut = outcome.timedOut;
       }
     } else {
-      exitCode = await runBody();
+      const outcome = await runBody();
+      exitCode = outcome.code;
+      timedOut = outcome.timedOut;
     }
 
     // The timer queue runs to termination BEFORE the output is read, and before the continuation drain: a callback that

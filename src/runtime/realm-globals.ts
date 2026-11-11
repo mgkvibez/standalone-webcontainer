@@ -11,6 +11,8 @@
  * point of the list existing.
  */
 
+import { countedWebAssembly } from "./async-work.js";
+
 /** Names taken from the host realm when the host has them. */
 const REALM_NAMES: readonly string[] = [
   // The intrinsics a global object is expected to expose. `Object` first, because that is the one whose absence was measured.
@@ -75,12 +77,18 @@ const REALM_NAMES: readonly string[] = [
  * Absence is tolerated rather than fatal (a browser without `SharedArrayBuffer` is a real browser), so a program sees a smaller surface where the
  * host is smaller, and every name here is still one this runtime is willing to lend.
  */
+
 export function createRealmGlobals(): Record<string, unknown> {
   const host = globalThis as unknown as Record<string, unknown>;
   const globals: Record<string, unknown> = {};
   for (const name of REALM_NAMES) {
     const value = host[name];
     if (value !== undefined) globals[name] = value;
+  }
+  // A wasm instantiation is real work that settles outside the timer queue, so the copy a program gets counts it. See async-work.ts: without the
+  // count the scheduler declared a program awaiting one finished after a single turn, and reported exit 0 for a build that produced nothing.
+  if (typeof globals["WebAssembly"] === "object" && globals["WebAssembly"] !== null) {
+    globals["WebAssembly"] = countedWebAssembly(globals["WebAssembly"] as object);
   }
   return globals;
 }
