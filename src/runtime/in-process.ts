@@ -23,6 +23,7 @@ import {
 import { PortRegistry } from "../network/port-registry.js";
 import { PreviewGateway } from "../network/preview-gateway.js";
 import { createFsShim, type FsShim } from "../shims/fs.js";
+import { watchUnhandledRejections } from "./unhandled-rejections.js";
 import { createCountedWatchSource } from "../vfs/watch-iterator.js";
 import { createLocalWatchSource, type WatchableFileSystem } from "../process/local-watch.js";
 import type { WatchSourcePort } from "../vfs/port.js";
@@ -273,6 +274,20 @@ export class InProcessRuntime implements Runtime {
       exitRequested = code;
       scheduler.abort();
     };
+
+    /**
+     * A rejection nobody handles is a program failure, and Node's default answer to one is exit 1, not a quiet death.
+     *
+     * Measured: vite called `process.exit(1)` from an async continuation nobody awaited. The rejection belonged to no promise the
+     * runtime held, so it escaped the program and killed the host process in Node, while a browser would have logged it as the page's
+     * own. Worse, the run had already been reported as `exit 0`. Registering the host's `unhandledRejection` handler is what stops
+     * that crash, and the reason is reported in the same shape an uncaught exception gets, which is the shape Node prints.
+     */
+    const rejections = watchUnhandledRejections((reason: unknown) => {
+      const message = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+      stderr.write(`Uncaught ${message}\n`);
+      requestExit(1);
+    });
 
     /**
      * Wraps stdin's listeners so an exit thrown from one stays inside the run.
@@ -617,6 +632,9 @@ export class InProcessRuntime implements Runtime {
     // The program is over; its signal listeners go with it. The terminal stays (the caller owns it) but nothing from this run
     // is still attached to it, so the next resize cannot re-enter a scheduler that has already drained.
     processShim.dispose();
+    // The observer goes with the run for the same reason the signal listeners do: a leaked `unhandledRejection` listener would keep
+    // suppressing the host's own crash reporting for every run after this one.
+    rejections.stop();
 
     return {
       stdout: stdout.text,
