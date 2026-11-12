@@ -36,6 +36,20 @@ Deliberately **not** renamed:
 - **ADR decision ids** `D-1` upward. Two different ADRs both define a `D-1`, so a bare `D-1` is ambiguous: always write
   it with its ADR, as `ADR-0004 D-1`.
 
+## Renumbered 2026-11-12: the second ADR-0017
+
+Two files were both numbered **ADR-0017** — `ADR-0017.md` (preview origins, 2026-11-05) and
+`ADR-0017-persistence-model.md` (persistence layout, 2026-11-10) — which is exactly the collision this document exists
+to prevent, and it survived four days of use. The **later** one is now **ADR-0027**
+(`ADR-0027-persistence-model.md`). The preview ADR keeps `0017`, because it is the one referenced by filename elsewhere
+(`docs/p1/p1d-supervisor.md`) and by `ADR-0019`.
+
+Updated, where the reference meant persistence: `docs/audit/persistence-limits.md`, `src/browser/projects.ts`,
+`src/browser/workspace.ts`, `tests/browser/persistence-limits.spec.ts`, `tests/unit/projects.test.ts`, and the ADR's own
+title and body. Deliberately left as `ADR-0017`: `docs/decisions/ADR-0019.md` (both mentions are the preview ADR),
+`README.md` (preview/origin), `docs/p1/p1d-supervisor.md`. The rule for a future reader is the same one `D-*` needed:
+a bare ADR number is only unambiguous once the files are, so a title collision is a defect and not a detail.
+
 `ADR-0009` is hash-pinned by `tests/unit/harness.refusal-contract.test.ts`, which is why the annotation pass leaves it
 alone and why any future edit to it must update that hash deliberately.
 

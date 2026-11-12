@@ -1,7 +1,7 @@
 # Persistence: what localStorage actually does, measured
 
 **Date:** 2026-11-10. **Instrument:** `tests/browser/persistence-limits.spec.ts` (3 Playwright tests, Chromium, the same build the
-browser lane uses). **Scope:** measurement only. No persistence code was changed, and no option was chosen — that is ADR-0017's
+browser lane uses). **Scope:** measurement only. No persistence code was changed, and no option was chosen — that is ADR-0027's
 decision, listed at the end.
 
 ## Why measure before migrating
@@ -61,18 +61,18 @@ tab. Tab A still shows the project in its own memory, so from A's side nothing a
 
 This is the last-write-wins consequence of "the whole map is one key", not a bug in any single function.
 
-## Outcome (same day): ADR-0017
+## Outcome (same day): ADR-0027
 
-The owner chose **one key per project plus a `storage` listener** (ADR-0017). The measurements above are kept as written, because a
+The owner chose **one key per project plus a `storage` listener** (ADR-0027). The measurements above are kept as written, because a
 decision record should show what it was decided against; this section states what changed and how each finding now reads.
 
-| Finding | After ADR-0017 | Test |
+| Finding | After ADR-0027 | Test |
 |---|---|---|
 | A save rewrote every project | A save rewrites the changed project and the small index only | unit: write counts per key |
 | ~4.94 M chars capped the whole workspace | The ceiling is now per project: one large project no longer costs the others | measurement unchanged, blast radius narrowed |
 | Two tabs silently deleted each other's projects | A change reaches the other tab, which adopts it and says `changed in another tab`; both projects survive concurrent saves | browser: two tabs converging |
 | A failed save leaves memory ahead of storage | Unchanged, and still reported. A project larger than the ceiling still fails loudly | browser: quota fill test |
-| Two tabs creating a project at the same instant still lost one | Closed the same day: random ids, a union index write, and a repair when an arriving list omits a live project. This was the residual the ADR had accepted, and closing it found two more defects (see the ADR-0017 amendment) | browser: "two tabs creating at the same instant" (asserts convergence, because the repair is driven by the asynchronous event) |
+| Two tabs creating a project at the same instant still lost one | Closed the same day: random ids, a union index write, and a repair when an arriving list omits a live project. This was the residual the ADR had accepted, and closing it found two more defects (see the ADR-0027 amendment) | browser: "two tabs creating at the same instant" (asserts convergence, because the repair is driven by the asynchronous event) |
 
 The browser spec now asserts the fixed behaviour (a project created in one tab appears in the other; a same-project edit is adopted
 and announced) instead of printing a loss, and it also migrates a real v1 workspace and runs a program afterwards.
@@ -96,7 +96,7 @@ the ceiling reports an error, while a second tab loses work with no signal at al
 
 ## Not decided here
 
-Per the charter, an ambiguous design choice stops for the owner. ADR-0017 needs one decision — which row of the table above — and
+Per the charter, an ambiguous design choice stops for the owner. ADR-0027 needs one decision — which row of the table above — and
 the recommendation on the evidence is "one key per project plus a `storage` listener" first, because it removes both silent losses
 for a fraction of the migration cost, and defers the async rewrite to when someone actually needs files larger than the ceiling.
 

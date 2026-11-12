@@ -6,7 +6,7 @@
  * project's files because the host is reseeded from exactly one project's map each time.
  *
  * Storage is `localStorage`, synchronously: one key per project, plus a small index key naming the projects and the active one.
- * That split is ADR-0017, and it exists because of two measured failures of the single-key layout (docs/audit/persistence-limits.md):
+ * That split is ADR-0027, and it exists because of two measured failures of the single-key layout (docs/audit/persistence-limits.md):
  * a save rewrote every project, so one large project could exhaust the quota for all of them, and two tabs each rewrote the whole
  * map from their own stale copy, silently deleting each other's projects.
  *

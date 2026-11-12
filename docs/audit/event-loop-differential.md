@@ -1,5 +1,9 @@
 # Event-loop differential: what this runtime actually does versus Node
 
+> **Correction, 2026-11-12.** The 3 of 7 below was the state BEFORE the nextTick and settle-order fixes. The live result is **7 of 7**
+> (`npm run diff:event-loop`), as ADR-0013 records. This file is kept as written because it documents how the deviations were found;
+> the number in it is history, not status. See `docs/audit/remaining-work.md` (W-9).
+
 **Date:** 2026-11-08
 **Instrument:** `tools/differential/event-loop.ts` (`npm run diff:event-loop`)
 **Verdict:** 3 of 7 cases match real Node. The audit's third correction is confirmed with measurements, not opinion.

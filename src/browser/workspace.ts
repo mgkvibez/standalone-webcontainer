@@ -606,7 +606,7 @@ export function createWorkspace(options: WorkspaceOptions): Workspace {
   //
   // Without this listener the measured failure was silent data loss: each tab held the whole map, read storage only at boot, and
   // rewrote it from its own stale copy, so the second tab to save deleted the first tab's project with no notice to either
-  // (docs/audit/persistence-limits.md). ADR-0017 splits the map per project and adds this listener, so a change now arrives here
+  // (docs/audit/persistence-limits.md). ADR-0027 splits the map per project and adds this listener, so a change now arrives here
   // instead of being overwritten.
   window.addEventListener("storage", (event) => {
     const wasActive = store.activeId();

@@ -1,4 +1,4 @@
-# ADR-0017: Persistence layout — one key per project, plus a reconciliation listener
+# ADR-0027: Persistence layout — one key per project, plus a reconciliation listener
 
 **Status:** Accepted (owner decision, 2026-11-10). **Supersedes:** the single-key `swc.projects.v1` layout described in ADR-0003's
 persistence note. **Depends on:** `docs/audit/persistence-limits.md` (the measurements that forced the decision).

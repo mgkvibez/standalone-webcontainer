@@ -81,7 +81,7 @@ describe("ProjectStore preview identity", () => {
     const previewIds = store.projects().map((project) => project.previewId);
     expect(new Set(previewIds).size).toBe(4);
     expect(previewIds.every((id) => /^[a-f0-9]{32}$/.test(id))).toBe(true);
-    // ADR-0017: migration writes the v2 layout and only then drops the legacy key, so the repaired ids have to be found through
+    // ADR-0027: migration writes the v2 layout and only then drops the legacy key, so the repaired ids have to be found through
     // the index and the per-project keys rather than in the old single key.
     expect(storage.getItem(STORAGE_KEY)).toBeNull();
     expect(readStoredPreviewIds(storage)).toEqual(previewIds);
@@ -89,12 +89,12 @@ describe("ProjectStore preview identity", () => {
 });
 
 /**
- * ADR-0017: one key per project, an index, and reconciliation with other tabs.
+ * ADR-0027: one key per project, an index, and reconciliation with other tabs.
  *
  * These tests exist because the layout's whole purpose is two properties that a passing happy path does not show: a save costs
  * one project, and another tab's change reaches this tab instead of being overwritten by it.
  */
-describe("ProjectStore persistence layout (ADR-0017)", () => {
+describe("ProjectStore persistence layout (ADR-0027)", () => {
   const loadWith = (storage: MemoryStorage, count: number): ProjectStore => {
     const store = ProjectStore.load(storage);
     for (let index = 1; index < count; index += 1) store.create(`project ${index + 1}`);
