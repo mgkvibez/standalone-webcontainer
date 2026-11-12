@@ -17,13 +17,17 @@ import { SyscallClient } from "./syscall-channel.js";
 import { createRemoteFileSystem } from "./remote-fs.js";
 import { PortRegistry, type ServeProtocol } from "../network/port-registry.js";
 import type {
+  KernelToProcessMessage,
   MessagePortLike,
   ProcessToKernelMessage,
   TransportEvent,
   TransportEventMessage,
   TransportReplyMessage,
   TransportRequestMessage,
+  TransportSocketOpenMessage,
+  TransportSocketUpstreamMessage,
 } from "./process-transport.js";
+import { relaySocket } from "./process-transport.js";
 import { createRemoteWatcher, realTimerScheduler } from "./remote-watch.js";
 import { InProcessRuntime } from "../runtime/in-process.js";
 import { createTerminal, type Terminal } from "../terminal/pty.js";
@@ -209,11 +213,55 @@ async function run(start: StartMessage): Promise<void> {
  */
 function attachTransport(transport: MessagePortLike | undefined, runtime: InProcessRuntime): void {
   if (transport === undefined) return;
+  /** Connections the kernel opened, by id, so a byte can find the socket it belongs to. */
+  const relayed = new Map<number, (message: { readonly type: string; readonly data?: unknown; readonly reason?: unknown }) => void>();
   transport.onmessage = (event) => {
-    const message = event.data as TransportRequestMessage | undefined;
-    if (message === undefined || message.type !== "transport-request") return;
+    const message = event.data as KernelToProcessMessage | undefined;
+    if (message === undefined) return;
+    if (message.type === "socket-open") {
+      accept(message, relayed);
+      return;
+    }
+    if (message.type === "socket-data" || message.type === "socket-end" || message.type === "socket-close") {
+      const deliver = relayed.get(message.id);
+      if (deliver === undefined) return;
+      if (message.type === "socket-close") relayed.delete(message.id);
+      // Narrowed explicitly: the union distinguishes the three by which fields they carry, and the relay reads them by name.
+      deliver({
+        type: message.type,
+        ...("data" in message ? { data: message.data } : {}),
+        ...("reason" in message ? { reason: message.reason } : {}),
+      });
+      return;
+    }
+    if (message.type !== "transport-request") return;
     void answer(message);
   };
+
+  /**
+   * Hand the connection to the program's own listener, through the same gateway a request goes through.
+   *
+   * The gateway's `upgrade` is the door ADR-0031 built, so nothing here re-implements the routing decision: this Worker owns the port registry
+   * and the loader, and the gateway reads both. The refusal it returns is forwarded verbatim, because its two reasons ("nothing is listening"
+   * and "no upgrade listener") are what a user needs told apart.
+   */
+  function accept(
+    message: TransportSocketOpenMessage,
+    relayed: Map<number, (message: { readonly type: string; readonly data?: unknown; readonly reason?: unknown }) => void>,
+  ): void {
+    const result = runtime.gateway.upgrade({ protocol: "http", port: message.port, path: message.path }, message.headers);
+    if (!result.accepted) {
+      transport?.postMessage({ type: "socket-refused", id: message.id, reason: result.reason } satisfies TransportSocketUpstreamMessage);
+      return;
+    }
+    // `result.socket` is the kernel's end of the pair; the handler holds the other one. Relaying THIS end is what makes the two sides the same
+    // code, and it is also why the handler's `101` is not lost: it is already queued here, and attaching the listener drains it.
+    const deliver = relaySocket(result.socket, (reply) => transport?.postMessage(reply), message.id);
+    relayed.set(message.id, deliver);
+    // Accepted AFTER the relay is attached and BEFORE any byte can arrive: the kernel holds bytes until this message lands, so the ordering is
+    // what guarantees the handshake cannot be delivered to a socket whose reader was not listening yet.
+    transport?.postMessage({ type: "socket-accepted", id: message.id } satisfies TransportSocketUpstreamMessage);
+  }
 
   async function answer(message: TransportRequestMessage): Promise<void> {
     let reply: TransportReplyMessage;

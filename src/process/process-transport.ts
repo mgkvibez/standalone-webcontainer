@@ -20,6 +20,7 @@
  */
 
 import type { ServeProtocol } from "../network/port-registry.js";
+import { linkSockets, type Socket } from "../shims/socket.js";
 
 /** Default mount prefix, matching the preview gateway's `/preview/<port>/<path>`. */
 export const DEFAULT_TRANSPORT_MOUNT = "/preview";
@@ -106,7 +107,76 @@ export interface PortsMessage {
   readonly ports: readonly { readonly protocol: ServeProtocol; readonly port: number }[];
 }
 
-export type ProcessToKernelMessage = TransportReplyMessage | PortsMessage;
+/**
+ * Kernel to process: open a connection to a server this process owns, for a protocol switch.
+ *
+ * The same door `gateway.upgrade()` is in-process, moved to the other side of a thread boundary. It is a distinct message from
+ * `transport-request` because the shape is different in the one way that matters: a request has an answer and an end, a connection stays open
+ * and both sides speak whenever they like.
+ */
+export interface TransportSocketOpenMessage {
+  readonly type: "socket-open";
+  readonly id: number;
+  readonly port: number;
+  readonly path: string;
+  readonly headers: Readonly<Record<string, string>>;
+}
+
+/** Kernel to process, after the open. */
+export type TransportSocketDownstreamMessage =
+  | TransportSocketOpenMessage
+  | { readonly type: "socket-data"; readonly id: number; readonly data: Uint8Array }
+  | { readonly type: "socket-end"; readonly id: number }
+  | { readonly type: "socket-close"; readonly id: number; readonly reason?: string };
+
+/** Process to kernel: whether the switch was accepted, then the same three events in the other direction. */
+export type TransportSocketUpstreamMessage =
+  | { readonly type: "socket-accepted"; readonly id: number }
+  | { readonly type: "socket-refused"; readonly id: number; readonly reason: string }
+  | { readonly type: "socket-data"; readonly id: number; readonly data: Uint8Array }
+  | { readonly type: "socket-end"; readonly id: number }
+  | { readonly type: "socket-close"; readonly id: number; readonly reason?: string };
+
+/** What an upgrade attempt came to: either the far side accepted and here is one end, or why it did not. */
+export type TransportUpgradeResult = { readonly accepted: true; readonly socket: Socket } | { readonly accepted: false; readonly reason: string };
+
+export type ProcessToKernelMessage = TransportReplyMessage | PortsMessage | TransportSocketUpstreamMessage;
+
+export type KernelToProcessMessage = TransportRequestMessage | TransportSocketDownstreamMessage;
+
+/**
+ * Relay one end of a connection over messages, in both directions.
+ *
+ * Symmetric on purpose: the kernel and the process Worker run this same function, which is the only way to be sure the two sides agree about
+ * ordering and about what `end` means. The caller passes the end IT holds; the peer of that end is the reader or writer on the far side of the
+ * thread boundary.
+ *
+ * The bytes a peer wrote before this was called are delivered, not lost, and that is load-bearing rather than tidy. A `dispatchUpgrade` handler
+ * writes its `101` SYNCHRONOUSLY, inside the call that hands it the connection, so those bytes are already queued in this end by the time a
+ * relay can be attached. Attaching the `data` listener drains them — Node's flowing-mode switch, which `Socket` reproduces — so the handshake
+ * reaches the client that is waiting for it. An implementation that read the queue only on future writes would present as a connection that
+ * opened and then said nothing.
+ */
+export function relaySocket(socket: Socket, post: (message: TransportSocketUpstreamMessage) => void, id: number): (message: { readonly type: string; readonly data?: unknown; readonly reason?: unknown }) => void {
+  socket.on("data", (chunk: unknown) => post({ type: "socket-data", id, data: chunk as Uint8Array }));
+  socket.on("end", () => post({ type: "socket-end", id }));
+  socket.on("close", () => post({ type: "socket-close", id }));
+  return (message) => {
+    // Every inbound message is written INTO this end rather than somewhere else, because the peer is whatever the local side linked: on the
+    // process side that is the handler's own socket, on the kernel side it is the client. One call, and neither side knows which it is.
+    if (message.type === "socket-data") {
+      if (message.data instanceof Uint8Array) socket.write(message.data);
+      return;
+    }
+    if (message.type === "socket-end") {
+      socket.end();
+      return;
+    }
+    if (message.type === "socket-close") {
+      socket.destroy(message.reason === undefined ? undefined : new Error(String(message.reason)));
+    }
+  };
+}
 
 /** The slice of `MessagePort` this module needs. Narrow so a test can supply a pair without a browser. */
 export interface MessagePortLike {
@@ -124,6 +194,20 @@ export interface ProcessTransportOptions {
 interface Peer {
   readonly port: MessagePortLike;
   ports: readonly { readonly protocol: ServeProtocol; readonly port: number }[];
+}
+
+/** A connection that the far side accepted, with the relay that feeds it. */
+interface OpenConnection {
+  readonly pid: number;
+  readonly socket: Socket;
+  readonly deliver: (message: { readonly type: string; readonly data?: unknown; readonly reason?: unknown }) => void;
+}
+
+interface OpeningConnection {
+  readonly pid: number;
+  readonly socket: Socket;
+  readonly settle: (result: TransportUpgradeResult) => void;
+  readonly timer: ReturnType<typeof setTimeout>;
 }
 
 interface Pending {
@@ -185,6 +269,10 @@ export class ProcessTransportError extends Error {
  */
 export class ProcessTransportBroker {
   readonly #peers = new Map<number, Peer>();
+  /** Open connections, by their own id space: a request id and a connection id answering to different maps is what keeps one from settling the other. */
+  readonly #open = new Map<number, OpenConnection>();
+  readonly #opening = new Map<number, OpeningConnection>();
+  #nextSocketId = 1;
   readonly #pending = new Map<number, Pending>();
   #nextId = 1;
   readonly #timeoutMs: number;
@@ -235,6 +323,61 @@ export class ProcessTransportBroker {
   }
 
   /**
+   * Open a connection to the server a process owns on `port`, for a protocol switch.
+   *
+   * Asynchronous where the in-process `gateway.upgrade()` is synchronous, and for an honest reason: the listener lives in another global, so
+   * the answer has to come back as a message. The refusal wording matches the gateway's, because a user meets both as the same sentence.
+   *
+   * The socket is created BEFORE the request is sent, so bytes the handler writes inside its `upgrade` handler have somewhere to land: a
+   * handshake written synchronously is the ordinary case, and it would otherwise arrive for a connection the kernel had not built yet.
+   */
+  upgrade(port: number, path: string, headers: Readonly<Record<string, string>>): Promise<TransportUpgradeResult> {
+    const pid = this.ownerOf(port);
+    const peer = pid === undefined ? undefined : this.#peers.get(pid);
+    if (pid === undefined || peer === undefined) {
+      return Promise.resolve({ accepted: false, reason: `No preview server is listening on port ${port}. Start one with server.listen(${port}).` });
+    }
+    const transport = peer.port;
+    const id = this.#nextSocketId;
+    this.#nextSocketId += 1;
+    // A linked pair, so the client holds one end and the relay watches the other. That is what makes this function the SAME code the process
+    // Worker runs: a peerless socket would need a second mechanism for the outbound direction, and two mechanisms are two orderings.
+    const { local, remote } = linkSockets();
+    const socket = remote;
+    let live = true;
+    const deliver = relaySocket(local, (message) => {
+      // A connection to a detached process is closed, not written into: the port's owner is gone and its onmessage is null.
+      if (live) transport.postMessage(message);
+    }, id);
+
+    return new Promise<TransportUpgradeResult>((resolve) => {
+      const timer = setTimeout(() => {
+        // The far side never said yes or no. Both maps drop the entry and the socket is destroyed, so nothing is left waiting for a
+        // connection that will not be accepted.
+        this.#opening.delete(id);
+        this.#open.delete(id);
+        socket.destroy();
+        resolve({ accepted: false, reason: `port ${port} did not accept the upgrade within ${this.#timeoutMs} ms` });
+      }, this.#timeoutMs);
+      this.#opening.set(id, { pid, socket, settle: resolve, timer });
+      this.#open.set(id, { pid, socket, deliver });
+      const message: TransportSocketOpenMessage = { type: "socket-open", id, port, path, headers };
+      transport.postMessage(message);
+    });
+  }
+
+  /** Close a connection the kernel opened, telling the process rather than leaving it to notice. */
+  closeSocket(socket: Socket): void {
+    for (const [id, connection] of this.#open) {
+      if (connection.socket !== socket) continue;
+      this.#open.delete(id);
+      this.#opening.delete(id);
+      this.#peers.get(connection.pid)?.port.postMessage({ type: "socket-close", id } satisfies TransportSocketDownstreamMessage);
+      return;
+    }
+  }
+
+  /**
    * Drop a process. Any request waiting on it fails NOW rather than at its deadline: the process is gone, so waiting is
    * waiting for something that cannot arrive, and a killed server should read as "nothing is listening" immediately.
    */
@@ -243,6 +386,20 @@ export class ProcessTransportBroker {
     if (peer === undefined) return;
     peer.port.onmessage = null;
     this.#peers.delete(pid);
+    // A connection to a dead process is not idle, it is over. Destroying it here is what makes the client see `close` instead of waiting
+    // for a frame that can never arrive.
+    for (const [id, connection] of [...this.#open]) {
+      if (connection.pid !== pid) continue;
+      this.#open.delete(id);
+      this.#opening.delete(id);
+      connection.socket.destroy();
+    }
+    for (const [id, opening] of [...this.#opening]) {
+      if (opening.pid !== pid) continue;
+      this.#opening.delete(id);
+      clearTimeout(opening.timer);
+      opening.settle({ accepted: false, reason: `The process serving this port (pid ${pid}) has stopped.` });
+    }
     for (const [id, pending] of this.#pending) {
       if (this.#waitingFor.get(id) !== pid) continue;
       this.#waitingFor.delete(id);
@@ -257,6 +414,9 @@ export class ProcessTransportBroker {
 
   close(): void {
     for (const pid of [...this.#peers.keys()]) this.detach(pid);
+    for (const opening of this.#opening.values()) clearTimeout(opening.timer);
+    this.#opening.clear();
+    this.#open.clear();
     for (const [id, pending] of this.#pending) {
       clearTimeout(pending.timer);
       this.#pending.delete(id);
@@ -323,6 +483,7 @@ export class ProcessTransportBroker {
       readonly response?: unknown;
       readonly reason?: unknown;
       readonly event?: unknown;
+      readonly data?: unknown;
     };
     if (message.type === "ports") {
       if (!Array.isArray(message.ports)) return;
@@ -336,6 +497,31 @@ export class ProcessTransportBroker {
           return [{ protocol, port }];
         }),
       );
+      return;
+    }
+    if (message.type === "socket-accepted" || message.type === "socket-refused") {
+      if (typeof message.id !== "number") return;
+      const opening = this.#opening.get(message.id);
+      if (opening === undefined) return;
+      clearTimeout(opening.timer);
+      this.#opening.delete(message.id);
+      if (message.type === "socket-accepted") {
+        opening.settle({ accepted: true, socket: opening.socket });
+        return;
+      }
+      // A refusal is a finished connection, not a waiting one: the socket is destroyed so a client that ignored the refusal sees `close`
+      // rather than a connection that never says anything.
+      this.#open.delete(message.id);
+      opening.socket.destroy();
+      opening.settle({ accepted: false, reason: typeof message.reason === "string" ? message.reason : "the process refused the upgrade" });
+      return;
+    }
+    if (message.type === "socket-data" || message.type === "socket-end" || message.type === "socket-close") {
+      if (typeof message.id !== "number") return;
+      const connection = this.#open.get(message.id);
+      if (connection === undefined) return;
+      if (message.type === "socket-close") this.#open.delete(message.id);
+      connection.deliver({ type: message.type, data: message.data, reason: message.reason });
       return;
     }
     if (message.type === "transport-event") {

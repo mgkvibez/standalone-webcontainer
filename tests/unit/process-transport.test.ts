@@ -365,3 +365,130 @@ describe("streaming through the broker", () => {
     expect(chunks[0]?.byteLength).toBe(0);
   });
 });
+
+/**
+ * The upgrade path across the boundary.
+ *
+ * A message port rather than a real Worker, on purpose: the crossing is what is under test, and a fake process end can be made to refuse, to
+ * stall and to speak in a precise order, which a real program would only do by being broken in exactly the right way. The real Worker is
+ * covered in the browser lane, where a program does its own handshake.
+ */
+describe("upgrade across the boundary", () => {
+  /** A process end that decides what to do with `socket-open` and records everything it is sent. */
+  function socketProcess(onOpen: (id: number, port: MessagePortLike) => void) {
+    const channel = new MessageChannel();
+    const sent: { type?: string; data?: Uint8Array }[] = [];
+    channel.port1.onmessage = (event: MessageEvent) => {
+      const message = event.data as { type?: string; id?: number; data?: Uint8Array };
+      sent.push(message);
+      if (message.type === "socket-open" && typeof message.id === "number") onOpen(message.id, channel.port1 as unknown as MessagePortLike);
+    };
+    return { channel, sent };
+  }
+
+  const attach = (broker: ProcessTransportBroker, port: MessagePortLike): void => {
+    broker.attach(7, port);
+    broker.setPorts(7, [{ protocol: "http", port: 3200 }]);
+  };
+
+  it("refuses a port nobody serves, in the gateway's own words", async () => {
+    const broker = new ProcessTransportBroker();
+    const result = await broker.upgrade(4999, "/live", {});
+    expect(result.accepted).toBe(false);
+    if (result.accepted) return;
+    // Shared with `handle`'s 503 on purpose: a user meets both and should read one sentence.
+    expect(result.reason).toContain("No preview server is listening on port 4999");
+  });
+
+  it("forwards the process's refusal verbatim", async () => {
+    const broker = new ProcessTransportBroker();
+    const process = socketProcess((id, port) => port.postMessage({ type: "socket-refused", id, reason: "port 3200 has no upgrade listener" }));
+    attach(broker, process.channel.port2 as unknown as MessagePortLike);
+
+    const result = await broker.upgrade(3200, "/live", {});
+    expect(result.accepted).toBe(false);
+    if (result.accepted) return;
+    expect(result.reason).toContain("no upgrade listener");
+  });
+
+  it("carries bytes both ways once accepted, including a write that arrives before the acceptance", async () => {
+    const broker = new ProcessTransportBroker();
+    const process = socketProcess((id, port) => {
+      // The 101 lands BEFORE the acceptance, which is what a handler writing its handshake synchronously produces. Dropping it would present
+      // as a connection that opened and then said nothing.
+      port.postMessage({ data: new TextEncoder().encode("101 Switching Protocols"), type: "socket-data", id });
+      port.postMessage({ type: "socket-accepted", id });
+    });
+    attach(broker, process.channel.port2 as unknown as MessagePortLike);
+
+    const result = await broker.upgrade(3200, "/live", {});
+    expect(result.accepted).toBe(true);
+    if (!result.accepted) return;
+
+    const received: string[] = [];
+    result.socket.on("data", (chunk: unknown) => received.push(decode(chunk as Uint8Array)));
+    // Attaching a listener drains what queued while there was none, the same rule an in-thread pair relies on.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(received.join("")).toBe("101 Switching Protocols");
+
+    result.socket.write("frame-bytes");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const data = process.sent.filter((message) => message.type === "socket-data");
+    expect(data.length).toBe(1);
+    expect(decode(data[0]?.data ?? new Uint8Array())).toBe("frame-bytes");
+  });
+
+  it("passes a half-close through in both directions", async () => {
+    const broker = new ProcessTransportBroker();
+    const process = socketProcess((id, port) => {
+      port.postMessage({ type: "socket-accepted", id });
+      // A server that answers and hangs up: the client must see `end` rather than a connection that stays open forever.
+      port.postMessage({ data: new TextEncoder().encode("bye"), type: "socket-data", id });
+      port.postMessage({ type: "socket-end", id });
+    });
+    attach(broker, process.channel.port2 as unknown as MessagePortLike);
+
+    const result = await broker.upgrade(3200, "/live", {});
+    expect(result.accepted).toBe(true);
+    if (!result.accepted) return;
+    const events: string[] = [];
+    result.socket.on("data", () => events.push("data"));
+    result.socket.on("end", () => events.push("end"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events).toEqual(["data", "end"]);
+
+    result.socket.end();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(process.sent.some((message) => message.type === "socket-end")).toBe(true);
+  });
+
+  it("refuses rather than waiting forever when the open is never answered", async () => {
+    const broker = new ProcessTransportBroker({ timeoutMs: 40 });
+    // A process that takes the message and says nothing: the shape of a Worker wedged in the program it is running.
+    const process = socketProcess(() => {});
+    attach(broker, process.channel.port2 as unknown as MessagePortLike);
+
+    const result = await broker.upgrade(3200, "/live", {});
+    expect(result.accepted).toBe(false);
+    if (result.accepted) return;
+    expect(result.reason).toContain("did not accept the upgrade within 40 ms");
+  });
+
+  it("fails an open connection the moment its process is dropped", async () => {
+    const broker = new ProcessTransportBroker();
+    const process = socketProcess((id, port) => port.postMessage({ type: "socket-accepted", id }));
+    attach(broker, process.channel.port2 as unknown as MessagePortLike);
+
+    const result = await broker.upgrade(3200, "/live", {});
+    expect(result.accepted).toBe(true);
+    if (!result.accepted) return;
+
+    const closed: string[] = [];
+    result.socket.on("close", () => closed.push("close"));
+    broker.detach(7);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // A connection to a dead process is over, not idle: waiting is waiting for something that cannot arrive.
+    expect(closed).toEqual(["close"]);
+    expect(result.socket.destroyed).toBe(true);
+  });
+});

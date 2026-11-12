@@ -28,9 +28,11 @@ import {
   ProcessTransportBroker,
   type MessagePortLike,
   type TransportSink,
+  type TransportUpgradeResult,
   type TransportWireRequest,
   type TransportWireResponse,
 } from "./process-transport.js";
+import type { Socket } from "../shims/socket.js";
 
 export interface ProcessKernelOptions {
   /** Seed files, written before any process starts. Paths are absolute; parents are created. */
@@ -288,6 +290,21 @@ export class ProcessKernel {
   /** Forward a preview request to the process that owns the port. Never throws: every failure is a status code. */
   transport(request: TransportWireRequest, sink?: TransportSink): Promise<TransportWireResponse> {
     return this.#broker.handle(request, sink);
+  }
+
+  /**
+   * Open a connection to the server a process owns, for a protocol switch.
+   *
+   * The same door `gateway.upgrade()` is inside one runtime, moved across the thread boundary. Never throws: a port nobody serves is a
+   * refusal with the sentence the gateway would have used.
+   */
+  upgrade(port: number, path: string, headers: Readonly<Record<string, string>>): Promise<TransportUpgradeResult> {
+    return this.#broker.upgrade(port, path, headers);
+  }
+
+  /** Tell a process a connection is finished, rather than leaving its handler writing into a socket nobody reads. */
+  closeSocket(socket: Socket): void {
+    this.#broker.closeSocket(socket);
   }
 
   kill(pid: number, reason = "killed"): boolean {
