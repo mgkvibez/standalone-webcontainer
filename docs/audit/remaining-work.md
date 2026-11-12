@@ -5,8 +5,9 @@ against this tree rather than copied from it. **This file is the list.** An item
 then says which commit and which evidence, so the register stays a record of what was true rather than a wish list.
 
 **Snapshot caveat.** The audit reviewed `0a97bf7d-standalone-webcontainer-main1.zip`, a snapshot with no `.git`, pinned at 1,263
-unit tests and TS 5.9.3. Main today is **1,345 tests across 98 files** (see the badge in `README.md`). Four things it lists as open
-are already closed since that snapshot, and are recorded here so nobody reopens them:
+unit tests and TS 5.9.3. Main today is **1,433 tests across 103 files** (see the badge in `README.md`). Four things it lists as open
+are already closed since that snapshot, and are recorded here so nobody reopens them (plus W-26, closed on 2026-11-12 while the register was
+being worked):
 
 | Already closed | Where |
 | --- | --- |
@@ -14,9 +15,14 @@ are already closed since that snapshot, and are recorded here so nobody reopens 
 | Outbound HTTP decided and refused by name | ADR-0025 |
 | The link model decided: tree, no link layer, refused by name | ADR-0026 |
 | `utimesSync`/`utimes`/`lutimes`/`promises.utimes` made real (seconds → milliseconds in one place) | ADR-0026 |
+| W-26 Vite's HMR loop driven through the product: an edit made in the editor reaches a running dev server and the open page applies it without a reload | ADR-0034, `tests/browser/dev-server-hmr.spec.ts` |
+| `fs.watch` reaches a program at all: the kernel constructs the watch registry (it previously refused by name while every watch test passed) | ADR-0034 |
+| A running server's ports are reported while it runs, so the preview button exists for a server | ADR-0034 |
+| The preview is a panel beside the editor, not a dialog over it | ADR-0034 |
+| The HMR *shape* (upgrade listener answering a subprotocol, a watched module, a push per change) run end to end through the preview; Vite the package still cannot run because the container has no registry | ADR-0034, `tests/browser/dev-server-hmr.spec.ts` |
 
-Two of the audit's own claims are worth restating because I checked them: `src/process/*` really has **zero** importers outside tests
-and benchmarks, and the two ADR-0017 files really do both exist. Its "live registry lane exists" row needs one qualifier the audit
+Two of the audit's own claims were worth restating because I checked them: `src/process/*` had **zero** importers outside tests and
+benchmarks when the register was written (W-1 closed that, ADR-0029), and the two ADR-0017 files really do both exist. Its "live registry lane exists" row needs one qualifier the audit
 could not know without the product path: the **page** still installs from the committed `@corpus/*` only (`src/browser/main.ts:19`
 loads `loadOfflineRegistry`), and the network/snapshot lanes belong to the fixture runner.
 
@@ -85,4 +91,3 @@ loads `loadOfflineRegistry`), and the network/snapshot lanes belong to the fixtu
   (hoisting), W-13's lifecycle-script policy, W-6/W-20 (the domain), and W-8 (freezing).
 | W-24 | A websocket could not cross into a process Worker | **Done 2026-11-12 (ADR-0032).** `ProcessTransportBroker.upgrade(port, path, headers)` sends `socket-open` to the process that owns the port, the process Worker hands the connection to the program's own listener through `gateway.upgrade`, and `relaySocket` — ONE function, run on both sides — posts `socket-data`/`socket-end`/`socket-close` under its own id space. The kernel links the pair BEFORE sending the open, so a handler's synchronously written `101` (or whatever protocol it switches to) has a socket to land in. The `WebSocketConnector` may now answer asynchronously, because across a thread boundary the acceptance IS a message. Proven by six unit tests over real `MessageChannel`s and `tests/browser/process-websocket.spec.ts` (a program in a process Worker computing its own accept key, client on the kernel side), with two mutations caught. | Closed. |
 | W-25 | A preview page cannot open a websocket, so a dev server can be previewed but not watched live | **Done 2026-11-12 (ADR-0033).** `public/preview-ws-client.js` is injected into every HTML document the preview serves, as the bytes stream (only a tag-length tail is held, so a `</head>` split across chunks still matches). The page's `WebSocket` is a facade over three page messages and four replies and frames nothing: `src/browser/socket-relay.ts` decides which URLs a page may open (its own host, the port from the URL when it names one because Vite asks for `ws://host:5173/`), and the runtime Worker hands the open to the container's own tested client via `kernel.upgrade`, so one framing implementation serves both. Three defects found on the way: the container client sent a subprotocol and never recorded the server's choice (and now fails the connection when the server names one that was not offered), a Blob-delivered frame silently became zero bytes (`binaryType` is now `arraybuffer` and the page client refuses a body it cannot turn into bytes), and the facade's `EventTarget.call(this)` was an illegal constructor. Proven by 25 unit tests and `tests/browser/preview-websocket.spec.ts`, where a real iframe runs the served client against a real program in a process Worker. | Closed. |
-| W-26 | Vite's HMR loop has never been run through the preview | W-25 proved a previewed page can open a socket to a program in a process Worker, with text, binary, subprotocol and a clean close. It did not run a real dev server: Vite's HMR client reconnects with `ws://host:5173/`, asks for the `vite-hmr` subprotocol, and applies an update from a message that crosses all four boundaries at once. Until that runs, "a dev server can be watched live" is an inference from parts rather than a measurement. | Run `vite` inside the container in the browser lane, edit a file through the project mirror and assert the page updates without a reload. | Open. |

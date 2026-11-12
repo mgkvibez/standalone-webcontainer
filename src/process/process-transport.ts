@@ -189,6 +189,12 @@ export interface ProcessTransportOptions {
   /** How long a forwarded request may wait. Matches the preview gateway's own default so a caller sees one number. */
   readonly timeoutMs?: number;
   readonly mountPath?: string;
+  /**
+   * Ports a process reported, announced when it reports them.
+   *
+   * A server that keeps serving never settles its run, so a preview list cannot wait for a result to learn its ports (ADR-0034).
+   */
+  readonly onPorts?: (pid: number, ports: readonly { readonly protocol: ServeProtocol; readonly port: number }[]) => void;
 }
 
 interface Peer {
@@ -269,6 +275,8 @@ export class ProcessTransportError extends Error {
  */
 export class ProcessTransportBroker {
   readonly #peers = new Map<number, Peer>();
+  /** Who to tell when a process reports its ports. A list, not one hook: the kernel forwards and a test may observe. */
+  readonly #portListeners = new Set<(pid: number, ports: readonly { readonly protocol: ServeProtocol; readonly port: number }[]) => void>();
   /** Open connections, by their own id space: a request id and a connection id answering to different maps is what keeps one from settling the other. */
   readonly #open = new Map<number, OpenConnection>();
   readonly #opening = new Map<number, OpeningConnection>();
@@ -280,6 +288,7 @@ export class ProcessTransportBroker {
 
   constructor(options: ProcessTransportOptions = {}) {
     this.#timeoutMs = options.timeoutMs ?? 30_000;
+    if (options.onPorts !== undefined) this.#portListeners.add(options.onPorts);
     this.#mountPath = options.mountPath ?? DEFAULT_TRANSPORT_MOUNT;
   }
 
@@ -294,6 +303,16 @@ export class ProcessTransportBroker {
   /** Feed a raw `ports` message from a process. Validation lives here, so one message cannot be trusted in two places. */
   accept(pid: number, data: unknown): void {
     this.#onMessage(pid, data);
+  }
+
+  /**
+   * Where a port report is ANNOUNCED, as opposed to where it is validated.
+   *
+   * Announced from this funnel rather than from `accept`, because a real process's report arrives on its own MessagePort and never passes
+   * through `accept` at all: a hook there fires for the kernel's tests and never for a program.
+   */
+  onPorts(listener: (pid: number, ports: readonly { readonly protocol: ServeProtocol; readonly port: number }[]) => void): void {
+    this.#portListeners.add(listener);
   }
 
   /** Replace a process's port list. Idempotent: a Worker that reports the same list twice is not an error. */
@@ -487,16 +506,17 @@ export class ProcessTransportBroker {
     };
     if (message.type === "ports") {
       if (!Array.isArray(message.ports)) return;
-      this.setPorts(
-        pid,
-        message.ports.flatMap((entry: unknown) => {
-          if (typeof entry !== "object" || entry === null) return [];
-          const { protocol, port } = entry as { readonly protocol?: unknown; readonly port?: unknown };
-          if (protocol !== "http" && protocol !== "https") return [];
-          if (typeof port !== "number" || !Number.isInteger(port)) return [];
-          return [{ protocol, port }];
-        }),
-      );
+      // Validated once and used twice, so the announcement and the peer's list can never disagree about what a process reported. The
+      // announcement does not depend on the peer still being attached, because a port report can arrive as its process is ending.
+      const reported = message.ports.flatMap((entry: unknown) => {
+        if (typeof entry !== "object" || entry === null) return [];
+        const { protocol, port } = entry as { readonly protocol?: unknown; readonly port?: unknown };
+        if (protocol !== "http" && protocol !== "https") return [];
+        if (typeof port !== "number" || !Number.isInteger(port)) return [];
+        return [{ protocol, port } satisfies { readonly protocol: ServeProtocol; readonly port: number }];
+      });
+      for (const listener of this.#portListeners) listener(pid, reported);
+      this.setPorts(pid, reported);
       return;
     }
     if (message.type === "socket-accepted" || message.type === "socket-refused") {

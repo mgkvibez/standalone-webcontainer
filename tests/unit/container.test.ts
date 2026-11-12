@@ -83,6 +83,8 @@ class FakeRuntime implements RuntimeClient {
   /** Every keystroke and resize the container forwarded, in order, so routing can be asserted rather than assumed. */
   readonly typed: { processId: number; text: string }[] = [];
   readonly resized: { processId: number; columns: number; rows: number }[] = [];
+  /** Saved files handed to the live filesystem, in order: the seam that lets a running program see an edit. */
+  readonly writes: { projectId: string; path: string; contents: string }[] = [];
   resets = 0;
   #hold: (() => void) | null = null;
 
@@ -92,6 +94,10 @@ class FakeRuntime implements RuntimeClient {
 
   resize(processId: number, columns: number, rows: number): void {
     this.resized.push({ processId, columns, rows });
+  }
+
+  writeFile(projectId: string, path: string, contents: string): void {
+    this.writes.push({ projectId, path, contents });
   }
 
   /** Releases a held run, so a test can keep a process alive while it types into it. */
@@ -702,5 +708,45 @@ describe("npm run", () => {
     const session = container.createSession();
     await container.execute(session.id, "npm run loop");
     expect(output(container, session.id).some((line) => line.includes("nested more than 8 deep"))).toBe(true);
+  });
+});
+
+describe("saving into a live project (W-26)", () => {
+  /**
+   * The kernel reads a project's files as a SNAPSHOT when a run starts, so a save made later never reaches a program that is already running
+   * unless the page hands it over. This is that seam: without it a dev server watches its module forever and hears nothing, which is exactly
+   * what the browser lane showed before it existed.
+   */
+  it("hands a save to the running project", async () => {
+    const { container, runtime } = containerWith();
+    const session = container.createSession("one");
+    await container.execute(session.id, "node index.js");
+
+    container.pushFile("/app.js", "document.title = v2;");
+
+    // The project id the run was started with, so the write lands in the same kernel the program is running in.
+    expect(runtime.writes).toEqual([
+      { projectId: "test-project", path: "/app.js", contents: "document.title = v2;" },
+    ]);
+  });
+
+  it("drops a save made before anything was running, because the next run carries it", () => {
+    const { container, runtime } = containerWith();
+
+    container.pushFile("/app.js", "v1");
+
+    // Not a swallowed error: the first run sends the whole snapshot, so a live write here would have nowhere to go.
+    expect(runtime.writes).toEqual([]);
+  });
+
+  it("sends later saves to the same live project", async () => {
+    const { container, runtime } = containerWith();
+    const session = container.createSession("one");
+    await container.execute(session.id, "node index.js");
+
+    container.pushFile("/app.js", "v2");
+    container.pushFile("/app.js", "v3");
+
+    expect(runtime.writes.map((write) => write.contents)).toEqual(["v2", "v3"]);
   });
 });

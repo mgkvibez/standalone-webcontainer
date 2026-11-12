@@ -20,7 +20,15 @@ import { ProcessKernel } from "../process/process-kernel.js";
 import type { TransportEvent } from "../process/process-transport.js";
 import { createProjectMirror } from "../process/project-mirror.js";
 import type { ProjectFileContents } from "../container/types.js";
-import type { ClientMessage, RunRequest, ServerMessage, SocketClose, SocketOpen, TransportMessage } from "./protocol.js";
+import type {
+  ClientMessage,
+  RunRequest,
+  ServerMessage,
+  SocketClose,
+  SocketOpen,
+  TransportMessage,
+  WriteFileMessage,
+} from "./protocol.js";
 import { createWebSocketClass } from "../shims/websocket.js";
 
 interface WorkerScope {
@@ -53,6 +61,13 @@ const mirror = createProjectMirror();
  */
 const processByRun = new Map<number, number>();
 const runByPid = new Map<number, number>();
+/**
+ * pid → the page's process id, kept for the whole life of the PROCESS rather than the run.
+ *
+ * `processByRun` is cleared when a run settles, and a server's ports are reported after that, so a settle-scoped map would lose the only
+ * translation available exactly when it is needed.
+ */
+const processByPid = new Map<number, number>();
 const transportPorts = new Map<number, MessagePort>();
 /** Output collected per in-flight run, so the result reports exactly what the terminal was shown. */
 const capture = new Map<number, { stdout: string; stderr: string }>();
@@ -68,13 +83,33 @@ function activeKernel(projectId: string, files: Readonly<Record<string, ProjectF
     mirror.reset();
     processByRun.clear();
     runByPid.clear();
+    processByPid.clear();
   }
   if (kernel === null) {
-    kernel = new ProcessKernel({ onOutput: forwardOutput });
+    kernel = new ProcessKernel({
+      onOutput: forwardOutput,
+      // A server that keeps running never settles, so its ports have to travel the moment it reports them or the preview list never offers it.
+      onPorts: (pid, ports) => {
+        const processId = processByPid.get(pid);
+        if (processId !== undefined) post({ type: "ports", processId, ports });
+      },
+    });
     kernelProjectId = projectId;
   }
   mirror.sync(kernel, files);
   return kernel;
+}
+
+/**
+ * A saved file reaches the live filesystem, so a program already running can watch it change.
+ *
+ * Dropped when no kernel exists for the project: a save before the first run needs no live write, because that run carries the whole
+ * snapshot anyway. The write goes through the kernel's own `writeFile` so the change subscription fires and every watcher hears it.
+ */
+function handleWriteFile(message: WriteFileMessage): void {
+  if (kernel === null || kernelProjectId !== message.projectId) return;
+  if (message.path.length === 0 || !message.path.startsWith("/")) return;
+  kernel.writeFile(message.path, message.contents);
 }
 
 async function handleRun(request: RunRequest): Promise<void> {
@@ -92,6 +127,7 @@ async function handleRun(request: RunRequest): Promise<void> {
     });
     processByRun.set(request.processId, pid);
     runByPid.set(pid, request.id);
+    processByPid.set(pid, request.processId);
     const settled = await target.settled(pid);
     const ports = target.ports().filter((binding) => binding.pid === pid && binding.protocol === "http").map((binding) => binding.port);
     const collected = capture.get(request.id) ?? { stdout: "", stderr: "" };
@@ -392,6 +428,9 @@ scope.onmessage = (event: MessageEvent<ClientMessage>): void => {
       return;
     case "run":
       void handleRun(message);
+      return;
+    case "write-file":
+      handleWriteFile(message);
       return;
     case "connect-transport":
       attachTransport(message.id, message.port);

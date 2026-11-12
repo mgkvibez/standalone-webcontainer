@@ -57,12 +57,21 @@ export interface RuntimeClient {
   run(request: RuntimeRunRequest): Promise<RuntimeRunOutcome>;
   /** Typed text for a running program's stdin. Absent on a client that cannot deliver it, which the container treats as no stdin. */
   write?(processId: number, text: string): void;
+  /** A saved file, handed to the live filesystem so a running program can see the change without a restart. */
+  writeFile?(projectId: string, path: string, contents: string): void;
   /** A new window size for a running program. */
   resize?(processId: number, columns: number, rows: number): void;
   /** Hard stop. The only cancellation primitive the runtime offers, because a running script cannot be interrupted. */
   reset(): void;
   /** Stop the servers owned by a completed bootstrap process without discarding the project runtime. */
   stopServers?(ports: readonly number[]): void;
+  /**
+   * Ports a process is serving, as it reports them.
+   *
+   * A server that keeps serving never settles its run, so a caller that only learns ports from `run`'s outcome learns them never: this is the
+   * channel a preview list needs (ADR-0034).
+   */
+  onPorts?(listener: (processId: number, ports: readonly number[]) => void): () => void;
 }
 
 /**

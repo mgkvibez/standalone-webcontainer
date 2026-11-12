@@ -61,15 +61,16 @@
         </div>
         <div id="processes"></div>
       </section>
+
+      <section id="preview-overlay" hidden aria-label="Project preview">
+        <header><span id="preview-overlay-title">Preview</span><button id="close-preview" type="button">Close</button></header>
+        <iframe id="preview-frame" title="Project preview" sandbox="allow-scripts allow-forms allow-same-origin"></iframe>
+      </section>
     </div>
 
     <main id="preview-shell" hidden>
       <div id="preview-status">Starting preview…</div>
     </main>
-    <section id="preview-overlay" hidden aria-label="Project preview">
-      <header><span id="preview-overlay-title">Preview</span><button id="close-preview" type="button">Close</button></header>
-      <iframe id="preview-frame" title="Project preview" sandbox="allow-scripts allow-forms allow-same-origin"></iframe>
-    </section>
     <script type="module" src="/src/browser/entry.ts"></script>
   </body>
 </html>
