@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 
 import { createProcessShim } from "../../src/shims/process.js";
 import { createTerminal } from "../../src/terminal/pty.js";
+import { createOsShim } from "../../src/shims/os.js";
 
 describe("process listener registration", () => {
   it("fires a once listener exactly once and leaves an on listener registered", () => {
@@ -58,5 +59,19 @@ describe("process listener registration", () => {
     expect(shim.on("SIGWINCH", () => {})).toBe(shim);
     expect(shim.once("SIGWINCH", () => {})).toBe(shim);
     expect(shim.off("SIGWINCH", () => {})).toBe(shim);
+  });
+});
+
+describe("process.platform", () => {
+  it("reports linux, and os.platform agrees, because esbuild keys a package name on both", () => {
+    const shim = createProcessShim({ terminal: createTerminal(), argv: ["node", "/main.js"] });
+    const os = createOsShim({ platform: shim.platform, env: shim.env });
+
+    // P0-5: the value is "linux" because the code paths this runtime already provides are the POSIX ones, and "browser" sends a
+    // package down a branch nothing here implements. Asserted as a pair because one answer in two places is the defect that
+    // actually bites: esbuild composes `${process.platform} ${os.arch()} ${os.endianness()}` into its native-package key, so a shim
+    // that reported linux while os reported browser would look installed and then fail to resolve.
+    expect(shim.platform).toBe("linux");
+    expect(os.platform()).toBe(shim.platform);
   });
 });

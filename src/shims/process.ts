@@ -3,10 +3,17 @@
  * assigns it to the unenv preset family, realized here directly so the audit
  * surface stays small (ADR-0004, D-1).
  *
- * Deliberate choices the audit should look at (ADR-0004, D-3):
- * - `platform` is "browser", not "linux". Code that branches on platform should
- *   see where it actually runs; pretending to be linux would change behaviour in
- *   packages that special-case Windows/Linux paths.
+ * Deliberate choices the audit should look at (ADR-0004, D-3, amended by P0-5):
+ * - `platform` is "linux". D-3 originally said "browser", on the argument that code
+ *   should see where it actually runs. P0-5 reversed it for a measured reason: the
+ *   packages that branch on platform branch to POSIX paths they are ALREADY being
+ *   given here (a `/`-rooted VFS, `/bin/sh`-shaped argv, no drive letters), while
+ *   `"browser"` sends them down a browser branch nobody has ever exercised in this
+ *   runtime. `esbuild` is the concrete case: it builds its native-package key from
+ *   `process.platform` and `os.arch()`, so the two must also agree (`os` reads this
+ *   field rather than deciding for itself). The cost is honesty about what we are
+ *   not: a package that would have printed "unsupported in this environment" now
+ *   takes the Linux path and fails where it fails, rather than being waved off.
  * - `version` is a Node-20-shaped string because many packages gate features on
  *   `process.version`, and ADR-0002 #7 names Node 20 LTS as the API target. It is
  *   a compatibility claim, not a claim to be Node's runtime.
@@ -206,7 +213,7 @@ export const createProcessShim = (options: ProcessOptions = {}): ProcessShim => 
     env: { ...VIRTUAL_ENVIRONMENT, ...(options.env ?? {}) },
     argv,
     execArgv: [],
-    platform: "browser",
+    platform: "linux",
     version: "v20.0.0",
     versions: { node: "20.0.0" },
     browser: true,
