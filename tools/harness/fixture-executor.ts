@@ -23,14 +23,16 @@ import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Container } from "../../src/container/container.js";
-import type { ProjectFiles, RuntimeClient, RuntimeRunOutcome, RuntimeRunRequest } from "../../src/container/types.js";
+import type { ProjectFiles } from "../../src/container/types.js";
 import type { RegistryClient } from "../../src/npm/install.js";
-import { ProbeFault, type AssertionEnvironment, type HttpProbe } from "../../src/harness/assertions.js";
+import { ProbeFault, type AssertionEnvironment } from "../../src/harness/assertions.js";
 import type { FixtureDefinition } from "../../src/harness/definition.js";
-import { NotPreviewable, previewRequestUrl } from "../../src/harness/preview-target.js";
+import { NotPreviewable } from "../../src/harness/preview-target.js";
+import { InProcessClient } from "./in-process-client.js";
+
+export { InProcessClient };
 import { runFixture, type ExecuteStep, type FixtureRunReport } from "../../src/harness/runner.js";
 import { loadCorpusRegistry } from "../../src/registry/corpus.js";
-import { RuntimeSupervisor } from "../../src/browser/runtime-supervisor.js";
 
 export const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -78,43 +80,6 @@ export class MapFiles implements ProjectFiles {
 
   remove(path: string): boolean {
     return this.#files.delete(absolute(path));
-  }
-}
-
-/** One runtime per run, in this process rather than a Worker: the supervisor already rebuilds the VFS per run. */
-export class InProcessClient implements RuntimeClient {
-  readonly #supervisor = new RuntimeSupervisor();
-
-  run(request: RuntimeRunRequest): Promise<RuntimeRunOutcome> {
-    return this.#supervisor.run(request);
-  }
-
-  reset(): void {
-    // The supervisor rebuilds the VFS per run, so there is no long-lived runtime to discard between fixtures.
-  }
-
-  /** What a program wrote, which the project snapshot cannot show. */
-  readFile(path: string): string | null {
-    return this.#supervisor.readRuntimeFile(path);
-  }
-
-  /**
-   * Ask the preview gateway for a URL, exactly as the browser's proxy does.
-   *
-   * The gateway resolves the port from the URL, so a fixture's `http://localhost:3000/` target reaches the server the program
-   * started on 3000. A response is evidence; only a supervisor that throws (no runtime at all) is a probe fault.
-   */
-  async probe(url: string): Promise<HttpProbe> {
-    // The gateway routes `/preview/<port>/…`; the fixture says `http://localhost:<port>/…`. One translation, in
-    // `preview-target.ts`, where it is tested without a runtime.
-    const wireUrl = previewRequestUrl(url);
-    const response = await this.#supervisor.handleTransport({
-      method: "GET",
-      url: wireUrl,
-      headers: {},
-      body: new Uint8Array(0),
-    });
-    return { status: response.statusCode, body: new TextDecoder().decode(response.body) };
   }
 }
 

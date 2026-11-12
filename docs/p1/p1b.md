@@ -112,6 +112,11 @@ containment for hostile code.**
 
 ## 5. Known limitations, stated plainly
 
+> **Updated 2026-11-12:** items 1 to 4 below described the P1b host and no longer hold. The product holds a `ProcessKernel` and every
+> command gets its own Worker (ADR-0029), so commands run concurrently, stopping one process no longer takes another with it, a
+> `while (true)` costs only its own Worker, and a timeout terminates that process rather than the host. Everything else here still stands,
+> including the CSP finding: neither CSP nor the Worker is containment for hostile code.
+
 1. **No concurrency.** Executions are serialised behind one queue; a second `node` waits. Real concurrency needs a Worker
    per process, which changes the host model.
 2. **Termination is all-or-nothing.** Stopping a hung script kills the host, which would take any other in-flight run with
