@@ -24,9 +24,10 @@ import type {
 } from "./process-transport.js";
 import { createRemoteWatcher, realTimerScheduler } from "./remote-watch.js";
 import { InProcessRuntime } from "../runtime/in-process.js";
+import { createTerminal, type Terminal } from "../terminal/pty.js";
 
 interface ProcessScope {
-  onmessage: ((event: MessageEvent<StartMessage>) => void) | null;
+  onmessage: ((event: MessageEvent<StartMessage | InputMessage | ResizeMessage>) => void) | null;
   postMessage(message: ProcessMessage): void;
 }
 
@@ -46,12 +47,37 @@ export interface StartMessage {
    * would fail the moment someone ran a program with no server in it.
    */
   readonly transport?: MessagePortLike;
+  /**
+   * Terminal dimensions. The Terminal object is built HERE, beside the program that reads it, and keystrokes arrive as messages.
+   *
+   * Absent means the program has no terminal, which is the ordinary case for a fixture step or a build.
+   */
+  readonly terminal?: { readonly columns: number; readonly rows: number };
+}
+
+/** Typed text on its way to the program's stdin. Addressed to one Worker, so no pid is needed on the wire. */
+interface InputMessage {
+  readonly type: "input";
+  readonly text: string;
+}
+
+interface ResizeMessage {
+  readonly type: "resize";
+  readonly columns: number;
+  readonly rows: number;
 }
 
 export type ProcessMessage =
   | { readonly type: "output"; readonly channel: "stdout" | "stderr"; readonly text: string }
   | { readonly type: "exit"; readonly code: number }
-  | { readonly type: "failed"; readonly reason: string };
+  | { readonly type: "failed"; readonly reason: string }
+  /**
+   * The scheduler's evidence for this program's run, sent before the exit so a command boundary can report it.
+   *
+   * It has to cross the boundary as data because the object lives beside the program: the page has no access to the queue that actually
+   * ran the timers, and a result field filled with a guess would be worse than an absent one.
+   */
+  | { readonly type: "scheduler"; readonly evidence: unknown };
 
 /**
  * A registry that tells the kernel when it changes.
@@ -91,14 +117,30 @@ const SYSCALL_TIMEOUT_MS = 30_000;
 
 const scope = globalThis as unknown as ProcessScope;
 
+/**
+ * The live terminal, once the program has one.
+ *
+ * Module scope rather than a local in `run` because input arrives as its own message, possibly before the program has even started
+ * listening for keys. Writing to a terminal before the program reads it is not lost: the pty buffers.
+ */
+let terminal: Terminal | null = null;
+
 scope.onmessage = (event) => {
-  if (event.data?.type !== "start") return;
-  const start = event.data;
+  const message = event.data;
+  if (message?.type === "input") {
+    terminal?.write(message.text);
+    return;
+  }
+  if (message?.type === "resize") {
+    terminal?.resize(message.columns, message.rows);
+    return;
+  }
+  if (message?.type !== "start") return;
 
   // Deliberately not awaited into a promise chain nobody observes: a rejection inside an async handler is invisible
   // outside this Worker (no `onerror` fires), which is how a silent process death looks like a hung test. Everything is
   // caught and reported as a message.
-  void run(start);
+  void run(message);
 };
 
 async function run(start: StartMessage): Promise<void> {
@@ -126,6 +168,7 @@ async function run(start: StartMessage): Promise<void> {
     });
 
     attachTransport(transport, runtime);
+    terminal = start.terminal === undefined ? null : createTerminal(start.terminal);
 
     const entry = start.argv[1];
     if (entry === undefined) {
@@ -140,8 +183,10 @@ async function run(start: StartMessage): Promise<void> {
       onOutput: (channel, text) => {
         scope.postMessage({ type: "output", channel, text });
       },
+      ...(terminal === null ? {} : { terminal }),
     });
 
+    if (result.scheduler !== undefined) scope.postMessage({ type: "scheduler", evidence: result.scheduler });
     scope.postMessage({ type: "exit", code: result.exitCode });
   } catch (error) {
     scope.postMessage({ type: "failed", reason: (error as Error)?.message ?? String(error) });

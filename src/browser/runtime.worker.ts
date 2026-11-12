@@ -1,16 +1,24 @@
 /**
  * The Worker half of the container.
  *
- * One run at a time, one fresh runtime per run. The VFS is rebuilt from the request's file map, which is what makes project
- * isolation structural rather than a discipline: there is no long-lived filesystem to leak into, and a project switch needs
- * no cleanup step. The cost is re-seeding small text projects per run, which is negligible next to compiling them.
+ * It holds a `ProcessKernel`: one filesystem per project, and ONE WORKER PER PROCESS behind it. That is the change ADR-0018 was
+ * written for and the audit's W-1. The supervisor this replaced ran every command through a single queue, so a `npm run dev` that
+ * never exits blocked the terminal and no server could outlive the command that started it.
  *
- * Output is forwarded as it is written (`onOutput`), so the terminal shows a program's output while it runs. This Worker is
- * a thread boundary, NOT a sandbox.
+ * What the page sees does not change. A `run` still resolves with one outcome, having streamed its output as it was written, because
+ * a terminal wants "the command finished, here is what it said". What changed is where the command runs: its own thread, served by
+ * this one over a syscall channel, with its servers reachable through the transport broker.
+ *
+ * The page's project snapshot is still mirrored in at each command boundary, so the durable store stays the page's and the VFS stays
+ * runtime state. Project isolation is by project id: switching projects disposes the kernel, which kills its processes and drops its
+ * files.
+ *
+ * This Worker is a thread boundary, NOT a sandbox.
  */
 
-import { RuntimeSupervisor } from "./runtime-supervisor.js";
-import { createTerminal, type Terminal } from "../terminal/pty.js";
+import { ProcessKernel } from "../process/process-kernel.js";
+import { createProjectMirror } from "../process/project-mirror.js";
+import type { ProjectFileContents } from "../container/types.js";
 import type { ClientMessage, RunRequest, ServerMessage, TransportMessage } from "./protocol.js";
 
 interface WorkerScope {
@@ -24,47 +32,82 @@ const post = (message: ServerMessage): void => {
   scope.postMessage(message);
 };
 
-const supervisor = new RuntimeSupervisor();
-const transportPorts = new Map<number, MessagePort>();
 /**
- * Terminals for runs that are still alive, keyed by process id.
+ * The active project's kernel, and the identity it belongs to.
  *
- * The page cannot hold these: a Terminal is a live object with listeners, and the program that reads it runs HERE. So the page
- * sends dimensions with the run and keystrokes afterwards, and this map is how those messages find the right program. Entries are
- * removed when the run settles, so a later keystroke cannot reach a finished program.
+ * One kernel per project, created on first use and disposed on a switch. A kernel owns a real `FileSystem` and real Workers, so it
+ * cannot be shared between projects: disposing it is what makes `node_modules` and servers from one project invisible to the next.
  */
-const terminals = new Map<number, Terminal>();
+let kernel: ProcessKernel | null = null;
+let kernelProjectId: string | null = null;
+/** The diff between the page's snapshot and the kernel's filesystem, so a program's own writes survive a command boundary. */
+const mirror = createProjectMirror();
+/**
+ * The page numbers RUNS; the kernel numbers PROCESSES. These two maps are the translation, and they are separate on purpose.
+ *
+ * They look like the same key and are not: a page's run id and its process id are independent, and for a while this file keyed output by
+ * the PROCESS id, so a second run's output was posted with an id the client had no pending entry for and was silently dropped. One map
+ * answers "which kernel process serves this page process", the other "which run is this process's stdout for".
+ */
+const processByRun = new Map<number, number>();
+const runByPid = new Map<number, number>();
+const transportPorts = new Map<number, MessagePort>();
+/** Output collected per in-flight run, so the result reports exactly what the terminal was shown. */
+const capture = new Map<number, { stdout: string; stderr: string }>();
 const MAX_TRANSPORT_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_TRANSPORT_HEADER_COUNT = 128;
 const MAX_TRANSPORT_HEADER_BYTES = 32 * 1024;
 
+function activeKernel(projectId: string, files: Readonly<Record<string, ProjectFileContents>>): ProcessKernel {
+  if (kernel !== null && kernelProjectId !== projectId) {
+    // Switching projects is the only moment isolation can be broken, so it is the only place it is enforced.
+    kernel.dispose();
+    kernel = null;
+    mirror.reset();
+    processByRun.clear();
+    runByPid.clear();
+  }
+  if (kernel === null) {
+    kernel = new ProcessKernel({ onOutput: forwardOutput });
+    kernelProjectId = projectId;
+  }
+  mirror.sync(kernel, files);
+  return kernel;
+}
+
 async function handleRun(request: RunRequest): Promise<void> {
-  const terminal = request.terminal === undefined ? null : createTerminal(request.terminal);
-  if (terminal !== null) terminals.set(request.processId, terminal);
+  const startedAt = Date.now();
+  capture.set(request.id, { stdout: "", stderr: "" });
+  let pid = 0;
   try {
-    const result = await supervisor.run({
-      projectId: request.projectId,
-      files: request.files,
-      entry: request.entry,
+    const target = activeKernel(request.projectId, request.files);
+    pid = target.start({
       argv: [...request.argv],
       cwd: request.cwd,
       env: { ...request.env },
-      timeoutMs: request.timeoutMs,
-      onOutput: (stream, text) => {
-        post({ type: "chunk", id: request.id, stream, text });
-      },
-    }, { terminal });
+      ...(request.terminal === undefined ? {} : { terminal: request.terminal }),
+      ...(request.timeoutMs > 0 ? { timeoutMs: request.timeoutMs } : {}),
+    });
+    processByRun.set(request.processId, pid);
+    runByPid.set(pid, request.id);
+    const settled = await target.settled(pid);
+    const ports = target.ports().filter((binding) => binding.pid === pid && binding.protocol === "http").map((binding) => binding.port);
+    const collected = capture.get(request.id) ?? { stdout: "", stderr: "" };
     post({
       type: "result",
       id: request.id,
-      stdout: result.stdout,
-      stderr: result.stderr,
-      exitCode: result.exitCode,
-      durationMs: result.durationMs,
-      timedOut: result.timedOut,
-      scheduler: result.scheduler,
-      ...(result.previewPorts === undefined ? {} : { previewPorts: result.previewPorts }),
+      stdout: collected.stdout,
+      stderr: collected.stderr,
+      exitCode: settled.exitCode ?? (settled.timedOut ? 124 : 1),
+      durationMs: Date.now() - startedAt,
+      timedOut: settled.timedOut,
+      // Passed through unchanged when the program reported it. A process that never settled its queue (killed, or a busy loop that had to
+      // be terminated) has none, and the field is `unknown` precisely so "no evidence" stays distinguishable from "zero".
+      scheduler: target.schedulerOf(pid),
+      ...(ports.length === 0 ? {} : { previewPorts: ports }),
     });
+    // Output arrived as `chunk` messages as it was written; the capture above is the same stream, collected, so a result can never
+    // disagree with what the terminal showed.
   } catch (error) {
     post({
       type: "error",
@@ -74,10 +117,28 @@ async function handleRun(request: RunRequest): Promise<void> {
       ...(error instanceof Error && error.stack !== undefined ? { stack: error.stack } : {}),
     });
   } finally {
-    // The program is over, so nothing may still type into it. Deleting here rather than in the success path only means an
-    // error run is cleaned up too.
-    terminals.delete(request.processId);
+    capture.delete(request.id);
+    processByRun.delete(request.processId);
+    // Only this run's entry: a process held open by a server outlives the run, and its late output must not be attributed to whichever run
+    // happens to be next.
+    if (pid !== 0 && runByPid.get(pid) === request.id) runByPid.delete(pid);
   }
+}
+
+/**
+ * Output is forwarded as it happens, so a terminal shows a program's output while it runs rather than once it has finished.
+ *
+ * The kernel reports by pid and the page addresses by run id, so the translation happens here, once, rather than in every message.
+ */
+function forwardOutput(pid: number, channel: "stdout" | "stderr", text: string): void {
+  const runId = runByPid.get(pid);
+  if (runId === undefined) return;
+  const collected = capture.get(runId);
+  if (collected !== undefined) {
+    if (channel === "stdout") collected.stdout += text;
+    else collected.stderr += text;
+  }
+  post({ type: "chunk", id: runId, stream: channel, text });
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {
@@ -110,12 +171,16 @@ function attachTransport(id: number, port: MessagePort): void {
       port.postMessage({ type: "error", id: typeof message?.id === "string" ? message.id : "", message: "Invalid transport request." });
       return;
     }
-    void supervisor.handleTransport({
-      method: message.method,
-      url: message.url,
-      headers: { ...message.headers },
-      body: message.body,
-    }).then((response) => {
+    const live = kernel;
+    void (live === null
+      ? Promise.resolve({ statusCode: 503, statusMessage: "", headers: { "content-type": "text/plain; charset=utf-8" }, body: new TextEncoder().encode("No project is loaded.") })
+      : live.transport({
+          method: message.method,
+          url: message.url,
+          headers: { ...message.headers },
+          body: message.body,
+        })
+    ).then((response) => {
       if (response.body.byteLength > MAX_TRANSPORT_BODY_BYTES || !isStringRecord(response.headers)) {
         port.postMessage({ type: "error", id: message.id, message: "Preview response exceeds transport limits." });
         return;
@@ -164,14 +229,19 @@ scope.onmessage = (event: MessageEvent<ClientMessage>): void => {
       return;
     }
     case "stop-servers":
-      post({ type: "servers-stopped", id: message.id, ports: supervisor.stopServers(message.ports) });
+      post({ type: "servers-stopped", id: message.id, ports: kernel?.stopServers(message.ports) ?? [] });
       return;
-    case "input":
-      // Dropped when no run owns that process id: typing into a program that has exited is a no-op, not an error.
-      terminals.get(message.processId)?.write(message.text);
+    case "input": {
+      // Dropped when no run owns that process id: typing into a program that has exited is a no-op, not an error. The terminal itself
+      // lives in the process Worker beside the program that reads it, so this is a message rather than a method call.
+      const pid = processByRun.get(message.processId);
+      if (pid !== undefined) kernel?.input(pid, message.text);
       return;
-    case "resize":
-      terminals.get(message.processId)?.resize(message.columns, message.rows);
+    }
+    case "resize": {
+      const pid = processByRun.get(message.processId);
+      if (pid !== undefined) kernel?.resize(pid, message.columns, message.rows);
       return;
+    }
   }
 };

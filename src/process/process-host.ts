@@ -43,6 +43,13 @@ export interface StartProcessOptions {
   readonly transport?: MessagePortLike;
   /** Channel capacities. Small by default: a syscall payload is a path or a small buffer, not a file. */
   readonly channelSizes?: ChannelSizes;
+  /**
+   * Terminal dimensions, when the program has a terminal.
+   *
+   * Forwarded because the Terminal object is built in the Worker that runs the program: `process.stdout.columns` and SIGWINCH belong to
+   * the thread reading them, and dims are the only part that can cross.
+   */
+  readonly terminal?: { readonly columns: number; readonly rows: number };
 }
 
 export interface StartedProcess {
@@ -73,6 +80,14 @@ export interface ProcessHostOptions {
    * own servers, which this class does not own.
    */
   readonly holdOpen?: (pid: number) => boolean;
+  /**
+   * The program's body has settled, whether or not the process is over.
+   *
+   * This is the event a command boundary waits for, and it is NOT the same as exit: a process held open by a listening server has
+   * settled and will never exit on its own. A caller that waited for exit instead would block its terminal on `npm run dev` forever,
+   * which is the shape the serialised supervisor already had.
+   */
+  readonly onSettled?: (pid: number, code: number) => void;
   /**
    * Output as it is written, before the process exits. Without this a long-running program is silent until it ends,
    * which is the difference between a terminal and a log dump.
@@ -111,12 +126,14 @@ export class ProcessHost {
   readonly #onOutput: ProcessHostOptions["onOutput"];
   readonly #onMessage: ProcessHostOptions["onMessage"];
   readonly #holdOpen: ProcessHostOptions["holdOpen"] | undefined;
+  readonly #onSettled: ProcessHostOptions["onSettled"] | undefined;
 
   constructor(options: ProcessHostOptions = {}) {
     this.#spawn = options.spawn ?? defaultSpawn;
     this.#onOutput = options.onOutput;
     this.#onMessage = options.onMessage;
     this.#holdOpen = options.holdOpen;
+    this.#onSettled = options.onSettled;
     this.#table = new ProcessTable<ProcessWorkerLike>({
       maxProcesses: options.maxProcesses ?? 8,
       ...(options.onChange === undefined ? {} : { onChange: options.onChange }),
@@ -150,6 +167,7 @@ export class ProcessHost {
         argv: [...options.argv],
         env: { ...(options.env ?? {}) },
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        ...(options.terminal === undefined ? {} : { terminal: options.terminal }),
         buffer: allocation.buffer,
         sizes: allocation.sizes,
         ...(transport === undefined ? {} : { transport }),
@@ -176,6 +194,24 @@ export class ProcessHost {
   }
 
   /** Terminate a process. Idempotent: killing something already finished returns false rather than throwing. */
+  /**
+   * Send a message to a live process Worker.
+   *
+   * The kernel's only use is a terminal: keystrokes and window sizes belong to a program that runs over THERE, and the object that
+   * receives them cannot cross the boundary. `false` means the process is over, which for a keystroke is a no-op rather than an error.
+   */
+  post(pid: number, message: unknown): boolean {
+    const entry = this.#table.get(pid);
+    const worker = entry?.handle;
+    if (worker === undefined) return false;
+    try {
+      worker.postMessage(message);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   kill(pid: number, reason = "killed"): boolean {
     const entry = this.#table.get(pid);
     const killed = this.#table.kill(pid, reason);
@@ -211,6 +247,7 @@ export class ProcessHost {
       return;
     }
     if (message.type === "exit") {
+      this.#onSettled?.(pid, typeof message.code === "number" ? message.code : 0);
       // Held open by something the process still owns (a listening server). Its state stays live, so it can still be killed and can
       // still be routed to; the exit is remembered rather than acted on.
       if (this.#holdOpen?.(pid) === true) return;

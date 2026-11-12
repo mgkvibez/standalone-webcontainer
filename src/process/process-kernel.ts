@@ -41,7 +41,29 @@ export interface ProcessKernelOptions {
   /** How long one `serveOne` waits for work before re-checking that the process is still alive. */
   readonly serveTimeoutMs?: number;
   readonly transportTimeoutMs?: number;
+  /** Default per-process wall clock. 0 or absent means no limit; a busy loop is still stoppable with `kill`. */
+  readonly timeoutMs?: number;
   readonly channelSizes?: ChannelSizes;
+}
+
+export interface KernelStartOptions {
+  readonly argv: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
+  readonly cwd?: string;
+  /** Terminal dimensions, when the command has a terminal. Built in the process Worker, beside the program. */
+  readonly terminal?: { readonly columns: number; readonly rows: number };
+  /** Per-process wall clock. Falls back to the kernel default. */
+  readonly timeoutMs?: number;
+}
+
+export interface SettledOutcome {
+  /** The code the body settled with, or `null` when the process was killed or failed before settling. */
+  readonly exitCode: number | null;
+  readonly timedOut: boolean;
+  readonly killed: boolean;
+  readonly reason?: string;
+  /** True when the process is still alive because it owns a listening server. */
+  readonly alive: boolean;
 }
 
 export interface KernelProcessSummary {
@@ -72,6 +94,14 @@ export class ProcessKernel {
   readonly #channels = new Map<number, ChannelAllocation>();
   readonly #serveTimeoutMs: number;
   readonly #channelSizes: ChannelSizes | undefined;
+  readonly #defaultTimeoutMs: number;
+  /** One deferred per process, resolved when its body settles or it reaches a terminal state. */
+  readonly #settled = new Map<number, (outcome: SettledOutcome) => void>();
+  /** Settles already known, kept so a waiter that arrives late gets the answer instead of hanging. */
+  readonly #settlements = new Map<number, SettledOutcome>();
+  readonly #timers = new Map<number, ReturnType<typeof setTimeout>>();
+  /** Scheduler evidence each program reported, so a command boundary can show what its timers actually did. */
+  readonly #schedulers = new Map<number, unknown>();
   readonly #changeHandlers: ((entry: ProcessEntry<ProcessWorkerLike>) => void)[] = [];
   #closed = false;
 
@@ -80,6 +110,7 @@ export class ProcessKernel {
     for (const [path, contents] of Object.entries(options.files ?? {})) this.writeFile(path, contents);
     this.#serveTimeoutMs = options.serveTimeoutMs ?? 250;
     this.#channelSizes = options.channelSizes;
+    this.#defaultTimeoutMs = options.timeoutMs ?? 0;
     this.#broker = new ProcessTransportBroker({
       ...(options.transportTimeoutMs === undefined ? {} : { timeoutMs: options.transportTimeoutMs }),
     });
@@ -87,10 +118,24 @@ export class ProcessKernel {
       ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
       ...(options.maxProcesses === undefined ? {} : { maxProcesses: options.maxProcesses }),
       ...(options.onOutput === undefined ? {} : { onOutput: options.onOutput }),
+      // `alive` means "held open by something it owns", not "still in a live state": at the moment the exit message arrives the process is
+      // still running in the table, so asking the table would call every finished process alive.
+      onSettled: (pid, code) => this.#recordSettled(pid, { exitCode: code, timedOut: false, killed: false, alive: this.#broker.portsOf(pid).length > 0 }),
       onChange: (entry) => {
         // A terminal process has no channel to serve and no ports to route. Retiring it here rather than in `kill` covers the
         // ordinary path too, where the program exits by itself.
-        if (entry.state === "exited" || entry.state === "failed" || entry.state === "killed") this.#retire(entry.pid);
+        if (entry.state === "exited" || entry.state === "failed" || entry.state === "killed") {
+          // A killed or failed process may never have settled, and a caller waiting on it must not wait forever: a terminal state is
+          // also an answer, and it is the only answer a `while (true)` ever gives.
+          this.#recordSettled(entry.pid, {
+            exitCode: entry.exitCode ?? null,
+            timedOut: false,
+            killed: entry.state === "killed",
+            ...(entry.reason === undefined ? {} : { reason: entry.reason }),
+            alive: false,
+          });
+          this.#retire(entry.pid);
+        }
         if (options.onChange !== undefined) options.onChange(entry);
         for (const handler of this.#changeHandlers) handler(entry);
       },
@@ -98,7 +143,10 @@ export class ProcessKernel {
       onMessage: (pid, data) => {
         // Ports belong to the broker, which validates the report: two validators for one message is how a port ends up trusted in
         // one place and refused in the other.
-        if (typeof data === "object" && data !== null && (data as { readonly type?: unknown }).type === REPORT_PORTS) this.#broker.accept(pid, data);
+        if (typeof data !== "object" || data === null) return;
+        const type = (data as { readonly type?: unknown }).type;
+        if (type === REPORT_PORTS) this.#broker.accept(pid, data);
+        if (type === "scheduler") this.#schedulers.set(pid, (data as { readonly evidence?: unknown }).evidence);
       },
     });
   }
@@ -144,7 +192,7 @@ export class ProcessKernel {
    * `start` returns as soon as the Worker exists: the caller is a terminal, and a terminal that blocked until a server exited
    * could not start a second command, which is the entire point of the process model.
    */
-  start(options: { readonly argv: readonly string[]; readonly env?: Readonly<Record<string, string>>; readonly cwd?: string }): number {
+  start(options: KernelStartOptions): number {
     if (this.#closed) throw new Error("The kernel has been disposed.");
     const channel = new MessageChannelPort();
     const started = this.#host.start({
@@ -152,12 +200,88 @@ export class ProcessKernel {
       ...(options.env === undefined ? {} : { env: options.env }),
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       ...(this.#channelSizes === undefined ? {} : { channelSizes: this.#channelSizes }),
+      ...(options.terminal === undefined ? {} : { terminal: options.terminal }),
       transport: channel.processSide,
     });
     this.#channels.set(started.pid, started.allocation);
     this.#broker.attach(started.pid, channel.kernelSide);
     void this.#serve(started.pid, started.allocation);
+
+    const limit = options.timeoutMs ?? this.#defaultTimeoutMs;
+    if (limit > 0) {
+      // A wall clock per process, enforced by terminating ONE Worker. Under the serialised supervisor the same expiry could only be
+      // reported for async gaps, because a synchronous loop kept the whole thread hostage; here the thread is the process's own.
+      const timer = setTimeout(() => {
+        this.#timers.delete(started.pid);
+        if (!this.isAlive(started.pid)) return;
+        this.kill(started.pid, `timeout after ${String(limit)} ms`);
+        this.#recordSettled(started.pid, { exitCode: null, timedOut: true, killed: true, reason: `timeout after ${String(limit)} ms`, alive: false });
+      }, limit);
+      this.#timers.set(started.pid, timer);
+    }
     return started.pid;
+  }
+
+  /** Whether a process is still in a live state. */
+  isAlive(pid: number): boolean {
+    const entry = this.#host.table.get(pid);
+    return entry !== undefined && (entry.state === "queued" || entry.state === "running");
+  }
+
+  /**
+   * Wait until a process's body settles, or it reaches a terminal state.
+   *
+   * Settling and exiting are different questions and a command boundary needs the first one: a server that has printed "listening" has
+   * settled and may stay alive for hours, and a terminal that waited for exit could not run a second command.
+   */
+  settled(pid: number): Promise<SettledOutcome> {
+    const existing = this.#settlements.get(pid);
+    if (existing !== undefined) return Promise.resolve(existing);
+    return new Promise((resolve) => {
+      this.#settled.set(pid, resolve);
+    });
+  }
+
+  /** Type into a process's stdin. `false` when the program is over, which for a keystroke is a no-op rather than an error. */
+  input(pid: number, text: string): boolean {
+    return this.#host.post(pid, { type: "input", text });
+  }
+
+  resize(pid: number, columns: number, rows: number): boolean {
+    return this.#host.post(pid, { type: "resize", columns, rows });
+  }
+
+  /** Stop the processes that own these ports. What a "stop this server" button asks for. */
+  stopServers(ports: readonly number[]): readonly number[] {
+    const stopped: number[] = [];
+    for (const port of ports) {
+      const pid = this.#broker.ownerOf(port);
+      if (pid === undefined) continue;
+      if (this.kill(pid, `stopped: port ${String(port)}`)) stopped.push(port);
+    }
+    return stopped;
+  }
+
+  /** What the program's scheduler reported, or undefined when it had not finished. */
+  schedulerOf(pid: number): unknown {
+    return this.#schedulers.get(pid);
+  }
+
+  readFile(path: string): string | null {
+    try {
+      const value = this.#files.readFileSync(path.startsWith("/") ? path : `/${path}`, "utf8");
+      return typeof value === "string" ? value : new TextDecoder().decode(value);
+    } catch {
+      return null;
+    }
+  }
+
+  unlink(path: string): void {
+    try {
+      this.#files.unlinkSync(path);
+    } catch {
+      // A file the program already removed is the ordinary case; the caller's snapshot is authoritative either way.
+    }
   }
 
   /** Forward a preview request to the process that owns the port. Never throws: every failure is a status code. */
@@ -183,6 +307,8 @@ export class ProcessKernel {
 
   dispose(): void {
     this.#closed = true;
+    for (const timer of this.#timers.values()) clearTimeout(timer);
+    this.#timers.clear();
     for (const pid of this.#host.table.live().map((entry) => entry.pid)) this.#host.kill(pid, "kernel disposed");
     this.#broker.close();
     for (const pid of [...this.#serves.keys()]) this.#retire(pid);
@@ -220,7 +346,28 @@ export class ProcessKernel {
     }
   }
 
+  /** Record a settle once. First answer wins, because a killed process settles twice: once as a kill, once as an exit message. */
+  #recordSettled(pid: number, outcome: SettledOutcome): void {
+    if (this.#settlements.has(pid)) return;
+    this.#settlements.set(pid, outcome);
+    const timer = this.#timers.get(pid);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.#timers.delete(pid);
+    }
+    const waiter = this.#settled.get(pid);
+    if (waiter !== undefined) {
+      this.#settled.delete(pid);
+      waiter(outcome);
+    }
+  }
+
   #retire(pid: number): void {
+    const timer = this.#timers.get(pid);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.#timers.delete(pid);
+    }
     this.#serves.get(pid)?.();
     this.#channels.delete(pid);
     this.#broker.detach(pid);
