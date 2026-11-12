@@ -21,6 +21,7 @@
 import { FileSystem } from "../vfs/index.js";
 import type { ServeProtocol } from "../network/port-registry.js";
 import { createFsSyscallHandler } from "./fs-syscalls.js";
+import { WatchRegistry } from "./watch-registry.js";
 import { ProcessHost, type ProcessWorkerLike, type SpawnWorker } from "./process-host.js";
 import type { ProcessEntry, ProcessState } from "./process-table.js";
 import { serveChannelAsync, type ChannelAllocation, type ChannelSizes } from "./syscall-channel.js";
@@ -41,6 +42,12 @@ export interface ProcessKernelOptions {
   readonly maxProcesses?: number;
   readonly onOutput?: (pid: number, channel: "stdout" | "stderr", text: string) => void;
   readonly onChange?: (entry: ProcessEntry<ProcessWorkerLike>) => void;
+  /**
+   * Ports a process is serving, reported when the process reports them.
+   *
+   * A long-lived server never settles, so this is the only way a caller learns its ports while it is still useful.
+   */
+  readonly onPorts?: (pid: number, ports: readonly number[]) => void;
   /** How long one `serveOne` waits for work before re-checking that the process is still alive. */
   readonly serveTimeoutMs?: number;
   readonly transportTimeoutMs?: number;
@@ -89,6 +96,13 @@ const REPORT_PORTS = "ports";
 
 export class ProcessKernel {
   readonly #files: FileSystem;
+  /**
+   * Watches live here, not in a process, because the change is observed by whoever owns the filesystem.
+   *
+   * Missing this is what made `fs.watch` refuse with ENOSYS in the product while every watch test passed: the tests built their own registry and
+   * the kernel never had one, so a dev server could be written, started and previewed, and then told the runtime does not serve watches.
+   */
+  readonly #watches: WatchRegistry;
   readonly #host: ProcessHost;
   readonly #broker: ProcessTransportBroker;
   /** Per-pid stop functions for the serve loops, so a kill ends the loop rather than leaving it waiting on a dead channel. */
@@ -110,11 +124,19 @@ export class ProcessKernel {
 
   constructor(options: ProcessKernelOptions = {}) {
     this.#files = new FileSystem();
+    // The registry listens to the filesystem itself rather than to writers, so an edit made by the editor, by another process or by the kernel's
+    // own `writeFile` reaches every watcher without the writer's cooperation.
+    this.#watches = new WatchRegistry({ statKind: (path) => this.#files.statSync(path).kind });
+    this.#files.subscribe((change) => this.#watches.notify(change));
     for (const [path, contents] of Object.entries(options.files ?? {})) this.writeFile(path, contents);
     this.#serveTimeoutMs = options.serveTimeoutMs ?? 250;
     this.#channelSizes = options.channelSizes;
     this.#defaultTimeoutMs = options.timeoutMs ?? 0;
     this.#broker = new ProcessTransportBroker({
+      // A server that keeps running never settles, so its ports cannot wait for the run's result: they travel when the process reports them.
+      onPorts: (pid, ports) => {
+        options.onPorts?.(pid, ports.filter((port) => port.protocol === "http").map((port) => port.port));
+      },
       ...(options.transportTimeoutMs === undefined ? {} : { timeoutMs: options.transportTimeoutMs }),
     });
     this.#host = new ProcessHost({
@@ -340,7 +362,8 @@ export class ProcessKernel {
    */
   async #serve(pid: number, allocation: ChannelAllocation): Promise<void> {
     const end = await serveChannelAsync(allocation);
-    const handler = createFsSyscallHandler(this.#files, { owner: `pid:${String(pid)}` });
+    // The owner is bound here, never sent: a process that could name its own identity could drain or cancel another process's watches.
+    const handler = createFsSyscallHandler(this.#files, { owner: `pid:${String(pid)}`, watches: this.#watches });
     let stopped = false;
     this.#serves.set(pid, () => {
       stopped = true;
@@ -389,6 +412,8 @@ export class ProcessKernel {
     this.#serves.get(pid)?.();
     this.#channels.delete(pid);
     this.#broker.detach(pid);
+    // Before the channel goes: a watch with no process to poll it would keep counting events for a reader that no longer exists.
+    this.#watches.stopAll(`pid:${String(pid)}`);
   }
 }
 
