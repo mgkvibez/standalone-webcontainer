@@ -19,6 +19,8 @@ import { PortRegistry, type ServeProtocol } from "../network/port-registry.js";
 import type {
   MessagePortLike,
   ProcessToKernelMessage,
+  TransportEvent,
+  TransportEventMessage,
   TransportReplyMessage,
   TransportRequestMessage,
 } from "./process-transport.js";
@@ -215,6 +217,13 @@ function attachTransport(transport: MessagePortLike | undefined, runtime: InProc
 
   async function answer(message: TransportRequestMessage): Promise<void> {
     let reply: TransportReplyMessage;
+    // Every response leaves this Worker as it is written. There is no case for buffering here any more: the kernel decides whether a
+    // caller wants events, and a sink nothing forwards is cheaper than a body copied twice for a stream nobody can see.
+    const sink = message.stream === true
+      ? (event: TransportEvent): void => {
+        transport?.postMessage({ type: "transport-event", id: message.id, event } satisfies TransportEventMessage);
+      }
+      : undefined;
     try {
       const response = await runtime.gateway.handle({
         method: message.request.method,
@@ -222,7 +231,7 @@ function attachTransport(transport: MessagePortLike | undefined, runtime: InProc
         // The shim's wire headers are already a plain record, so the boundary needs no conversion in either direction.
         headers: message.request.headers,
         body: message.request.body,
-      });
+      }, sink);
       reply = {
         type: "transport-reply",
         id: message.id,
@@ -231,6 +240,7 @@ function attachTransport(transport: MessagePortLike | undefined, runtime: InProc
           statusMessage: response.statusMessage,
           headers: response.headers,
           body: response.body,
+          ...(response.streamed === true ? { streamed: true } : {}),
         },
       };
     } catch (error) {

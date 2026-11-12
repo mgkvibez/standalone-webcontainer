@@ -27,6 +27,7 @@ import { serveChannelAsync, type ChannelAllocation, type ChannelSizes } from "./
 import {
   ProcessTransportBroker,
   type MessagePortLike,
+  type TransportSink,
   type TransportWireRequest,
   type TransportWireResponse,
 } from "./process-transport.js";
@@ -285,8 +286,8 @@ export class ProcessKernel {
   }
 
   /** Forward a preview request to the process that owns the port. Never throws: every failure is a status code. */
-  transport(request: TransportWireRequest): Promise<TransportWireResponse> {
-    return this.#broker.handle(request);
+  transport(request: TransportWireRequest, sink?: TransportSink): Promise<TransportWireResponse> {
+    return this.#broker.handle(request, sink);
   }
 
   kill(pid: number, reason = "killed"): boolean {

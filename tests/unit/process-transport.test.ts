@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import {
   portFromPreviewUrl,
   ProcessTransportBroker,
+  type MessagePortLike,
   type TransportReplyMessage,
   type TransportRequestMessage,
 } from "../../src/process/process-transport.js";
@@ -205,5 +206,162 @@ describe("ProcessTransportBroker", () => {
     broker.setPorts(1, [{ protocol: "https", port: 443 }]);
     expect(broker.ownerOf(443, "http")).toBeUndefined();
     expect(broker.ownerOf(443, "https")).toBe(1);
+  });
+});
+
+/**
+ * A response that arrives in pieces, over the same channel as the one that arrives whole.
+ *
+ * The interesting failures are not "a chunk was delivered" but the ones where a chunk is delivered to the WRONG request: the broker
+ * keeps one correlation entry per request, and a late chunk for an answered request that is forwarded anyway lands in whatever asked
+ * next.
+ */
+describe("streaming through the broker", () => {
+  /** A process that starts a response, writes the given chunks with a turn between each, then replies. */
+  function streamingProcess(chunks: readonly string[], options: { readonly replyFirst?: boolean } = {}) {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = (event: MessageEvent) => {
+      const message = event.data as TransportRequestMessage;
+      if (options.replyFirst === true) {
+        channel.port1.postMessage({
+          type: "transport-reply",
+          id: message.id,
+          response: { statusCode: 200, statusMessage: "", headers: {}, body: new Uint8Array(), streamed: true },
+        });
+      }
+      channel.port1.postMessage({
+        type: "transport-event",
+        id: message.id,
+        event: { kind: "start", statusCode: 201, statusMessage: "Created", headers: { "content-type": "text/plain" } },
+      });
+      for (const chunk of chunks) {
+        channel.port1.postMessage({ type: "transport-event", id: message.id, event: { kind: "chunk", body: new TextEncoder().encode(chunk) } });
+      }
+      if (options.replyFirst !== true) {
+        channel.port1.postMessage({
+          type: "transport-reply",
+          id: message.id,
+          response: { statusCode: 201, statusMessage: "Created", headers: {}, body: new Uint8Array(), streamed: true },
+        });
+      }
+    };
+    return channel;
+  }
+
+  function brokerWith(channel: MessageChannel): ProcessTransportBroker {
+    const broker = new ProcessTransportBroker();
+    broker.attach(1, channel.port2 as unknown as MessagePortLike);
+    broker.setPorts(1, [{ protocol: "http", port: 3000 }]);
+    return broker;
+  }
+
+  it("delivers the start event and every chunk, in write order, before the reply resolves", async () => {
+    const events: string[] = [];
+    let status = 0;
+    const broker = brokerWith(streamingProcess(["one", "two"]));
+    const response = await broker.handle(request("/preview/3000/stream"), (event) => {
+      if (event.kind === "start") {
+        status = event.statusCode;
+        events.push("start");
+        return;
+      }
+      events.push(decode(event.body));
+    });
+    expect(events).toEqual(["start", "one", "two"]);
+    expect(status).toBe(201);
+    expect(response.streamed).toBe(true);
+    expect(response.body.byteLength).toBe(0);
+  });
+
+  it("keeps the whole body for a caller that did not ask for events", async () => {
+    // The process installs the sink, so it is the process that has to be told. A Worker that streams unconditionally answers a buffered
+    // caller with `streamed: true` and an empty body: a 200 whose content is gone, indistinguishable from a handler that wrote nothing.
+    const channel = new MessageChannel();
+    const broker = new ProcessTransportBroker({ mountPath: "/preview", timeoutMs: 1_000 });
+    broker.attach(1, channel.port2 as unknown as MessagePortLike);
+    broker.setPorts(1, [{ protocol: "http", port: 3000 }]);
+
+    const requests: { readonly stream?: boolean }[] = [];
+    channel.port1.onmessage = (event: MessageEvent<{ readonly id: number; readonly stream?: boolean }>) => {
+      requests.push(event.data);
+      channel.port1.postMessage({
+        type: "transport-reply",
+        id: event.data.id,
+        response: { statusCode: 200, statusMessage: "OK", headers: {}, body: new TextEncoder().encode("whole body") },
+      });
+    };
+    channel.port1.start();
+
+    const response = await broker.handle({ method: "GET", url: "/preview/3000/plain", headers: {}, body: new Uint8Array() });
+
+    expect(new TextDecoder().decode(response.body)).toBe("whole body");
+    expect(response.streamed).toBeUndefined();
+    // And the process was told the truth about what the caller wanted.
+    expect(requests[0]?.stream).toBeUndefined();
+
+    const streamed = new MessageChannel();
+    const streaming = new ProcessTransportBroker({ mountPath: "/preview", timeoutMs: 1_000 });
+    streaming.attach(2, streamed.port2 as unknown as MessagePortLike);
+    streaming.setPorts(2, [{ protocol: "http", port: 3000 }]);
+    const asked: { readonly stream?: boolean }[] = [];
+    streamed.port1.onmessage = (event: MessageEvent<{ readonly id: number; readonly stream?: boolean }>) => {
+      asked.push(event.data);
+      streamed.port1.postMessage({
+        type: "transport-reply",
+        id: event.data.id,
+        response: { statusCode: 200, statusMessage: "OK", headers: {}, body: new Uint8Array(), streamed: true },
+      });
+    };
+    streamed.port1.start();
+    await streaming.handle({ method: "GET", url: "/preview/3000/stream", headers: {}, body: new Uint8Array() }, () => undefined);
+    expect(asked[0]?.stream).toBe(true);
+  });
+
+  it("drops an event that arrives after its request answered, instead of giving it to the next one", async () => {
+    const channel = streamingProcess([], { replyFirst: true });
+    const broker = brokerWith(channel);
+    const seen: string[] = [];
+    // The reply arrives first, so the entry is gone. A chunk posted afterwards for that id must find nothing.
+    await broker.handle(request("/preview/3000/first"), (event) => {
+      seen.push(event.kind === "start" ? "start" : decode(event.body));
+    });
+    channel.port1.postMessage({ type: "transport-event", id: 1, event: { kind: "chunk", body: new TextEncoder().encode("late") } });
+    // A second request reuses the SAME numeric id? It must not: ids increase, which is what makes the dropped-id rule sufficient.
+    const second = await broker.handle(request("/preview/3000/second"), () => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Neither the dropped late chunk nor the second request's own events reached this caller: it passed no sink.
+    expect(seen).toEqual([]);
+    expect(second.statusCode).toBe(200);
+  });
+
+  it("does not forward events to a caller that asked for a whole response", async () => {
+    const broker = brokerWith(streamingProcess(["ignored"]));
+    const response = await broker.handle(request("/preview/3000/buffered"));
+    // No sink: the events are dropped rather than accumulated, because a caller with no sink has nowhere to put them.
+    expect(response.streamed).toBe(true);
+    expect(response.body.byteLength).toBe(0);
+  });
+
+  it("ignores a malformed event rather than throwing into the caller's request", async () => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = (event: MessageEvent) => {
+      const message = event.data as TransportRequestMessage;
+      channel.port1.postMessage({ type: "transport-event", id: message.id, event: { kind: "nonsense" } });
+      channel.port1.postMessage({ type: "transport-event", id: message.id, event: { kind: "chunk", body: "not bytes" } });
+      channel.port1.postMessage({
+        type: "transport-reply",
+        id: message.id,
+        response: { statusCode: 200, statusMessage: "", headers: {}, body: new TextEncoder().encode("ok") },
+      });
+    };
+    const broker = brokerWith(channel);
+    const chunks: Uint8Array[] = [];
+    const response = await broker.handle(request("/preview/3000/x"), (event) => {
+      if (event.kind === "chunk") chunks.push(event.body);
+    });
+    expect(response.statusCode).toBe(200);
+    // The string body became an empty array rather than a lie about bytes.
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.byteLength).toBe(0);
   });
 });

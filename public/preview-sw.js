@@ -59,15 +59,12 @@ async function routePreviewRequest(event, url) {
       channel.port1.close();
       resolve(plain(504, "Preview runtime did not respond in time."));
     }, 30_000);
-    channel.port1.onmessage = (messageEvent) => {
-      clearTimeout(timer);
-      channel.port1.close();
-      const message = messageEvent.data;
-      if (!message || message.id !== id || message.type === "error") {
-        resolve(plain(502, message?.message ?? "Invalid preview runtime response."));
-        return;
-      }
-      const headers = new Headers(message.headers);
+    let controller = null;
+    let started = false;
+
+    // Response headers are fixed the moment this resolves, so the decision to stream cannot be unmade: once a `start` message has been
+    // seen, the browser already holds a Response object whose body is a ReadableStream, and buffering afterwards is impossible.
+    const decorate = (headers) => {
       headers.delete("content-length");
       // COEP world: every response this worker synthesises is a subresource of a cross-origin-isolated document, so it has
       // to declare that it may be embedded. Without this the preview shell (or the preview document itself, once it is
@@ -81,10 +78,73 @@ async function routePreviewRequest(event, url) {
         headers.set("cross-origin-opener-policy", "same-origin");
         headers.set("cross-origin-embedder-policy", "require-corp");
       }
-      const responseBody = event.request.method === "HEAD" || NO_BODY.has(message.statusCode)
-        ? null
-        : new Uint8Array(message.body);
-      resolve(new Response(responseBody, { status: message.statusCode, statusText: message.statusMessage || undefined, headers }));
+      return headers;
+    };
+
+    channel.port1.onmessage = (messageEvent) => {
+      const message = messageEvent.data;
+      if (!message || message.id !== id) return;
+
+      if (message.type === "start") {
+        started = true;
+        clearTimeout(timer);
+        const headers = decorate(new Headers(message.headers));
+        // A HEAD request, or a status that cannot carry a body, still gets its headers from here; the stream below is what
+        // carries the bytes for everything else.
+        const bodyless = event.request.method === "HEAD" || NO_BODY.has(message.statusCode);
+        const stream = bodyless
+          ? null
+          : new ReadableStream({
+              start(streamController) {
+                controller = streamController;
+              },
+              cancel() {
+                // The page stopped reading (a navigation, an aborted fetch). Close the channel so the runtime stops writing into a
+                // port nobody drains, and let its own timeout end the handler.
+                controller = null;
+                channel.port1.close();
+              },
+            });
+        resolve(new Response(stream, { status: message.statusCode, statusText: message.statusMessage || undefined, headers }));
+        return;
+      }
+
+      if (message.type === "chunk") {
+        if (controller === null) return;
+        try {
+          controller.enqueue(new Uint8Array(message.body));
+        } catch {
+          // The stream was cancelled between the check and the enqueue. Nothing to do: the consumer is gone.
+          controller = null;
+        }
+        return;
+      }
+
+      clearTimeout(timer);
+      channel.port1.close();
+      if (message.type === "error") {
+        if (controller !== null) {
+          controller.error(new Error(message.message));
+          controller = null;
+          return;
+        }
+        resolve(plain(502, message.message ?? "Invalid preview runtime response."));
+        return;
+      }
+
+      // A whole response, either because the runtime buffered it or because nothing was written before it ended.
+      const headers = decorate(new Headers(message.headers));
+      const whole = event.request.method === "HEAD" || NO_BODY.has(message.statusCode) ? null : new Uint8Array(message.body);
+      if (!started) {
+        resolve(new Response(whole, { status: message.statusCode, statusText: message.statusMessage || undefined, headers }));
+        return;
+      }
+      // Headers already went out with the stream, so only the bytes and the end of it remain.
+      if (controller !== null) {
+        if (whole !== null && whole.byteLength > 0) controller.enqueue(whole);
+        controller.close();
+        controller = null;
+      }
     };
     channel.port1.start();
   });

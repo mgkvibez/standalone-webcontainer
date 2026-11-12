@@ -23,7 +23,7 @@
 
 import { RequestRegistry, RequestTimeoutError } from "./request-registry.js";
 import { PortRegistry, type ServeProtocol } from "./port-registry.js";
-import { Server, type RequestListener, type WireRequest, type WireResponse } from "../shims/http.js";
+import { Server, type RequestListener, type ResponseSink, type WireRequest, type WireResponse } from "../shims/http.js";
 
 export interface GatewayOptions {
   readonly registry: PortRegistry;
@@ -109,7 +109,7 @@ export class PreviewGateway {
    * Answer one request. Never throws: a preview failure becomes a response the browser can display, because
    * an exception in the worker would surface as a blank page with no explanation.
    */
-  async handle(wire: WireRequest): Promise<WireResponse> {
+  async handle(wire: WireRequest, sink?: ResponseSink): Promise<WireResponse> {
     const target = this.resolve(wire.url);
     if (target === null) return text(404, `Not a preview request: ${wire.url}`);
 
@@ -124,7 +124,7 @@ export class PreviewGateway {
     const startedAt = this.#now();
     const pending = this.#requests.open({ deadline: startedAt + this.#timeoutMs, now: startedAt });
 
-    void server.dispatch({ ...wire, url: target.path, headers: withHost(wire.headers, target.port) }).then(
+    void server.dispatch({ ...wire, url: target.path, headers: withHost(wire.headers, target.port) }, sink).then(
       (response) => this.#requests.settle(pending.id, response),
       (error: unknown) => this.#requests.fail(pending.id, error),
     );

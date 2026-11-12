@@ -102,6 +102,27 @@ export interface TransportRequest {
   readonly body: Uint8Array;
 }
 
+/**
+ * The response has started: status and headers, at the moment the handler's first byte was written.
+ *
+ * Sent only to a consumer that streams (the preview shell is one); a consumer that waits for a single record still gets
+ * `TransportResponse` with the whole body and never sees this.
+ */
+export interface TransportStart {
+  readonly type: "start";
+  readonly id: string;
+  readonly statusCode: number;
+  readonly statusMessage: string;
+  readonly headers: Readonly<Record<string, string>>;
+}
+
+/** Part of a response body, in write order, before the response ends. */
+export interface TransportChunk {
+  readonly type: "chunk";
+  readonly id: string;
+  readonly body: Uint8Array;
+}
+
 export interface TransportResponse {
   readonly type: "response";
   readonly id: string;
@@ -109,6 +130,8 @@ export interface TransportResponse {
   readonly statusMessage: string;
   readonly headers: Readonly<Record<string, string>>;
   readonly body: Uint8Array;
+  /** The body already left in `start`/`chunk` messages, so an empty `body` means it went, not that there was none. */
+  readonly streamed?: boolean;
 }
 
 export interface TransportError {
@@ -118,7 +141,7 @@ export interface TransportError {
 }
 
 export type TransportMessage = TransportRequest;
-export type TransportReply = TransportResponse | TransportError;
+export type TransportReply = TransportStart | TransportChunk | TransportResponse | TransportError;
 
 export interface OutputChunk {
   readonly type: "chunk";
