@@ -50,11 +50,18 @@ export interface WebSocketConnectRequest {
   readonly headers: Readonly<Record<string, string>>;
 }
 
+/** What a connector answers: somebody accepted, or a sentence a user can act on. */
+export type WebSocketConnectResult = { readonly socket: Socket } | { readonly refusal: string };
+
 /**
- * Opens the duplex. Supplied by whoever owns a transport: the in-process runtime answers from its own port registry, a process Worker
- * forwards it to the kernel. Returning `{ socket }` is "somebody accepted"; a refusal is a sentence a user can act on.
+ * Opens the duplex. Supplied by whoever owns a transport: the in-process runtime answers from its own port registry, and a kernel forwards
+ * it to the process Worker that owns the port.
+ *
+ * It may answer asynchronously, and that is a fact about the transport rather than a convenience: across a thread boundary the listener's
+ * answer is a message, so there is no way to know whether it accepted until that message arrives. A connector that knows its answer refuses
+ * nothing by returning a promise: the refusal is what the promise RESOLVES to.
  */
-export type WebSocketConnector = (request: WebSocketConnectRequest) => { readonly socket: Socket } | { readonly refusal: string };
+export type WebSocketConnector = (request: WebSocketConnectRequest) => WebSocketConnectResult | Promise<WebSocketConnectResult>;
 
 export interface WebSocketInit {
   readonly unused?: never;
@@ -159,6 +166,28 @@ export function createWebSocketClass(connect: WebSocketConnector, options: WebSo
         path: `${parsed.pathname === "" ? "/" : parsed.pathname}${parsed.search}`,
         headers,
       });
+      if (opened instanceof Promise) {
+        // A transport that has to ask another thread. The state stays CONNECTING while it waits, and the deadline above is already running,
+        // so a far side that never answers fails as a handshake timeout rather than as a promise nobody awaited.
+        void opened.then(
+          (result) => {
+            if (this.readyState === CLOSED) return;
+            this.#adopt(result);
+          },
+          (error: unknown) => this.#fail(error instanceof Error ? error.message : String(error)),
+        );
+        return;
+      }
+      this.#adopt(opened);
+    }
+
+    /**
+     * Take the answer a connector gave, synchronously or later.
+     *
+     * One path for both, because the two must behave identically once the socket exists: the acceptance, the listener wiring and the
+     * handshake deadline are the same whether the answer took a microtask or a message.
+     */
+    #adopt(opened: WebSocketConnectResult): void {
       if ("refusal" in opened) {
         // Deferred: the constructor has not returned, so no listener can be attached yet. A failure delivered synchronously would be an
         // error nobody could hear, which reads as a socket that silently never connects.

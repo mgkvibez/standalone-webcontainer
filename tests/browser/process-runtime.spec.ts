@@ -30,6 +30,9 @@ const KERNEL = `
         return;
       }
       if (message.type === "serve") {
+        // Which process this loop serves, so the ops it answers can be attributed. The kernel serves one channel per process, and the ORDER
+        // ops are answered in is the only concurrency signal a wall clock cannot fake.
+        const index = message.index;
         const { serveChannelAsync } = await import(urls.channel);
         const { createFsSyscallHandler } = await import(urls.fsSyscalls);
         const end = await serveChannelAsync({ buffer: message.buffer, sizes: message.sizes });
@@ -39,7 +42,7 @@ const KERNEL = `
         while (Date.now() < deadline && !end.closed()) {
           await end.serveOne((request) => {
             served.push(request.op);
-            self.postMessage({ type: "op", op: request.op, path: request.path, count: served.length });
+            self.postMessage({ type: "op", serve: index, op: request.op, path: request.path, count: served.length });
             return handler(request);
           }, { timeoutMs: 250 });
         }
@@ -82,7 +85,10 @@ test("the host boots the real runtime in each process Worker, and they run at th
       const kernel = new Worker(URL.createObjectURL(new Blob([kernelSource], { type: "text/javascript" })), {
         type: "module",
       });
-      const kernelMessages: { type: string; op?: string; path?: string; count?: number; reason?: string }[] = [];
+      const kernelMessages: { type: string; op?: string; serve?: number; path?: string; count?: number; reason?: string }[] = [];
+      /** When each process first asked the kernel for anything, and the wall clock is the page's own: the runtime's virtual clock stops while a
+       *  program holds the thread, so it cannot timestamp an event that happens on the other side of the boundary. */
+      const firstOpAt: Record<number, number> = {};
       const kernelSays = (type: string): Promise<void> =>
         new Promise((resolve) => {
           const check = (): void => {
@@ -91,7 +97,11 @@ test("the host boots the real runtime in each process Worker, and they run at th
           };
           check();
         });
-      kernel.onmessage = (event) => kernelMessages.push(event.data);
+      kernel.onmessage = (event) => {
+        kernelMessages.push(event.data);
+        const message = event.data as { type?: string; serve?: number };
+        if (message.type === "op" && message.serve !== undefined && firstOpAt[message.serve] === undefined) firstOpAt[message.serve] = Date.now();
+      };
 
       kernel.postMessage({ type: "seed", moduleUrls: urls, files: Object.entries(programs) });
       await kernelSays("seeded");
@@ -115,10 +125,14 @@ test("the host boots the real runtime in each process Worker, and they run at th
           tick();
         });
 
+      const serveIndex: number[] = [];
       const start = (argv: string[]): number => {
         const started = host.start({ argv });
+        const index = serveIndex.length;
+        serveIndex.push(index);
         kernel.postMessage({
           type: "serve",
+          index,
           moduleUrls: urls,
           buffer: started.allocation.buffer,
           sizes: started.allocation.sizes,
@@ -132,8 +146,13 @@ test("the host boots the real runtime in each process Worker, and they run at th
       const pairBegan = Date.now();
       const a = start(["node", "/work.js"]);
       const b = start(["node", "/work.js"]);
-      const [first, second] = await Promise.all([terminal(a), terminal(b)]);
+      let aExitedAt: number | null = null;
+      const [first, second] = await Promise.all([terminal(a).then((entry) => ((aExitedAt = Date.now()), entry)), terminal(b)]);
       const pair = Date.now() - pairBegan;
+      // The claim this test is named after, in a form no core count can change: the SECOND process was already talking to the kernel before the
+      // FIRST one exited. A runtime that serialised execution would start it only afterwards, so its first request would come later, however
+      // fast the machine is.
+      const bWorkedWhileARan = firstOpAt[1] !== undefined && aExitedAt !== null && firstOpAt[1] < aExitedAt;
 
       const singleBegan = Date.now();
       const solo = start(["node", "/work.js"]);
@@ -144,7 +163,7 @@ test("the host boots the real runtime in each process Worker, and they run at th
       const fatal = kernelMessages.find((message) => message.type === "fatal");
       kernel.terminate();
 
-      return { first, second, third, pair, single, output, opsServed, fatal };
+      return { first, second, third, pair, single, output, opsServed, bWorkedWhileARan, fatal };
     },
     { kernelSource: KERNEL, programs: { "/work.js": WORK("work") } },
   );
@@ -157,8 +176,13 @@ test("the host boots the real runtime in each process Worker, and they run at th
   expect(Object.values(outcome.output).join("")).toContain("work finished");
   // The filesystem really was in the kernel: every read crossed the channel.
   expect(outcome.opsServed).toBeGreaterThan(0);
-  // Two concurrent processes doing the same fixed work should cost well under twice one process doing it.
-  expect(outcome.pair).toBeLessThan(outcome.single * 1.7);
+  // Simultaneity, measured structurally: the two processes' filesystem requests interleaved inside the kernel, so one was serving while the
+  // other computed. This is the claim the test is named after and the only form of it that survives a saturated CI runner.
+  expect(outcome.bWorkedWhileARan).toBe(true);
+  // Kept as a runaway guard only. On a runner with one core per process a perfectly concurrent pair costs about twice a single run, so a tight
+  // ratio here measures the machine's core count rather than this runtime: 1.7 was a number a faster laptop produced, and it failed CI at 1.92
+  // where 1.92 IS ideal. Anything approaching serialisation is caught by the ordering above.
+  expect(outcome.pair).toBeLessThan(outcome.single * 3);
 });
 
 test("killing a real process stops its program, and leaves the host usable", async ({ page }) => {
@@ -187,10 +211,14 @@ test("killing a real process stops its program, and leaves the host usable", asy
           output[pid] = (output[pid] ?? "") + text;
         },
       });
+      const serveIndex: number[] = [];
       const start = (argv: string[]): number => {
         const started = host.start({ argv });
+        const index = serveIndex.length;
+        serveIndex.push(index);
         kernel.postMessage({
           type: "serve",
+          index,
           moduleUrls: urls,
           buffer: started.allocation.buffer,
           sizes: started.allocation.sizes,
