@@ -41,12 +41,18 @@ export interface ContainerOptions {
   readonly files: ProjectFiles;
   /** Bundled, integrity-verified offline package corpus. */
   readonly registry?: RegistryClient;
-  /** Real-time budget for a process. Defaults to 5 s; the runtime's own timeout only bounds async gaps. */
+  /**
+   * Real-time budget for one program. `0` (the default) means no wall clock: a session's program ends when the user stops it.
+   *
+   * A caller that awaits a bounded answer (the fixture harness, a one-shot API call) passes a budget explicitly. See ADR-0034 for why the
+   * default is not a number: a server's body never finishes, so a clock was the only thing ending one, and every previewed server was killed
+   * five seconds after it appeared.
+   */
   readonly timeoutMs?: number;
   readonly now?: () => number;
 }
 
-const DEFAULT_TIMEOUT_MS = 5_000;
+const DEFAULT_TIMEOUT_MS = 0;
 
 /**
  * The size a session starts at, before any UI has measured the window.
@@ -89,7 +95,23 @@ export class Container {
     this.#files = options.files;
     this.#registry = options.registry;
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    if (!Number.isFinite(this.#timeoutMs) || this.#timeoutMs < 0) {
+      throw new RangeError(`timeoutMs must be zero or a positive number, received ${String(this.#timeoutMs)}`);
+    }
     this.#now = options.now ?? (() => Date.now());
+    // A server that keeps running never produces a run outcome, so its ports arrive here instead. Without this subscription a previewed server
+    // works but is never offered for preview: the process list waits for an outcome that never comes.
+    this.#runtime.onPorts?.((processId, ports) => {
+      const process = this.#processes.get(processId);
+      if (process === undefined || ports.length === 0) return;
+      if (process.state !== "running" && process.state !== "queued") return;
+      const known = process.previewPorts ?? [];
+      if (known.length === ports.length && known.every((port, index) => port === ports[index])) return;
+      process.previewPorts = [...ports];
+      process.state = "running";
+      this.#line(this.findSession(process.sessionId) ?? this.#sessions[0]!, "system", `[${process.pid}] server listening on port(s) ${ports.join(", ")}`);
+      this.#notify();
+    });
   }
 
   sessions(): readonly Session[] {
@@ -102,6 +124,20 @@ export class Container {
 
   running(): ProcessRecord | undefined {
     return [...this.#processes.values()].find((process) => process.state === "running" || process.state === "queued");
+  }
+
+  /**
+   * Hand a saved file to the running project.
+   *
+   * The editor's save writes to the page's own store, and the kernel only ever reads a project's files as a SNAPSHOT at the start of a run, so
+   * a program that is already running would never see the change: a dev server could watch its module forever and hear nothing (W-26).
+   * Nothing is staged here on purpose — a save before the first run needs no live write, because that run carries the whole snapshot.
+   */
+  pushFile(path: string, contents: string): void {
+    // Only when a kernel is live for this project: `#runtimeProjectId` is set by the run that started it, and a save arriving before the first
+    // run is carried by that run's own snapshot. Sending it earlier would write into nothing.
+    if (this.#runtimeProjectId === null) return;
+    this.#runtime.writeFile?.(this.#runtimeProjectId, path, contents);
   }
 
   onChange(listener: () => void): () => void {

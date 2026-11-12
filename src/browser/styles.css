@@ -38,7 +38,16 @@ body {
 #app {
   display: grid;
   grid-template-rows: 44px minmax(0, 1fr) minmax(240px, 38%);
+  grid-template-columns: minmax(0, 1fr);
   height: 100vh;
+}
+
+/*
+ * A preview takes the right-hand column instead of covering the workspace: editing while the preview reacts is the whole feature, and a
+ * dialog that hides the explorer makes the loop untestable by a person as well as by a spec.
+ */
+#app:has(#preview-overlay:not([hidden])) {
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 42%);
 }
 
 #preview-shell {
@@ -68,16 +77,14 @@ body {
 }
 
 #preview-overlay {
-  position: fixed;
-  z-index: 10;
-  inset: 4vh 4vw;
+  grid-row: 2;
+  grid-column: 2;
   display: grid;
   grid-template-rows: 36px minmax(0, 1fr);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  min-width: 0;
+  border-left: 1px solid var(--border);
   overflow: hidden;
   background: white;
-  box-shadow: 0 20px 80px #000b;
 }
 
 #preview-overlay[hidden] {
@@ -100,6 +107,8 @@ body {
 }
 
 #topbar {
+  grid-row: 1;
+  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -147,6 +156,8 @@ button.primary {
 }
 
 #body {
+  grid-row: 2;
+  grid-column: 1;
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
   min-height: 0;
@@ -249,6 +260,8 @@ button.primary {
 }
 
 #bottom {
+  grid-row: 3;
+  grid-column: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;

@@ -163,7 +163,10 @@ export function createWorkspace(options: WorkspaceOptions): Workspace {
     saveTimer = window.setTimeout(() => {
       saveTimer = null;
       if (openPath === null) return;
-      store.writeFile(openPath, view.state.doc.toString());
+      const contents = view.state.doc.toString();
+      store.writeFile(openPath, contents);
+      // The store is the page's copy; a program that is already running reads the kernel's filesystem, so the save goes there too.
+      container.pushFile(openPath, contents);
       markSaved();
       renderTree();
     }, 250);

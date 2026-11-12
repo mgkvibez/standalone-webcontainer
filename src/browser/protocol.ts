@@ -86,12 +86,26 @@ export interface StopServersRequest {
 
 export type ClientMessage =
   | RunRequest
+  | WriteFileMessage
   | PingRequest
   | ConnectTransportMessage
   | DisconnectTransportMessage
   | StopServersRequest
   | InputMessage
   | ResizeMessage;
+
+/**
+ * A file the page just saved, delivered to the project's live filesystem.
+ *
+ * Without this the kernel only ever learns a project's files when a run STARTS (the run carries a snapshot), so an edit made while a program
+ * is running is invisible to that program: a dev server could watch its module forever and never hear about the change (W-26).
+ */
+export interface WriteFileMessage {
+  readonly type: "write-file";
+  readonly projectId: string;
+  readonly path: string;
+  readonly contents: string;
+}
 
 export interface TransportRequest {
   readonly type: "request";
@@ -236,6 +250,17 @@ export interface RunResultMessage {
   readonly previewPorts?: readonly number[];
 }
 
+/**
+ * A live process's serving ports, sent when the process reports them.
+ *
+ * Separate from `result` because a server's run may never settle: this is what puts "preview 5173" next to a process that is still running.
+ */
+export interface PortsMessage {
+  readonly type: "ports";
+  readonly processId: number;
+  readonly ports: readonly number[];
+}
+
 export interface FailureMessage {
   readonly type: "error";
   readonly id: number;
@@ -255,4 +280,11 @@ export interface ServersStoppedMessage {
   readonly ports: readonly number[];
 }
 
-export type ServerMessage = OutputChunk | RunResultMessage | FailureMessage | PongMessage | ServersStoppedMessage | TransportDisconnectedMessage;
+export type ServerMessage =
+  | OutputChunk
+  | RunResultMessage
+  | PortsMessage
+  | FailureMessage
+  | PongMessage
+  | ServersStoppedMessage
+  | TransportDisconnectedMessage;

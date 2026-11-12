@@ -28,6 +28,8 @@ export class WorkerRuntimeClient implements RuntimeClient {
   #worker: Worker | null = null;
   #nextId = 1;
   readonly #pending = new Map<number, Pending>();
+  /** Listeners for live port reports: a set, because a container may be rebuilt and a removed listener must stop receiving. */
+  readonly #portListeners = new Set<(processId: number, ports: readonly number[]) => void>();
   #lastError: string | null = null;
 
   /** Why the host last failed, for the UI. Never thrown: an uncaught Worker error would take the page's listener with it. */
@@ -96,6 +98,20 @@ export class WorkerRuntimeClient implements RuntimeClient {
     this.#worker.postMessage({ type: "resize", processId, columns, rows } satisfies ClientMessage);
   }
 
+  /** A saved file, delivered to the project's live filesystem. Fire-and-forget: a save has no reply, and the next run carries the same text. */
+  writeFile(projectId: string, path: string, contents: string): void {
+    if (this.#worker === null) return;
+    this.#worker.postMessage({ type: "write-file", projectId, path, contents } satisfies ClientMessage);
+  }
+
+  /** Ports as a process reports them, for a caller that needs them before the run settles. */
+  onPorts(listener: (processId: number, ports: readonly number[]) => void): () => void {
+    this.#portListeners.add(listener);
+    return () => {
+      this.#portListeners.delete(listener);
+    };
+  }
+
   /** Kill the host and settle everything in flight. The next `run` starts a new Worker. */
   reset(): void {
     const worker = this.#worker;
@@ -142,6 +158,11 @@ export class WorkerRuntimeClient implements RuntimeClient {
 
   #receive(message: ServerMessage): void {
     if (message.type === "pong" || message.type === "servers-stopped" || message.type === "transport-disconnected") return;
+    // Ports are addressed to a process, not to an in-flight run, so they are dispatched before the pending-run check.
+    if (message.type === "ports") {
+      for (const listener of this.#portListeners) listener(message.processId, message.ports);
+      return;
+    }
     const pending = this.#pending.get(message.id);
     if (pending === undefined) return; // Late output from a killed run: dropped, never rendered.
 
