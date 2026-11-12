@@ -12,12 +12,19 @@ import { Buffer } from "buffer";
 
 import { eventsModule } from "../shims/events.js";
 import {
+  Agent,
+  ClientRequest,
   createServer,
+  get,
   IncomingMessage,
+  maxHeaderSize,
   METHODS,
+  request,
   STATUS_CODES,
   Server,
   ServerResponse,
+  validateHeaderName,
+  validateHeaderValue,
   type RequestListener,
 } from "../shims/http.js";
 import { PortRegistry } from "../network/port-registry.js";
@@ -575,6 +582,15 @@ export class InProcessRuntime implements Runtime {
         http: {
           METHODS,
           STATUS_CODES,
+          // The client side, refused by name rather than left absent: `http.get(url)` used to fail as "not a function", which reads as a broken
+          // runtime instead of a boundary. The two validators are pure functions and are real implementations. See ADR-0025.
+          request,
+          get,
+          Agent,
+          ClientRequest,
+          maxHeaderSize,
+          validateHeaderName,
+          validateHeaderValue,
           createServer: (handler?: RequestListener): Server => {
             const server = createServer(handler, { registry: this.#registry });
             this.#gateway.attach(server);
