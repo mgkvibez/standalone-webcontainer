@@ -43,6 +43,11 @@ export interface FileSystemPort {
    */
   statManySync?(paths: readonly string[]): readonly (VfsStatsPort | null)[];
   unlinkSync(path: string): void;
+  /**
+   * Set a node's modification time. Optional for the same reason `statManySync` is: it is a capability, not a requirement, and a substrate
+   * without stored timestamps is still a filesystem. The fs shim refuses by name when it is missing rather than reporting success it did not have.
+   */
+  utimesSync?(path: string, modifiedAt: number): void;
   rmdirSync(path: string): void;
   renameSync(from: string, to: string): void;
   /**

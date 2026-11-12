@@ -376,6 +376,43 @@ export class FileSystem {
     throw new VFSNotFoundError(p);
   }
 
+  /**
+   * Set a node's modification time, which is what `fs.utimes` does underneath.
+   *
+   * `createdAt` is left alone on purpose: POSIX `utimes` cannot change birth time either, and this VFS treats
+   * `createdAt` as birth time everywhere (`statSync` reports it as such, and a write preserves it).
+   *
+   * A DERIVED directory has no Map entry, so setting a time on one MATERIALIZES it with the same epoch timestamps its
+   * siblings have. That is the same choice `mkdirSync` makes for a parent it had to create, and the alternative (silently
+   * doing nothing) would make `utimes` succeed while `stat` still reported 0, which is a lie a caller could not detect.
+   */
+  utimesSync(path: string, modifiedAt: number): void {
+    const p = normalizeVfsPath(path);
+    if (!Number.isFinite(modifiedAt) || modifiedAt < 0) {
+      throw new VFSInvalidPathError(p, "utimes needs a finite, non-negative modification time");
+    }
+    this.#assertNoFileAncestors(p);
+    const node = this.#nodes.get(p);
+    if (node !== undefined) {
+      node.modifiedAt = modifiedAt;
+      this.#emit({ kind: "change", path: p });
+      return;
+    }
+    if (p === "/" || this.#existsAsDir(p)) {
+      // The root is derived by definition and has nowhere to store a time: it is not a keyed entry, and inventing one for
+      // `/` would put a node at the root that every readdir and count has to special-case. Reporting that honestly beats a
+      // silent no-op.
+      if (p === "/") {
+        throw new VFSInvalidPathError(p, "the root directory has no stored timestamps to set");
+      }
+      this.#nodes.set(p, { kind: "dir", createdAt: modifiedAt, modifiedAt });
+      this.#changeAncestorCounts(p, 1);
+      this.#emit({ kind: "change", path: p });
+      return;
+    }
+    throw new VFSNotFoundError(p);
+  }
+
   /** Remove the file at `path`. Directories are never removable (POSIX). */
   async unlink(path: string): Promise<void> {
     await Promise.resolve();

@@ -255,6 +255,41 @@ export class Dirent {
   }
 }
 
+/**
+ * The link model this VFS does NOT have, refused by name — see docs/decisions/ADR-0026.md.
+ *
+ * `fs.symlinkSync("target", "link")` failing as `fs.symlinkSync is not a function` reads as a broken runtime and sends a dependency author
+ * looking for a bug that is not there. It is a boundary: this filesystem is a tree with one name per node, and a link layer is a design change
+ * (resolution through every lookup, a hop limit, `lstat` versus `stat`, dangling links, directory links) rather than another method.
+ *
+ * `ERR_NOT_SUPPORTED`, the reason, and the alternatives a caller can act on today: copy the bytes, or point the program at the real path.
+ */
+const refuseLink = (member: string): never => {
+  const error = new Error(
+    `ERR_NOT_SUPPORTED: fs.${member} is not available in this runtime: this filesystem is a tree with no link layer, so a name cannot point at ` +
+      "another name. Use fs.copyFileSync to duplicate a file's contents, or write the real path where the link would have been. " +
+      "See docs/decisions/ADR-0026.md.",
+  ) as Error & { code: string };
+  error.code = "ERR_NOT_SUPPORTED";
+  throw error;
+};
+
+/**
+ * Node's time argument for `utimes`: seconds as a number, a numeric string, or a Date.
+ *
+ * Seconds is the part that catches people out, so it is converted in one place and named: `fs.utimesSync(p, 1700000000, 1700000000)` is a
+ * timestamp in 2023, not 1970, and treating it as milliseconds would put every file in 1970 without ever throwing.
+ */
+const secondsToMilliseconds = (value: number | string | Date, member: string): number => {
+  const seconds = value instanceof Date ? value.getTime() / 1000 : typeof value === "string" ? Number(value) : value;
+  if (!Number.isFinite(seconds)) {
+    throw Object.assign(new TypeError(`The "${member}" argument must be a number, a numeric string or a Date. Received ${String(value)}`), {
+      code: "ERR_INVALID_ARG_TYPE",
+    });
+  }
+  return Math.round(seconds * 1000);
+};
+
 /** `readdir` with Dirents: each child's kind comes from the VFS, so a name can never be described more confidently than it is. */
 const direntsOf = (vfs: FileSystemPort, directory: string, names: readonly string[]): Dirent[] =>
   names.map((name) => {
@@ -308,6 +343,7 @@ const pathAccepting = (vfs: FileSystemPort) => ({
   mkdirSync: (path: FsPath, options?: MkdirOptionsPort) => vfs.mkdirSync(pathOf(path), options),
   readdirSync: (path: FsPath) => vfs.readdirSync(pathOf(path)),
   statSync: (path: FsPath) => vfs.statSync(pathOf(path)),
+  ...(vfs.utimesSync === undefined ? {} : { utimesSync: (path: FsPath, modifiedAt: number) => vfs.utimesSync!(pathOf(path), modifiedAt) }),
   ...(vfs.statManySync === undefined
     ? {}
     : { statManySync: (paths: readonly FsPath[]) => vfs.statManySync!(paths.map(pathOf)) }),
@@ -357,6 +393,16 @@ export interface FsShim {
   truncateSync(path: FsPath, length?: number): void;
   /** No symlinks exist in this VFS, so `lstatSync` is `statSync` with `lstat` as its syscall. Documented rather than silently absent. */
   lstatSync(path: FsPath): StatsShim;
+  /** `(path, atime, mtime)`, both in SECONDS as in Node. Sets modification time; birth time is immutable, as POSIX makes it. */
+  utimesSync(path: FsPath, atime: number | string | Date, mtime: number | string | Date): void;
+  /** `l` for "the link itself", which is `utimes` here because no path is a link. Same alias rule as `lstatSync`. */
+  lutimesSync(path: FsPath, atime: number | string | Date, mtime: number | string | Date): void;
+  /** Refused by name: there is no link layer to create a link in. See `refuseLink` and ADR-0026. */
+  symlinkSync(target: FsPath, path: FsPath, type?: string): never;
+  /** Refused by name, same reason. A hard link would need a link COUNT per node, which this VFS does not store. */
+  linkSync(existingPath: FsPath, newPath: FsPath): never;
+  /** Refused by name, same reason: there is no stored target to read. */
+  readlinkSync(path: FsPath): never;
   /** The `Stats` class itself, because callers do `instanceof` against it. */
   Stats: typeof Stats;
   /** F_OK/R_OK/W_OK/X_OK and COPYFILE_EXCL. See ACCESS_CONSTANTS for what is deliberately omitted. */
@@ -425,6 +471,16 @@ export interface FsShim {
   stat(path: FsPath, callback: StatCallback): void;
   /** No symlinks exist in this VFS, so `lstat` is `stat`. Documented rather than silently aliased. */
   lstat(path: FsPath, callback: StatCallback): void;
+  /** `(path, atime, mtime, callback)`, seconds as in Node. */
+  utimes(path: FsPath, atime: number | string | Date, mtime: number | string | Date, callback: CallbackOnly): void;
+  /** `l` for "the link itself", which is `utimes` here because no path is a link. */
+  lutimes(path: FsPath, atime: number | string | Date, mtime: number | string | Date, callback: CallbackOnly): void;
+  /** Refused by name through the callback, so a promisified caller sees the refusal with a code rather than a missing function. */
+  symlink(target: FsPath, path: FsPath, typeOrCallback?: string | CallbackOnly, maybeCallback?: CallbackOnly): void;
+  /** Refused by name. See `refuseLink`. */
+  link(existingPath: FsPath, newPath: FsPath, callback: CallbackOnly): void;
+  /** Refused by name. See `refuseLink`. */
+  readlink(path: FsPath, callback: CallbackOnly): void;
   /**
    * `realpathSync`, with Node's `.native` property hanging off it.
    *
@@ -453,6 +509,14 @@ export interface FsShim {
     appendFile(path: string, data: string | Uint8Array, encoding?: string): Promise<void>;
     copyFile(from: string, to: string, mode?: number): Promise<void>;
     mkdtemp(prefix: string): Promise<string>;
+    /** `(path, atime, mtime)`, seconds as in Node. */
+    utimes(path: string, atime: number | string | Date, mtime: number | string | Date): Promise<void>;
+    /** Refused by name: there is no link layer. See `refuseLink` and ADR-0026. */
+    symlink(target: string, path: string, type?: string): Promise<never>;
+    /** Refused by name, same reason. */
+    link(existingPath: string, newPath: string): Promise<never>;
+    /** Refused by name, same reason. */
+    readlink(path: string, type?: string): Promise<never>;
     truncate(path: string, length?: number): Promise<void>;
     watch(path: string, options?: WatchOptions): WatchAsyncIterator;
   };
@@ -537,7 +601,12 @@ type DerivedFromPromises =
   | "appendFile"
   | "copyFile"
   | "mkdtemp"
-  | "truncate";
+  | "truncate"
+  | "utimes"
+  | "lutimes"
+  | "symlink"
+  | "link"
+  | "readlink";
 
 /** The absolute layer as written: everything except the derived callback forms and the `.native` carriage the outer wrapper adds. */
 type WrittenAbsoluteFsShim = Omit<FsShim, DerivedFromPromises | "promises" | "realpathSync"> & { realpathSync: (path: FsPath) => string };
@@ -555,14 +624,19 @@ type AbsoluteFsShim = Omit<FsShim, "realpathSync"> & { realpathSync: (path: FsPa
 const asCallback = <R>(operation: (...args: never[]) => Promise<R>) => {
   return (...args: unknown[]): void => {
     const callback = args[args.length - 1] as (error: unknown, result?: R) => void;
-    (operation as (...inner: unknown[]) => Promise<R>)(...args.slice(0, -1)).then(
-      (result) => {
-        callback(null, result);
-      },
-      (error: unknown) => {
-        callback(error);
-      },
-    );
+    // Deferred through `Promise.resolve().then`, so a SYNCHRONOUS throw inside the operation lands in the rejection handler below instead of
+    // escaping as an exception from a function whose whole contract is to call back. The refusal members (`symlink`, `link`, `readlink`) throw
+    // synchronously by design, and Node's callback forms report them through the callback.
+    Promise.resolve()
+      .then(() => (operation as (...inner: unknown[]) => Promise<R>)(...args.slice(0, -1)))
+      .then(
+        (result) => {
+          callback(null, result);
+        },
+        (error: unknown) => {
+          callback(error);
+        },
+      );
   };
 };
 
@@ -1047,6 +1121,57 @@ AbsoluteFsShim => {
     }
   },
 
+  /**
+   * `utimesSync`: Node takes SECONDS, the VFS stores milliseconds, and this is the one place the two meet.
+   *
+   * The substrate is asked whether it can set times at all, rather than assumed to: a port without `utimesSync` gets a named refusal instead of
+   * a call that silently does nothing.
+   */
+  utimesSync(path, _atime, mtime) {
+    // `atime` is accepted and NOT stored: this VFS has no access-time accounting, and inventing one would make every read a write to the node.
+    // It is VALIDATED anyway, because Node refuses a value there it cannot read as a time and a caller who passes garbage deserves the same
+    // answer here rather than a silent success.
+    secondsToMilliseconds(_atime, "atime");
+    const resolvedPath = pathOf(path);
+    if (resolvedPath === "/") {
+      throw Object.assign(
+        new Error(
+          "ERR_NOT_SUPPORTED: fs.utimes cannot set a time on the root directory: it is derived rather than stored, so it has no timestamp " +
+            "field to write. See docs/decisions/ADR-0026.md.",
+        ),
+        { code: "ERR_NOT_SUPPORTED", syscall: "utime", path: resolvedPath },
+      );
+    }
+    const setTimes = vfs.utimesSync?.bind(vfs);
+    if (setTimes === undefined) {
+      throw Object.assign(new Error("ERR_NOT_SUPPORTED: this filesystem does not store timestamps, so fs.utimesSync cannot set one"), {
+        code: "ERR_NOT_SUPPORTED",
+      });
+    }
+    try {
+      setTimes(resolvedPath, secondsToMilliseconds(mtime, "mtime"));
+    } catch (error) {
+      throw toNodeError(error, "utime", path);
+    }
+  },
+
+  /** `l` for "the link itself", and no path here is a link, so this is `utimesSync` under the name the caller used. */
+  lutimesSync(path, atime, mtime) {
+    shim.utimesSync(path, atime, mtime);
+  },
+
+  symlinkSync(target) {
+    return refuseLink(`symlinkSync (${String(target)})`);
+  },
+
+  linkSync() {
+    return refuseLink("linkSync");
+  },
+
+  readlinkSync() {
+    return refuseLink("readlinkSync");
+  },
+
   Stats,
 
   constants: ACCESS_CONSTANTS,
@@ -1058,6 +1183,26 @@ AbsoluteFsShim => {
    * conventions then share one path rewrite and one error map, which is exactly how Node layers them.
    */
   const promises: FsShim["promises"] = {
+    async utimes(path, atime, mtime) {
+      shim.utimesSync(path, atime, mtime);
+    },
+    /**
+     * The link refusals in promise shape, as REJECTIONS.
+     *
+     * A synchronous throw from a promise-returning member is not the shape its callers use: `fn(...).catch(...)` and `expect(p).rejects` both
+     * throw at the call site before a promise exists, so the refusal would escape as an unexpected exception rather than arriving where the
+     * caller is waiting for it. Rejecting is also exactly what Node does (`fs.promises.symlink` rejects with a coded error), and the cost is
+     * the one Node already accepts: a caller who ignores the promise gets an unhandled rejection, which is a bug in their code, not a surprise.
+     */
+    async symlink(target, path) {
+      return refuseLink(`promises.symlink (${String(target)} -> ${String(path)})`);
+    },
+    async link(existingPath, newPath) {
+      return refuseLink(`promises.link (${String(existingPath)} -> ${String(newPath)})`);
+    },
+    async readlink(path) {
+      return refuseLink(`promises.readlink (${String(path)})`);
+    },
     watch(path, watchOptions) {
       return toWatchAsyncIterator(absoluteWatch(watches, path, watchOptions));
     },
@@ -1219,6 +1364,18 @@ AbsoluteFsShim => {
     copyFile: asCallback((from: FsPath, to: FsPath, mode?: number) => promises.copyFile(pathOf(from), pathOf(to), mode)),
     mkdtemp: asCallback((prefix: string) => promises.mkdtemp(prefix)),
     truncate: asCallback((path: FsPath, length?: number) => promises.truncate(pathOf(path), length)),
+    utimes: asCallback((path: FsPath, atime: number | string | Date, mtime: number | string | Date) =>
+      promises.utimes(pathOf(path), atime, mtime),
+    ),
+    // `l` for "the link itself", and no path here is a link, so this is the same operation under the name the caller used.
+    lutimes: asCallback((path: FsPath, atime: number | string | Date, mtime: number | string | Date) =>
+      promises.utimes(pathOf(path), atime, mtime),
+    ),
+    symlink: asCallback((target: FsPath, path: FsPath, linkType?: string) =>
+      promises.symlink(pathOf(target), pathOf(path), linkType),
+    ),
+    link: asCallback((existingPath: FsPath, newPath: FsPath) => promises.link(pathOf(existingPath), pathOf(newPath))),
+    readlink: asCallback((path: FsPath, linkType?: string) => promises.readlink(pathOf(path), linkType)),
   };
 };
 
@@ -1297,6 +1454,22 @@ export const createFsShim = (
     writeSync: (fd) => inner.writeSync(fd),
     stat: (path, callback) => inner.stat(at(path), callback),
     lstat: (path, callback) => inner.lstat(at(path), callback),
+    utimes: (path, atime, mtime, callback) => inner.utimes(at(path), atime, mtime, callback),
+    lutimes: (path, atime, mtime, callback) => inner.lutimes(at(path), atime, mtime, callback),
+    // The refusals still rewrite their paths first, so the message names the path the program actually passed. `symlink` takes an OPTIONAL
+    // type before the callback, so the two positions are resolved here the way every other optional-options member resolves them: forwarding
+    // the raw tail put `undefined` where the callback belonged, and the callback then never fired at all.
+    symlink: (target, path, typeOrCallback, maybeCallback) => {
+      const [linkType, callback] = callbackOf(typeOrCallback, maybeCallback);
+      inner.symlink(at(target), at(path), linkType as string | undefined, callback);
+    },
+    link: (existingPath, newPath, callback) => inner.link(at(existingPath), at(newPath), callback),
+    readlink: (path, callback) => inner.readlink(at(path), callback),
+    utimesSync: (path, atime, mtime) => inner.utimesSync(at(path), atime, mtime),
+    lutimesSync: (path, atime, mtime) => inner.lutimesSync(at(path), atime, mtime),
+    symlinkSync: (target, path, type) => inner.symlinkSync(at(target), at(path), type),
+    linkSync: (existingPath, newPath) => inner.linkSync(at(existingPath), at(newPath)),
+    readlinkSync: (path) => inner.readlinkSync(at(path)),
     // The callback forms, one per promise member. Only the PATH is this layer's business: rewriting before the call is what makes a relative path
     // mean the program's cwd, exactly as the sync members above do.
     readFile: (path, optionsOrCallback, maybeCallback) => {
@@ -1358,6 +1531,10 @@ export const createFsShim = (
     watch: (path, listenerOrOptions, maybeListener) =>
       inner.watch(at(path), listenerOrOptions, maybeListener),
     promises: {
+      utimes: (path, atime, mtime) => inner.promises.utimes(at(path), atime, mtime),
+      symlink: (target, path, linkType) => inner.promises.symlink(at(target), at(path), linkType),
+      link: (existingPath, newPath) => inner.promises.link(at(existingPath), at(newPath)),
+      readlink: (path, linkType) => inner.promises.readlink(at(path), linkType),
       watch: (path, watchOptions) => inner.promises.watch(at(path), watchOptions),
       readFile: (path, encoding) => inner.promises.readFile(at(path), encoding),
       writeFile: (path, data) => inner.promises.writeFile(at(path), data),
