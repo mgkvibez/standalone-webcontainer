@@ -12,9 +12,12 @@
  *
  * Four things are intentionally not implemented, stated here so the audit reads a boundary instead of
  * inferring one: chunked transfer encoding (a response is buffered whole and sent with a computed
- * `content-length`), keep-alive (one request per connection), TLS/HTTP2, and the `upgrade` event, which
- * is why websockets in the browser lane are a later, separate problem. Streaming a response before it
- * ends would also require the proxy to stream, and neither side does that yet.
+ * `content-length`), keep-alive (one request per connection), TLS/HTTP2, and backpressure on a streamed body.
+ *
+ * `upgrade` IS here (ADR-0031), and it is the one member of this module that outlives a request: `dispatchUpgrade`
+ * hands the handler a duplex {@link Socket} and the connection stays open until one side closes it. Framing is not
+ * this module's business — the handler writes whatever protocol it likes — which is exactly Node's division and the
+ * reason a websocket implementation can sit on top of it rather than inside it.
  *
  * `IncomingMessage` follows Node's async delivery contract: `data` and `end` fire after the request
  * handler returns, not during it, so a handler that attaches listeners synchronously receives them.
@@ -23,6 +26,7 @@
  */
 
 import { EventEmitter } from "./events.js";
+import { linkSockets, type Socket } from "./socket.js";
 import {
   InvalidPortError,
   PortInUseError,
@@ -359,6 +363,16 @@ export interface CreateServerOptions {
 }
 
 /**
+ * What {@link Server.dispatchUpgrade} tells its caller.
+ *
+ * `accepted: false` is a real answer, not an error: it means the port is served but nobody there asked for upgrades, which is a different
+ * situation from "nothing is listening on this port" and needs different words in front of a user.
+ */
+export type UpgradeResult =
+  | { readonly accepted: true; readonly socket: Socket }
+  | { readonly accepted: false; readonly reason: string };
+
+/**
  * The shared registry used when a caller does not supply one.
  *
  * A module-level singleton is a pragmatic default: Node lets any module call `createServer()` without
@@ -433,6 +447,36 @@ export class Server extends EventEmitter {
     if (callback !== undefined) this.once("close", callback);
     queueMicrotask(() => this.emit("close"));
     return this;
+  }
+
+  /**
+   * Hand one connection to an `upgrade` listener, the way Node does before it ever parses a frame.
+   *
+   * Node's contract has three properties and all three are reproduced here, because a package written against `ws` depends on each:
+   *
+   * - The request is the same `IncomingMessage` a normal handler would see, headers and all (`Upgrade: websocket`,
+   *   `Sec-WebSocket-Key`, `Sec-WebSocket-Version`), so an implementation can validate or refuse by inspecting it.
+   * - The handler receives a socket and writes the `101` itself. This module never writes it, because only the handler knows which
+   *   protocol it is switching to.
+   * - **No listener means the connection is destroyed.** Node does this rather than answering, and a caller must be able to tell:
+   *   otherwise a client connecting to a server that never asked for upgrades would wait forever for a handshake nobody will write.
+   *
+   * `head` is always empty here. Node may have read past the headers into the first frame; this runtime hands the handler a fresh
+   * pair, so there is nothing beyond the request to pass on.
+   */
+  dispatchUpgrade(wire: WireRequest): UpgradeResult {
+    const request = new IncomingMessage(wire);
+    if (this.listenerCount("upgrade") === 0) {
+      // Destroyed rather than answered, and the caller is told, so "nothing handles upgrades on this port" is a stated outcome instead
+      // of a hang that looks like a network fault.
+      return { accepted: false, reason: `port ${String(this.#boundPort ?? 0)} has no upgrade listener` };
+    }
+    const { local, remote } = linkSockets();
+    // The listener gets `remote`; the caller keeps `local`. Naming them from the handler's point of view is deliberate: in Node the
+    // handler owns the socket, and this runtime only holds the other end to give to whoever connected.
+    this.emit("upgrade", request, remote, EMPTY_BYTES);
+    request.deliverBody();
+    return { accepted: true, socket: local };
   }
 
   /** Node's `address()`, with the shape applications expect. */

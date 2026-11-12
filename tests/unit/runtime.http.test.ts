@@ -143,3 +143,48 @@ describe("user code serving a preview", () => {
     expect(result.stderr).toContain("EADDRINUSE");
   });
 });
+
+describe("user code speaking a protocol switch", () => {
+  it("accepts an upgrade and echoes a frame, with the client inside the container and no socket underneath", async () => {
+    const { vfs, root } = boot({
+      // Wire-shaped on purpose: the frames are built here, by hand, the way a package with its own framing layer would build them, and the
+      // client is the runtime's own `WebSocket` global rather than a hand-rolled one. If the global were missing or bound to the host's
+      // WebSocket, this program fails at `new WebSocket`.
+      "/app/socket-server.js": [
+        'const crypto = require("crypto");',
+        "const http = require(\"http\");",
+        "const server = http.createServer(function (req, res) { res.end(\"http\"); });",
+        'const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";',
+        'server.on("upgrade", function (req, socket) {',
+        '  const accept = crypto.createHash("sha1").update(req.headers["sec-websocket-key"] + GUID).digest("base64");',
+        '  socket.write("HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: " + accept + "\\r\\n\\r\\n");',
+        "  socket.on(\"data\", function (chunk) {",
+        "    const length = chunk[1] & 0x7f;",
+        "    const masked = (chunk[1] & 0x80) !== 0;",
+        "    const key = masked ? chunk.slice(2, 6) : null;",
+        "    const start = masked ? 6 : 2;",
+        "    const payload = chunk.slice(start, start + length);",
+        "    const text = String.fromCharCode.apply(null, masked ? payload.map(function (b, i) { return b ^ key[i % 4]; }) : payload);",
+        "    console.log('frame:' + length + ':' + (masked ? 'masked' : 'plain') + ':' + text);",
+        "    const reply = Buffer.from(text.split('').reverse().join(''));",
+        "    socket.write(Buffer.concat([Buffer.from([0x81, reply.length]), reply]));",
+        "  });",
+        "});",
+        "server.listen(3000);",
+        "const client = new WebSocket('ws://localhost:3000/live');",
+        "client.onopen = function () { client.send('abcdef'); };",
+        "client.onmessage = function (event) { console.log('echo:' + event.data); client.close(); };",
+        "client.onerror = function (event) { console.log('error:' + (event.message || 'unknown')); };",
+      ].join("\n"),
+    });
+
+    const runtime = new InProcessRuntime(vfs);
+    const result = await runtime.run(`${root}/socket-server.js`);
+
+    expect(result.exitCode).toBe(0);
+    // The client's frame really crossed: the server parsed its length, saw the mask bit and read the text out of it.
+    expect(result.stdout).toContain("frame:6:masked:abcdef");
+    // And the reply came back through the same socket to the runtime's WebSocket, which is the half a browser client depends on.
+    expect(result.stdout).toContain("echo:fedcba");
+  });
+});
