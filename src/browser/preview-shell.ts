@@ -48,13 +48,26 @@ const inFlight = new Map<string, MessagePort>();
 function isReply(value: unknown): value is TransportReply {
   if (typeof value !== "object" || value === null) return false;
   const message = value as Partial<TransportReply>;
-  return (message.type === "response" || message.type === "error") && typeof message.id === "string";
+  return (message.type === "response" || message.type === "error" || message.type === "start" || message.type === "chunk") &&
+    typeof message.id === "string";
 }
 
+/**
+ * Relay a reply to the request it belongs to.
+ *
+ * `start` and `chunk` do NOT close the port: a streaming response is still being written, and closing on the first chunk would turn
+ * every stream into a one-chunk response that then hangs. Only `response` and `error` end the request, which is why the map entry is
+ * dropped there and nowhere else.
+ */
 function onRuntimeMessage(event: MessageEvent<unknown>): void {
   if (!isReply(event.data)) return;
   const responsePort = inFlight.get(event.data.id);
   if (responsePort === undefined) return;
+  const terminates = event.data.type === "response" || event.data.type === "error";
+  if (!terminates) {
+    responsePort.postMessage(event.data);
+    return;
+  }
   inFlight.delete(event.data.id);
   responsePort.postMessage(event.data);
   responsePort.close();

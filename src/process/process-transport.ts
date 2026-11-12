@@ -44,19 +44,56 @@ export interface TransportWireResponse {
   readonly statusMessage: string;
   readonly headers: Readonly<Record<string, string>>;
   readonly body: Uint8Array;
+  /**
+   * The body left in events while the handler was still writing, so `body` is empty because it already went, not because there was
+   * nothing to send. Absent or false means the body is here, whole.
+   */
+  readonly streamed?: boolean;
 }
+
+/**
+ * One thing a streaming handler made visible, forwarded as it happened.
+ *
+ * The `start` event carries the status and headers at the moment the first byte was written, because a consumer that wants to render
+ * the first chunk cannot wait for the headers to arrive at the end.
+ */
+export type TransportEvent =
+  | { readonly kind: "start"; readonly statusCode: number; readonly statusMessage: string; readonly headers: Readonly<Record<string, string>> }
+  | { readonly kind: "chunk"; readonly body: Uint8Array };
+
+/** Receives a response as it is written. A caller that passes none gets one buffered record, as before. */
+export type TransportSink = (event: TransportEvent) => void;
 
 /** Kernel to process. */
 export interface TransportRequestMessage {
   readonly type: "transport-request";
   readonly id: number;
   readonly request: TransportWireRequest;
+  /**
+   * Whether the caller asked for the response as it is written.
+   *
+   * It has to travel WITH the request, because the decision is made on the far side: the process Worker is the one that installs the
+   * sink, and a Worker that always installs one turns every response into a stream. A caller with no sink then receives `streamed: true`
+   * and an empty body, which reads as "the handler wrote nothing" — the exact silent-empty-output shape ADR-0029 warns about.
+   */
+  readonly stream?: boolean;
+}
+
+/**
+ * Process to kernel: part of a response that is still being written. Sent between `transport-request` and the final reply, in write
+ * order, and only to a kernel that asked for them by passing a sink.
+ */
+export interface TransportEventMessage {
+  readonly type: "transport-event";
+  readonly id: number;
+  readonly event: TransportEvent;
 }
 
 /** Process to kernel: the answer, or why there is none. */
 export type TransportReplyMessage =
   | { readonly type: "transport-reply"; readonly id: number; readonly response: TransportWireResponse }
-  | { readonly type: "transport-error"; readonly id: number; readonly reason: string };
+  | { readonly type: "transport-error"; readonly id: number; readonly reason: string }
+  | TransportEventMessage;
 
 /**
  * The ports a process currently has bound.
@@ -92,6 +129,8 @@ interface Peer {
 interface Pending {
   readonly resolve: (response: TransportWireResponse) => void;
   readonly timer: ReturnType<typeof setTimeout>;
+  /** Where partial events for this request go, when the caller asked to receive the response as it is written. */
+  readonly sink: TransportSink | undefined;
 }
 
 const text = (statusCode: number, message: string): TransportWireResponse => ({
@@ -232,7 +271,7 @@ export class ProcessTransportBroker {
    * Three answers, each naming what actually happened: 400 for a URL that addresses no port, 503 for a port nobody is
    * serving, 504 for a process that accepted the request and did not answer in time.
    */
-  async handle(request: TransportWireRequest): Promise<TransportWireResponse> {
+  async handle(request: TransportWireRequest, sink?: TransportSink): Promise<TransportWireResponse> {
     const port = portFromPreviewUrl(request.url, this.#mountPath);
     if (port === undefined) return text(400, `Not a preview request: ${request.url}`);
     const pid = this.ownerOf(port);
@@ -250,12 +289,17 @@ export class ProcessTransportBroker {
         this.#waitingFor.delete(id);
         resolve(text(504, `port ${String(port)} did not answer within ${String(this.#timeoutMs)} ms`));
       }, this.#timeoutMs);
-      this.#pending.set(id, { resolve, timer });
+      this.#pending.set(id, { resolve, timer, sink });
       this.#waitingFor.set(id, pid);
     });
 
     try {
-      const message: TransportRequestMessage = { type: "transport-request", id, request };
+      const message: TransportRequestMessage = {
+        type: "transport-request",
+        id,
+        request,
+        ...(sink === undefined ? {} : { stream: true }),
+      };
       peer.port.postMessage(message);
     } catch (error) {
       const pending = this.#pending.get(id);
@@ -278,6 +322,7 @@ export class ProcessTransportBroker {
       readonly ports?: unknown;
       readonly response?: unknown;
       readonly reason?: unknown;
+      readonly event?: unknown;
     };
     if (message.type === "ports") {
       if (!Array.isArray(message.ports)) return;
@@ -291,6 +336,27 @@ export class ProcessTransportBroker {
           return [{ protocol, port }];
         }),
       );
+      return;
+    }
+    if (message.type === "transport-event") {
+      if (typeof message.id !== "number") return;
+      const waiting = this.#pending.get(message.id);
+      // No pending entry means the request already answered or timed out. Forwarding now would deliver bytes for a response the caller
+      // has stopped listening to, out of order, into whatever came next.
+      if (waiting?.sink === undefined) return;
+      const event = message.event as TransportEvent | undefined;
+      if (event === undefined || (event.kind !== "start" && event.kind !== "chunk")) return;
+      if (event.kind === "start") {
+        if (typeof event.statusCode !== "number") return;
+        waiting.sink({
+          kind: "start",
+          statusCode: event.statusCode,
+          statusMessage: typeof event.statusMessage === "string" ? event.statusMessage : "",
+          headers: (event.headers ?? {}) as Readonly<Record<string, string>>,
+        });
+        return;
+      }
+      waiting.sink({ kind: "chunk", body: event.body instanceof Uint8Array ? event.body : new Uint8Array() });
       return;
     }
     if (message.type !== "transport-reply" && message.type !== "transport-error") return;
@@ -315,6 +381,7 @@ export class ProcessTransportBroker {
       statusMessage: typeof response.statusMessage === "string" ? response.statusMessage : "",
       headers: response.headers ?? {},
       body: response.body ?? new Uint8Array(),
+      ...(response.streamed === true ? { streamed: true } : {}),
     });
   }
 }

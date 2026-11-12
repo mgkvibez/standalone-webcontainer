@@ -146,12 +146,22 @@ test("keeps a server alive in the project supervisor and serves over a transfera
   const reply = await page.evaluate(async () => {
     const runtime = (window as unknown as { __runtime: { connectTransport(port: MessagePort): number; disconnectTransport(id: number): void } }).__runtime;
     const channel = new MessageChannel();
+    // A streamed response arrives as several messages, so the answer is the terminal one: `response` (or `error`). Collecting until then
+    // is what a real consumer does, and the chunks it accumulated are part of the assertion rather than swallowed.
     const received = new Promise<{ type: string; statusCode?: number; body?: string }>((resolve) => {
-      channel.port2.onmessage = (event: MessageEvent<{ type: string; statusCode?: number; body?: Uint8Array }>) => {
+      let streamed = "";
+      channel.port2.onmessage = (event: MessageEvent<{ type: string; statusCode?: number; body?: Uint8Array; streamed?: boolean }>) => {
+        if (event.data.type === "chunk") {
+          if (event.data.body !== undefined) streamed += new TextDecoder().decode(event.data.body);
+          return;
+        }
+        if (event.data.type !== "response" && event.data.type !== "error") return;
+        const whole = event.data.body === undefined ? "" : new TextDecoder().decode(event.data.body);
         resolve({
           type: event.data.type,
           ...(event.data.statusCode === undefined ? {} : { statusCode: event.data.statusCode }),
-          ...(event.data.body === undefined ? {} : { body: new TextDecoder().decode(event.data.body) }),
+          ...(event.data.streamed === true ? { streamed: true } : {}),
+          ...((whole + streamed) === "" ? {} : { body: whole + streamed }),
         });
       };
       channel.port2.start();
@@ -169,7 +179,7 @@ test("keeps a server alive in the project supervisor and serves over a transfera
     runtime.disconnectTransport(transportId);
     return reply;
   });
-  expect(reply).toEqual({ type: "response", statusCode: 200, body: "supervised:/hello?from=port" });
+  expect(reply).toEqual({ type: "response", statusCode: 200, streamed: true, body: "supervised:/hello?from=port" });
 
   await server.locator("button[data-action='stop']").click();
   await expect(server).toHaveAttribute("data-state", "killed");

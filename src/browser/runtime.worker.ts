@@ -17,6 +17,7 @@
  */
 
 import { ProcessKernel } from "../process/process-kernel.js";
+import type { TransportEvent } from "../process/process-transport.js";
 import { createProjectMirror } from "../process/project-mirror.js";
 import type { ProjectFileContents } from "../container/types.js";
 import type { ClientMessage, RunRequest, ServerMessage, TransportMessage } from "./protocol.js";
@@ -172,6 +173,18 @@ function attachTransport(id: number, port: MessagePort): void {
       return;
     }
     const live = kernel;
+    // One sink per request, and every event carries its id: the page routes by id, so two previews streaming at once cannot
+    // interleave into each other's response.
+    const requestId = message.id;
+    const sink = (event: TransportEvent): void => {
+      if (event.kind === "start") {
+        if (!isStringRecord(event.headers)) return;
+        port.postMessage({ type: "start", id: requestId, statusCode: event.statusCode, statusMessage: event.statusMessage, headers: event.headers });
+        return;
+      }
+      const chunk = event.body instanceof Uint8Array ? event.body.slice() : new Uint8Array();
+      port.postMessage({ type: "chunk", id: requestId, body: chunk }, [chunk.buffer]);
+    };
     void (live === null
       ? Promise.resolve({ statusCode: 503, statusMessage: "", headers: { "content-type": "text/plain; charset=utf-8" }, body: new TextEncoder().encode("No project is loaded.") })
       : live.transport({
@@ -179,7 +192,7 @@ function attachTransport(id: number, port: MessagePort): void {
           url: message.url,
           headers: { ...message.headers },
           body: message.body,
-        })
+        }, sink)
     ).then((response) => {
       if (response.body.byteLength > MAX_TRANSPORT_BODY_BYTES || !isStringRecord(response.headers)) {
         port.postMessage({ type: "error", id: message.id, message: "Preview response exceeds transport limits." });
@@ -193,6 +206,7 @@ function attachTransport(id: number, port: MessagePort): void {
         statusMessage: response.statusMessage,
         headers: response.headers,
         body,
+        ...("streamed" in response && response.streamed === true ? { streamed: true } : {}),
       }, [body.buffer]);
     }).catch((error: unknown) => {
       port.postMessage({

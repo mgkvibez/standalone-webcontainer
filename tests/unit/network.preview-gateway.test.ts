@@ -226,3 +226,42 @@ describe("the Host header a preview request carries", () => {
     expect(served.headers()?.host).toBeUndefined();
   });
 });
+
+/**
+ * The gateway is the one place that knows a request exists from its first byte to its answer, so it is also the place where a stream
+ * has to be attached to the handler that writes it. These tests are about that attachment, not about HTTP.
+ */
+describe("streaming a preview response", () => {
+  it("hands the handler's writes out as they happen, and answers with an empty body", async () => {
+    const { ports, gateway } = setup();
+    const server = new Server((_request, response) => {
+      response.setHeader("content-type", "text/plain");
+      response.write("first");
+      response.end("second");
+    }, { registry: ports });
+    server.listen(4300);
+    gateway.attach(server);
+
+    const events: string[] = [];
+    const response = await gateway.handle(request("/preview/4300/stream"), (event) => {
+      events.push(event.kind === "start" ? `start:${event.headers["content-type"] ?? ""}` : decoder.decode(event.body));
+    });
+
+    expect(events).toEqual(["start:text/plain", "first", "second"]);
+    expect(response.streamed).toBe(true);
+    expect(response.body.byteLength).toBe(0);
+  });
+
+  it("still answers with a whole body when the caller installs no sink", async () => {
+    const { ports, gateway } = setup();
+    const server = new Server((_request, response) => {
+      response.end("whole");
+    }, { registry: ports });
+    server.listen(4301);
+    gateway.attach(server);
+
+    const response = await gateway.handle(request("/preview/4301/plain"));
+    expect(decoder.decode(response.body)).toBe("whole");
+    expect(response.streamed).toBeUndefined();
+  });
+});

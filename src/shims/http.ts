@@ -40,15 +40,36 @@ export interface WireRequest {
   readonly body: Uint8Array;
 }
 
-/** A response as it leaves the shim. The proxy turns this into a real `Response`. */
+/**
+ * A response as it leaves the shim. The proxy turns this into a real `Response`.
+ *
+ * `streamed` says the body did NOT travel in this record: it left in events while the handler was still writing. A consumer that
+ * installed a sink must use those events, and a consumer that did not gets `streamed: false` and the whole body, as before.
+ */
 export interface WireResponse {
   readonly statusCode: number;
   readonly statusMessage: string;
   readonly headers: Headers;
   readonly body: Uint8Array;
+  readonly streamed?: boolean;
 }
 
+/**
+ * What a streaming handler makes visible, and when.
+ *
+ * `start` is the headers at the moment the first byte is written, which is what Node calls sending the headers. Everything after it
+ * is body bytes in write order. There is no `end` event: the response record that follows carries the status, and the absence of a
+ * further chunk is the end.
+ */
+export type ResponseEvent =
+  | { readonly kind: "start"; readonly statusCode: number; readonly statusMessage: string; readonly headers: Headers }
+  | { readonly kind: "chunk"; readonly body: Uint8Array };
+
+/** Receives a response as it is written. Installed by a transport that can carry partial responses; absent means buffering. */
+export type ResponseSink = (event: ResponseEvent) => void;
+
 const TEXT_ENCODER = new TextEncoder();
+const EMPTY_BYTES = new Uint8Array(0);
 
 function toBytes(chunk: string | Uint8Array, encoding?: string): Uint8Array {
   if (typeof chunk === "string") {
@@ -150,6 +171,8 @@ export class ServerResponse extends EventEmitter {
   #length = 0;
   readonly #settled: Promise<WireResponse>;
   #resolve!: (response: WireResponse) => void;
+  /** Set by a transport that can carry a partial response. Null means buffer everything and answer once. */
+  #sink: ResponseSink | null = null;
 
   constructor() {
     super();
@@ -161,6 +184,16 @@ export class ServerResponse extends EventEmitter {
   /** Resolves when the handler calls `end()`. Rejects only if the connection is torn down first. */
   get done(): Promise<WireResponse> {
     return this.#settled;
+  }
+
+  /**
+   * Send this response as it is written, instead of in one piece at `end()`.
+   *
+   * Called by the transport before the handler is invoked, because the first `write` may happen inside it. Headers leave on the first
+   * byte, so a handler that sets a header after writing is now an error, which is Node's rule and the reason `headersSent` exists.
+   */
+  attachSink(sink: ResponseSink): void {
+    this.#sink = sink;
   }
 
   setHeader(name: string, value: string | number | readonly string[]): this {
@@ -212,32 +245,62 @@ export class ServerResponse extends EventEmitter {
     return this;
   }
 
-  /** Buffers a chunk. Always reports "not full": the body is memory-resident, so there is no backpressure to report. */
+  /**
+   * Writes a chunk. Always reports "not full": with a sink the bytes have already left, and without one they are memory-resident, so
+   * there is no backpressure either way to report.
+   */
   write(chunk: string | Uint8Array, encoding?: string): boolean {
     if (this.writableEnded) throw new Error("ERR_STREAM_WRITE_AFTER_END: write after end");
     const bytes = toBytes(chunk, encoding);
+    if (this.#sink !== null) {
+      this.#sendStart();
+      if (bytes.length > 0) this.#sink({ kind: "chunk", body: bytes });
+      return true;
+    }
     this.#chunks.push(bytes);
     this.#length += bytes.length;
     return true;
   }
 
+  /**
+   * Send the headers, once.
+   *
+   * No `content-length`: a streamed body's length is unknown when the headers go out, and a wrong one truncates the response at the
+   * proxy. A handler that set one explicitly keeps it, since it may know something we do not (a HEAD response, a byte-range).
+   */
+  #sendStart(): void {
+    if (this.headersSent) return;
+    this.headersSent = true;
+    this.#sink?.({ kind: "start", statusCode: this.statusCode, statusMessage: this.statusMessage, headers: this.getHeaders() });
+  }
+
   /** Finish the response and settle the proxy's promise. Idempotent, because `end` is often called twice by mistake. */
   end(chunk?: string | Uint8Array, encoding?: string): this {
     if (this.writableEnded) return this;
-    if (chunk !== undefined) {
-      const bytes = toBytes(chunk, encoding);
-      this.#chunks.push(bytes);
-      this.#length += bytes.length;
-    }
     this.writableEnded = true;
     this.finished = true;
+    const last = chunk === undefined ? undefined : toBytes(chunk, encoding);
+
+    if (this.#sink !== null) {
+      this.#sendStart();
+      if (last !== undefined && last.length > 0) this.#sink({ kind: "chunk", body: last });
+      this.emit("finish");
+      // The body is empty ON PURPOSE: it travelled as events. `streamed` is how a consumer tells "no bytes" from "bytes already sent",
+      // which is the difference between an empty page and a page whose content arrived in pieces.
+      this.#resolve({ statusCode: this.statusCode, statusMessage: this.statusMessage, headers: this.getHeaders(), body: EMPTY_BYTES, streamed: true });
+      return this;
+    }
+
+    if (last !== undefined) {
+      this.#chunks.push(last);
+      this.#length += last.length;
+    }
     this.headersSent = true;
 
     const headers = this.getHeaders();
-    // Content-Length is always computed, overriding anything the handler set. This is a deliberate
-    // deviation from Node, which trusts the handler: since responses here are buffered whole, a wrong
-    // hand-written value can only cause a truncated or stalled response, and there is no streaming case
-    // where a handler would legitimately need to override it.
+    // Content-Length is always computed for a buffered response, overriding anything the handler set. This is a deliberate deviation
+    // from Node, which trusts the handler: a buffered body's length is known exactly, so a wrong hand-written value can only truncate
+    // or stall the response. A streamed response makes the opposite choice for the opposite reason (see #sendStart).
     headers["content-length"] = String(this.#length);
 
     this.emit("finish");
@@ -382,9 +445,12 @@ export class Server extends EventEmitter {
    * Handle one request. This is the function the preview gateway calls, and it is where a handler's
    * failure becomes a 500 instead of a hung preview.
    */
-  async dispatch(wire: WireRequest): Promise<WireResponse> {
+  async dispatch(wire: WireRequest, sink?: ResponseSink): Promise<WireResponse> {
     const request = new IncomingMessage(wire);
     const response = new ServerResponse();
+    // Installed BEFORE the handler runs: the handler's first `write` may happen inside the call below, and a sink attached afterwards
+    // would see a response that had already sent bytes nobody recorded.
+    if (sink !== undefined) response.attachSink(sink);
 
     const surfaceFailure = (cause: unknown): void => {
       if (response.writableEnded) {

@@ -7,7 +7,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { createServer, Server, type WireRequest } from "../../src/shims/http.js";
+import { createServer, Server, type ResponseEvent, type WireRequest } from "../../src/shims/http.js";
 import { PortRegistry } from "../../src/network/port-registry.js";
 
 const encoder = new TextEncoder();
@@ -290,5 +290,101 @@ describe("http.Server lifecycle", () => {
   it("refuses listen(callback) with no port, and says why", () => {
     const server = new Server(undefined, { registry: registry() });
     expect(() => server.listen(() => undefined)).toThrow(/ephemeral port allocation/);
+  });
+});
+
+/**
+ * Streaming: a response that leaves as it is written.
+ *
+ * The distinction these tests defend is between "no bytes" and "bytes already sent", because the two are indistinguishable at the end
+ * of a streamed response and mistaking one for the other is a page that renders empty with a 200.
+ */
+describe("streaming a response through a sink", () => {
+  it("sends the headers on the first write, before end() is called", async () => {
+    const events: ResponseEvent[] = [];
+    let sentWhileHandlerRunning = false;
+    const server = new Server((_request, response) => {
+      response.setHeader("content-type", "text/plain");
+      response.write("first");
+      // Still inside the handler, nowhere near end(), and the sink already holds the start event and its chunk: the headers went out
+      // with the first byte, which is exactly what a caller rendering that chunk needs.
+      sentWhileHandlerRunning = response.headersSent && events.length === 2 && events[0]?.kind === "start" && events[1]?.kind === "chunk";
+      response.end();
+    }, { registry: registry() });
+    await server.dispatch(request(), (event) => {
+      events.push(event);
+    });
+    expect(sentWhileHandlerRunning).toBe(true);
+    expect(events[0]).toEqual({
+      kind: "start",
+      statusCode: 200,
+      statusMessage: "",
+      headers: { "content-type": "text/plain" },
+    });
+  });
+
+  it("delivers chunks in write order and reports the body as streamed, not empty", async () => {
+    const chunks: string[] = [];
+    let start: ResponseEvent | undefined;
+    const server = new Server((_request, response) => {
+      response.write("a");
+      response.write("b");
+      response.end("c");
+    }, { registry: registry() });
+    const response = await server.dispatch(request(), (event) => {
+      if (event.kind === "start") start = event;
+      else chunks.push(decoder.decode(event.body));
+    });
+    expect(chunks).toEqual(["a", "b", "c"]);
+    expect(start?.kind).toBe("start");
+    expect(response.body.byteLength).toBe(0);
+    // `streamed` is what stops a consumer reading an empty body as "the handler wrote nothing".
+    expect(response.streamed).toBe(true);
+  });
+
+  it("does not invent a content-length it cannot know", async () => {
+    let headers: Record<string, string> = {};
+    const server = new Server((_request, response) => {
+      response.end("hello");
+    }, { registry: registry() });
+    await server.dispatch(request(), (event) => {
+      if (event.kind === "start") headers = { ...event.headers };
+    });
+    // Node omits content-length on a chunked response. Computing it here would promise a length the proxy then has to trust.
+    expect(headers["content-length"]).toBeUndefined();
+  });
+
+  it("reports no chunk for an empty write, and still starts the response", async () => {
+    const seen: string[] = [];
+    const server = new Server((_request, response) => {
+      response.write("");
+      response.end();
+    }, { registry: registry() });
+    await server.dispatch(request(), (event) => {
+      seen.push(event.kind);
+    });
+    // A zero-length write is not a chunk, but it IS when the headers go out: a handler that writes "" and then waits has still answered.
+    expect(seen).toEqual(["start"]);
+  });
+
+  it("refuses a header set after the first byte, as Node does", async () => {
+    const server = new Server((_request, response) => {
+      response.write("a");
+      // Without streaming this succeeded until end(). The headers are gone now, so silently ignoring it would be a lie.
+      expect(() => response.setHeader("x-late", "1")).toThrow(/headers/i);
+      response.end();
+    }, { registry: registry() });
+    await server.dispatch(request(), () => undefined);
+  });
+
+  it("keeps the buffered path untouched when no sink is installed", async () => {
+    const server = new Server((_request, response) => {
+      response.write("a");
+      response.end("b");
+    }, { registry: registry() });
+    const response = await server.dispatch(request());
+    expect(response.streamed).toBeUndefined();
+    expect(response.body).toEqual(encoder.encode("ab"));
+    expect(response.headers["content-length"]).toBe("2");
   });
 });
