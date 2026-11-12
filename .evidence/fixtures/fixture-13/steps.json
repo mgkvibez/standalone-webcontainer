@@ -6,7 +6,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "builtin command completed: added 8 package(s) from snapshot \"vite\" (8 pinned packages)",
-    "elapsedMs": 228,
+    "elapsedMs": 227,
     "record": {
       "index": 0,
       "exitCode": 0,
@@ -19,41 +19,20 @@
     "kind": "run",
     "command": "npm run dev -- --port 3300 --host 127.0.0.1",
     "state": "ran",
-    "termination": "ok",
-    "detail": "process 1 exited 0 and left a server listening on port(s) 3300",
-    "elapsedMs": 969,
-    "record": {
-      "index": 1,
-      "exitCode": 0,
-      "stdout": "\n  VITE v5.4.21  \n\n  ➜  Local:   http://127.0.0.1:3300/\n",
-      "stderr": "",
-      "http": {
-        "http://localhost:3300/": {
-          "status": 200,
-          "body": "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <script type=\"module\" src=\"/@vite/client\"></script>\n\n    <meta charset=\"utf-8\" />\n    <title>fixture-13</title>\n  </head>\n  <body>\n    <div id=\"root\">initial-marker</div>\n    <script type=\"module\" src=\"/src/main.js\"></script>\n  </body>\n</html>\n"
-        }
-      }
-    }
+    "termination": "timeout",
+    "detail": "no result within 60000ms",
+    "elapsedMs": 60000,
+    "record": null
   },
   {
     "index": 2,
     "kind": "run",
     "command": "node edit.mjs",
-    "state": "ran",
-    "termination": "ok",
-    "detail": "process 2 exited with exit 0",
-    "elapsedMs": 102,
-    "record": {
-      "index": 2,
-      "exitCode": 0,
-      "stdout": "rewrote /index.html\n",
-      "stderr": "",
-      "http": {
-        "http://localhost:3300/": {
-          "status": 200,
-          "body": "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <script type=\"module\" src=\"/@vite/client\"></script>\n\n    <meta charset=\"utf-8\" />\n    <title>fixture-13</title>\n  </head>\n  <body>\n    <div id=\"root\">edited-marker</div>\n    <script type=\"module\" src=\"/src/main.js\"></script>\n  </body>\n</html>\n"
-        }
-      }
-    }
+    "state": "skipped",
+    "skipReason": "step 1 exceeded its run budget after 60000ms",
+    "termination": "not-run",
+    "detail": "not run: step 1 exceeded its run budget after 60000ms",
+    "elapsedMs": 0,
+    "record": null
   }
 ]

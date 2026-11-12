@@ -5,12 +5,12 @@
     "command": "npm install",
     "state": "ran",
     "termination": "ok",
-    "detail": "builtin command completed: added 0 package(s) from snapshot \"vite\" (8 pinned packages)",
-    "elapsedMs": 2,
+    "detail": "builtin command completed: added 0 package(s) from the offline corpus",
+    "elapsedMs": 1,
     "record": {
       "index": 0,
       "exitCode": 0,
-      "stdout": "added 0 package(s) from snapshot \"vite\" (8 pinned packages)",
+      "stdout": "added 0 package(s) from the offline corpus",
       "stderr": ""
     }
   },
@@ -21,7 +21,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "process 1 exited with exit 0",
-    "elapsedMs": 25,
+    "elapsedMs": 24,
     "record": {
       "index": 1,
       "exitCode": 0,

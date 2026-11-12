@@ -1,4 +1,4 @@
 fixture: fixture-08
 evidence schema: 3
-classification: RUNTIME_INCOMPATIBILITY
-reason: assertion failed: exit-code: expected exit code 0, observed 1 (and 2 more)
+classification: PASS
+reason: all 3 assertion(s) passed

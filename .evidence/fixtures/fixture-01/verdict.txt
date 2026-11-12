@@ -1,4 +1,4 @@
 fixture: fixture-01
 evidence schema: 3
-classification: PASS
-reason: all 2 assertion(s) passed
+classification: TIMEOUT
+reason: step 1 (npm run dev -- --port 3000 --host 127.0.0.1) exceeded its run budget after 60000ms
