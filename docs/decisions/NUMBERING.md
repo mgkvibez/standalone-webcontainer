@@ -15,7 +15,7 @@ the repository. Never cite a bare number across that boundary. Write `Phase 6` (
 | **Plan Phases** | the fix plan; phase headings throughout `docs/` | 0 to 10 | `Phase 6` = a real shell on a PTY |
 | **P0 rulings** | `docs/decisions/P0-rulings.md` | `P0-1` to `P0-10` | `P0-6` = wire or delete `src/shims/presets.ts` |
 | **Milestones** | `docs/phase-6/`, ADR-0016, commit messages | `R1` to `R7`, with sub-steps `R6a` to `R6e` | `R6` = deterministic offline dependency corpus |
-| **ADRs** | `docs/decisions/ADR-*.md` | `ADR-0001` to `ADR-0023` | `ADR-0023` = a terminal programs can trust (PTY core, tty shim, live sizes) |
+| **ADRs** | `docs/decisions/ADR-*.md` | `ADR-0001` to `ADR-0034` | `ADR-0034` = a save reaches the live filesystem, a preview is a panel, a session's clock is off |
 | **Pull requests** | GitHub | `#1` upward | `PR #6` = phase2/envelope-presets |
 
 ## What was renamed, and why
