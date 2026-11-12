@@ -1,5 +1,9 @@
 # Where the Vite path stops, measured
 
+> **Superseded, 2026-11-12.** The esbuild blocker described here is closed: `src/npm/substitutions.ts` substitutes `esbuild-wasm`
+> including its `initialize()` hook, and fixture-01 (Vite dev serving its index) passes. This file is kept because it records the
+> boundary as it stood before the substitution; read it as history, not status.
+
 Everything below came from running `fixture-01`'s own install and start commands against the frozen snapshot
 (`fixtures/snapshots/vite`, 68 packages, no network at run time) and reading each failure.
 

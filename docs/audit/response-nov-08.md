@@ -1,5 +1,8 @@
 # Response to the second audit: what is accepted, what is corrected, what changed since
 
+> **Correction, 2026-11-12.** The "3 of 7" in this response was accurate on the day and is no longer the state: the two defects it
+> identified were fixed and the differential now matches Node on **7 of 7**. Kept unedited as a record of the response.
+
 **Date:** 2026-11-08
 **Base:** `docs/p0-ratification` (Phase 0 ADRs + Phase 10 tooling already committed)
 **Tone of this page:** each audit point gets evidence or a correction, not agreement. Where the audit is right, it is

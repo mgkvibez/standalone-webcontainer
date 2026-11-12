@@ -159,10 +159,35 @@ export function randomBytes(size: number): Uint8Array {
   return bytes;
 }
 
+/**
+ * Fill a view with random bytes, INCLUDING a view backed by a SharedArrayBuffer.
+ *
+ * Node fills such a view happily (`crypto.randomFillSync(new Uint8Array(new SharedArrayBuffer(4)))` returns bytes), and so does
+ * `crypto.getRandomValues`. BROWSERS DO NOT: the Web Crypto algorithm refuses a view over shared memory, and this shim calls the browser's
+ * `getRandomValues`. So the oracle answers "works" while the platform underneath raises, and the difference only appears once the process lane
+ * is in play, because that is where SharedArrayBuffers come from.
+ *
+ * The fix is the one the audit suggests: fill a plain buffer and copy in. It is done ONLY for a shared view, so the ordinary path keeps its
+ * single allocation. `SharedArrayBuffer` is checked with `typeof`, because the identifier does not exist at all in a context without it.
+ */
+const isShared = (buffer: ArrayBufferLike): boolean =>
+  typeof SharedArrayBuffer !== "undefined" && buffer instanceof SharedArrayBuffer;
+
+/** The browser's `getRandomValues`, with a shared view routed through a plain buffer. One place, so both callers get the rule. */
+const fill = (view: Uint8Array): void => {
+  if (webCrypto === undefined) throw UNSUPPORTED("getRandomValues");
+  if (isShared(view.buffer)) {
+    const scratch = new Uint8Array(view.length);
+    webCrypto.getRandomValues(scratch);
+    view.set(scratch);
+    return;
+  }
+  webCrypto.getRandomValues(view);
+};
+
 export function randomFillSync<T extends ArrayBufferView>(buffer: T, offset = 0, size?: number): T {
   if (webCrypto === undefined) throw UNSUPPORTED("randomFillSync");
-  const view = new Uint8Array(buffer.buffer, buffer.byteOffset + offset, size ?? buffer.byteLength - offset);
-  webCrypto.getRandomValues(view);
+  fill(new Uint8Array(buffer.buffer, buffer.byteOffset + offset, size ?? buffer.byteLength - offset));
   return buffer;
 }
 
@@ -187,7 +212,10 @@ export const webcrypto = webCrypto;
 
 export const getRandomValues = <T extends ArrayBufferView>(array: T): T => {
   if (webCrypto === undefined) throw UNSUPPORTED("getRandomValues");
-  return webCrypto.getRandomValues(array as never) as T;
+  // Routed through `fill`, so a SharedArrayBuffer-backed view is served from a plain buffer rather than raising the way the browser's own
+  // `getRandomValues` does. Node fills a shared view without complaint, and Node is the oracle here.
+  fill(new Uint8Array(array.buffer, array.byteOffset, array.byteLength));
+  return array;
 };
 
 export const subtle = {

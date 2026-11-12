@@ -2,7 +2,7 @@
  * Where localStorage actually stops working, measured in a real browser.
  *
  * Persistence is `localStorage` today: synchronous, one versioned key, whole project map rewritten on every change. That choice is
- * cheap and it works, but three claims about it have never been measured, and the persistence decision (ADR-0017) should not be
+ * cheap and it works, but three claims about it have never been measured, and the persistence decision (ADR-0027) should not be
  * made on instinct:
  *
  *   1. what the quota ceiling actually is for this origin,
@@ -92,7 +92,7 @@ test("surfaces a save failure instead of dropping the project silently", async (
 });
 
 /**
- * The two-tab behaviour AFTER ADR-0017.
+ * The two-tab behaviour AFTER ADR-0027.
  *
  * This test used to measure silent loss: tab B rewrote the whole map from its own stale copy and tab A's project vanished from
  * storage. Those numbers are kept in docs/audit/persistence-limits.md as the reason for the change. What is asserted now is the
