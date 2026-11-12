@@ -15,6 +15,7 @@
  */
 
 import { allocateChannel, type ChannelAllocation, type ChannelSizes } from "./syscall-channel.js";
+import type { MessagePortLike } from "./process-transport.js";
 import { ProcessTable, type ProcessEntry, type ProcessState } from "./process-table.js";
 
 /** The slice of the Worker API this module needs. Narrow on purpose: it is also the seam tests replace. */
@@ -32,6 +33,14 @@ export interface StartProcessOptions {
   readonly argv: readonly string[];
   readonly env?: Readonly<Record<string, string>>;
   readonly cwd?: string;
+  /**
+   * A dedicated reply channel for preview requests addressed to a server this process owns.
+   *
+   * Separate from the syscall channel on purpose: a preview request can take seconds (a dev server rebuilding), and the syscall
+   * channel carries one in-flight call at a time, so routing HTTP over it would block every filesystem call the program needs in
+   * order to answer. Transferred to the Worker, which then owns that end.
+   */
+  readonly transport?: MessagePortLike;
   /** Channel capacities. Small by default: a syscall payload is a path or a small buffer, not a file. */
   readonly channelSizes?: ChannelSizes;
 }
@@ -45,6 +54,25 @@ export interface ProcessHostOptions {
   readonly spawn?: SpawnWorker;
   readonly maxProcesses?: number;
   readonly onChange?: (entry: ProcessEntry<ProcessWorkerLike>) => void;
+  /**
+   * Messages the host does not interpret, in arrival order.
+   *
+   * The host owns three messages (output, exit, failed) and must not grow a case for every subsystem that wants one: ports belong
+   * to the transport broker, and a host that parsed them would be a second authority on which process serves what.
+   */
+  readonly onMessage?: (pid: number, data: unknown) => void;
+  /**
+   * Whether a process that reported exit must be kept alive anyway.
+   *
+   * Node's rule, and it is not a detail: a listening server is a ref'd handle, so the event loop stays alive and the process does not
+   * exit. The runtime here returns as soon as the program body settles, which is correct for a script and wrong for a dev server, so
+   * without this the first `npm run dev` would have its Worker terminated the moment its body returned and the preview would answer
+   * 503 for a server that had just printed "listening on 3000".
+   *
+   * The predicate is asked AT EXIT TIME rather than tracked here, because what keeps a process alive is a property of the process's
+   * own servers, which this class does not own.
+   */
+  readonly holdOpen?: (pid: number) => boolean;
   /**
    * Output as it is written, before the process exits. Without this a long-running program is silent until it ends,
    * which is the difference between a terminal and a log dump.
@@ -81,10 +109,14 @@ export class ProcessHost {
   readonly #spawn: SpawnWorker;
   readonly #channels = new Map<number, ChannelAllocation>();
   readonly #onOutput: ProcessHostOptions["onOutput"];
+  readonly #onMessage: ProcessHostOptions["onMessage"];
+  readonly #holdOpen: ProcessHostOptions["holdOpen"] | undefined;
 
   constructor(options: ProcessHostOptions = {}) {
     this.#spawn = options.spawn ?? defaultSpawn;
     this.#onOutput = options.onOutput;
+    this.#onMessage = options.onMessage;
+    this.#holdOpen = options.holdOpen;
     this.#table = new ProcessTable<ProcessWorkerLike>({
       maxProcesses: options.maxProcesses ?? 8,
       ...(options.onChange === undefined ? {} : { onChange: options.onChange }),
@@ -110,15 +142,22 @@ export class ProcessHost {
 
     worker.onmessage = (event) => this.#onWorkerMessage(pid, event.data);
     worker.onerror = (event) => this.#fail(pid, event.message ?? "worker error");
-    worker.postMessage({
-      type: "start",
-      pid,
-      argv: [...options.argv],
-      env: { ...(options.env ?? {}) },
-      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-      buffer: allocation.buffer,
-      sizes: allocation.sizes,
-    });
+    const transport = options.transport;
+    worker.postMessage(
+      {
+        type: "start",
+        pid,
+        argv: [...options.argv],
+        env: { ...(options.env ?? {}) },
+        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        buffer: allocation.buffer,
+        sizes: allocation.sizes,
+        ...(transport === undefined ? {} : { transport }),
+      },
+      // Transfer, not copy: a MessagePort that is cloned rather than transferred arrives with no channel behind it, and the
+      // failure looks like a server that never answers.
+      transport === undefined ? undefined : [transport as unknown as Transferable],
+    );
 
     return { pid, allocation };
   }
@@ -172,6 +211,9 @@ export class ProcessHost {
       return;
     }
     if (message.type === "exit") {
+      // Held open by something the process still owns (a listening server). Its state stays live, so it can still be killed and can
+      // still be routed to; the exit is remembered rather than acted on.
+      if (this.#holdOpen?.(pid) === true) return;
       this.finish(pid, "exited", {
         ...(typeof message.code === "number" ? { exitCode: message.code } : {}),
         ...(typeof message.reason === "string" ? { reason: message.reason } : {}),
@@ -182,7 +224,9 @@ export class ProcessHost {
       this.finish(pid, "failed", {
         reason: typeof message.reason === "string" ? message.reason : "worker reported failure",
       });
+      return;
     }
+    this.#onMessage?.(pid, data);
   }
 
   #fail(pid: number, reason: string): void {
