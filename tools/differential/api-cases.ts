@@ -295,6 +295,20 @@ const cases: ApiCase[] = [
       "console.log(code(() => validateHeaderValue('x-trace-id', 'a\\nb')));",
     ].join("\n"),
   },
+  {
+    // utimes takes SECONDS. Reading them as milliseconds is silent (every file lands in 1970, nothing throws), so this compares the stored
+    // answer across both runtimes rather than trusting the conversion: the birth time is printed too, because POSIX utimes must not move it.
+    id: "fs-utimes-seconds",
+    question: "does utimesSync set the modification time from SECONDS, leave birth time alone, and report it back in milliseconds?",
+    source: [
+      "const fs = require('fs');",
+      "fs.writeFileSync('/tmp/utimes.txt', 'body');",
+      "const before = fs.statSync('/tmp/utimes.txt').birthtimeMs;",
+      "fs.utimesSync('/tmp/utimes.txt', 1700000000, 1700000000);",
+      "const after = fs.statSync('/tmp/utimes.txt');",
+      "console.log(after.mtimeMs, after.mtime.getUTCFullYear(), after.birthtimeMs === before);",
+    ].join("\n"),
+  },
 ];
 
 export const API_CASES: readonly ApiCase[] = cases;
