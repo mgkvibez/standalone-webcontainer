@@ -421,3 +421,93 @@ export class Server extends EventEmitter {
 export function createServer(handler?: RequestListener, options?: CreateServerOptions): Server {
   return new Server(handler, options);
 }
+
+/**
+ * Node's HTTP CLIENT is not provided here, and says so. See docs/decisions/ADR-0025.md.
+ *
+ * The audit's criticism was not that `http.get` was missing; it was that the absence was SILENT: `http.get(url)` produced
+ * `TypeError: http.get is not a function` with nothing about why, what to use instead, or that a boundary had been reached. Silence is the
+ * worst of the three options (implement it, refuse it by name, say nothing) because it reads as a broken runtime rather than a decision.
+ *
+ * What a program must do instead: use the global `fetch()`, which the browser supplies. It is not the same contract, and the difference is worth
+ * naming — `fetch` is CORS-governed, has no sockets, no keep-alive agent, no `Expect: 100-continue`, and streams through WHATWG
+ * `ReadableStream` rather than Node's `stream.Readable`. Code reaching for `http.get` to control any of those cannot be served by a wrapper over
+ * fetch without misrepresenting it.
+ */
+function refuseClient(member: string): never {
+  const error = new Error(
+    `ERR_NOT_SUPPORTED: http.${member} is not available in this runtime: there are no sockets, so Node's HTTP client cannot exist here. ` +
+      "Use the global fetch(), which the browser provides with CORS semantics (no agent, no socket options, WHATWG streams). " +
+      "See docs/decisions/ADR-0025.md.",
+  ) as Error & { code: string };
+  error.code = "ERR_NOT_SUPPORTED";
+  throw error;
+}
+
+/**
+ * Refused rather than absent, because a caller reaches for it to configure a client that cannot exist: an `Agent` with `keepAlive` is
+ * meaningless without sockets, and an inert object would let `new Agent({ keepAlive: true })` appear to have worked.
+ */
+export class Agent {
+  constructor(_options?: unknown) {
+    refuseClient("Agent");
+  }
+}
+
+/** Refused for the same reason: a request object cannot be built without a socket to carry it. */
+export class ClientRequest extends EventEmitter {
+  constructor() {
+    super();
+    refuseClient("ClientRequest");
+  }
+}
+
+export function request(..._args: unknown[]): never {
+  return refuseClient("request");
+}
+
+export function get(..._args: unknown[]): never {
+  return refuseClient("get");
+}
+
+/**
+ * Node's maximum header size, as a real number rather than a placeholder: 16 KiB is what Node reports, and a caller sizing a buffer from it gets
+ * a true figure. Nothing here enforces it — the preview gateway applies its own limit.
+ */
+export const maxHeaderSize = 16384;
+
+/**
+ * `validateHeaderName`, IMPLEMENTED rather than refused, because it is a pure function: libraries call it to fail early, so a refusal would break
+ * code that works.
+ *
+ * Node's rule is an RFC 7230 token — letters, digits and a small set of punctuation, with no space, colon, quote or control character — and the
+ * error code is Node's, because callers match on `code` rather than on the wording.
+ */
+export function validateHeaderName(name: unknown): void {
+  const text = String(name);
+  if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(text)) {
+    const error = new TypeError(`Header name must be a valid HTTP token ["${text}"]`) as TypeError & { code: string };
+    error.code = "ERR_INVALID_HTTP_TOKEN";
+    throw error;
+  }
+}
+
+/**
+ * `validateHeaderValue`, implemented for the same reason.
+ *
+ * Two refusals, both Node's: an `undefined` value (`ERR_HTTP_INVALID_HEADER_VALUE`) and a value carrying a character that would split the header
+ * (`ERR_INVALID_CHAR`). The second is the one that matters — a newline in a value is header injection, and a validator that accepted it would be
+ * worse than no validator at all.
+ */
+export function validateHeaderValue(name: string, value: unknown): void {
+  if (value === undefined) {
+    const error = new TypeError(`Invalid value "undefined" for header "${name}"`) as TypeError & { code: string };
+    error.code = "ERR_HTTP_INVALID_HEADER_VALUE";
+    throw error;
+  }
+  if (/[\u0000-\u0008\u000a-\u001f\u007f]/.test(String(value))) {
+    const error = new TypeError(`Invalid character in header content ["${name}"]`) as TypeError & { code: string };
+    error.code = "ERR_INVALID_CHAR";
+    throw error;
+  }
+}

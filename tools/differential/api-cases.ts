@@ -279,6 +279,22 @@ const cases: ApiCase[] = [
       "console.log(typeof seconds, seconds >= 0, seconds < 600);",
     ].join("\n"),
   },
+  {
+    // The validators are pure functions, so Node and this runtime must agree exactly — including the error CODES, which is what a library
+    // matches on. The refusal of http.get/request is deliberately NOT a case here: Node succeeds at it, and a case that is meant to deviate
+    // would be noise in a table whose whole value is that a deviation means something. It is pinned in unit tests instead.
+    id: "http-validate-headers",
+    question: "do http's header validators accept a token and refuse a bad name, an undefined value and a control character?",
+    source: [
+      "const { validateHeaderName, validateHeaderValue } = require('http');",
+      "const code = (fn) => { try { fn(); return 'ok'; } catch (error) { return error.code; } };",
+      "console.log(code(() => validateHeaderName('x-trace-id')));",
+      "console.log(code(() => validateHeaderName('bad name')));",
+      "console.log(code(() => validateHeaderValue('x-trace-id', 'abc')));",
+      "console.log(code(() => validateHeaderValue('x-trace-id', undefined)));",
+      "console.log(code(() => validateHeaderValue('x-trace-id', 'a\\nb')));",
+    ].join("\n"),
+  },
 ];
 
 export const API_CASES: readonly ApiCase[] = cases;

@@ -3,7 +3,7 @@
 **Date:** 11 November 2026
 **Base:** `main` at `a85d9af`
 **Instrument:** `npm run diff:api` (`tools/differential/{api,api-cases}.ts`)
-**Result:** 0/28 → **28/28 cases match real Node**
+**Result:** 0/29 → **29/29 cases match real Node**
 
 ## Why this document exists
 
@@ -18,7 +18,7 @@ So the first deliverable here is not a feature. It is a measurement that can see
 
 ## The instrument
 
-28 small programs, each asking one question ("does `rmSync` remove a tree, and does the tree then read as gone?"). Each is run twice and compared:
+29 small programs, each asking one question ("does `rmSync` remove a tree, and does the tree then read as gone?"). Each is run twice and compared:
 
 - **real Node**, staged as a `.cjs` file in a fresh temp directory per case;
 - **this runtime**, against a fresh `FileSystem` and `InProcessRuntime`.
@@ -133,9 +133,10 @@ exposes them", and this document's first version stopped one member short of tha
 
 ## Regression cover
 
-- `tools/differential/api-cases.ts` — 28 cases, with their own guards in `tests/unit/differential.cases.test.ts` (unique ids, a question
+- `tools/differential/api-cases.ts` — 29 cases, with their own guards in `tests/unit/differential.cases.test.ts` (unique ids, a question
   ending in `?`, a `console.log` on every path, no clocks or randomness).
 - `tests/unit/shims.fs.surface.test.ts` — 23 tests.
 - `tests/unit/shims.api-p1.test.ts` — 30 tests.
+- `tests/unit/shims.http-client.test.ts` — 9 tests for the HTTP client refusal (ADR-0025).
 
 The differential proves the answer matches Node. The unit tests keep a later edit from changing it without a Node oracle in the loop.
