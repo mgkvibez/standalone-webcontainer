@@ -47,6 +47,7 @@ import https from "../shims/https.js";
 import net from "../shims/net.js";
 import { createModuleShim } from "../shims/module.js";
 import { createOsShim } from "../shims/os.js";
+import { createWebSocketClass } from "../shims/websocket.js";
 import { createPerfHooksShim } from "../shims/perf-hooks.js";
 import { createTimersPromisesShim, createTimersShim } from "../shims/timers.js";
 import { bufferModule } from "../shims/buffer.js";
@@ -618,6 +619,17 @@ export class InProcessRuntime implements Runtime {
       setImmediate: ((fn: (...args: never[]) => void, ...args: unknown[]) =>
         scheduler.setImmediate(fn, ...args)) as RuntimeGlobals["setImmediate"],
       self: undefined as unknown,
+      /**
+       * The container's own `WebSocket`, not the host's.
+       *
+       * The host's would dial `localhost:3000` on the network, where there is no server: the program being previewed IS the server, one
+       * port registry away, on the other side of a duplex this runtime owns. Same RFC 6455 above the socket, so a client written for a
+       * browser works unchanged (ADR-0031).
+       */
+      WebSocket: createWebSocketClass((request) => {
+        const result = this.#gateway.upgrade({ protocol: "http", port: request.port, path: request.path }, request.headers);
+        return result.accepted ? { socket: result.socket } : { refusal: result.reason };
+      }),
     } satisfies RuntimeGlobals;
     // The object a program sees as `self` is its own global object, the way a browser's is: the realm's constructors plus what this runtime owns.
     // Built as one object so a package that assembles a scope from `self` gets both.

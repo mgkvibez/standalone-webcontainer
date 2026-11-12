@@ -205,6 +205,13 @@ export interface RuntimeGlobals {
    * name for its global is the one lying about the context it provides.
    */
   readonly self: unknown;
+  /**
+   * The client half of a protocol switch, as a global because that is where a browser keeps it and where every client looks.
+   *
+   * Optional on the type because a caller that builds a `RuntimeContext` for something other than a full runtime (a loader test, a
+   * module probe) has no transport to bind one to, and a required field there would be a field invented to satisfy the compiler.
+   */
+  readonly WebSocket?: unknown;
 }
 
 export interface RuntimeContext {
@@ -596,6 +603,10 @@ export class CommonJsLoader {
       // in-thread service inside `esbuild-wasm` copies `self`'s properties into the scope its Go runtime runs in, and that runtime then reaches
       // for `Object` through it.
       ["self", runtimeGlobals.self],
+      // The container's own client for a protocol switch, bound only when a runtime supplied one. A loader used on its own (a module probe,
+      // a transform test) has no transport to bind it to, and binding `undefined` would SHADOW whatever the host realm provides — turning
+      // "this runtime has no websocket support" into "websocket is not defined" in code that never asked this runtime for one.
+      ...(runtimeGlobals.WebSocket === undefined ? [] : ([["WebSocket", runtimeGlobals.WebSocket]] as ReadonlyArray<readonly [string, unknown]>)),
       ...this.#realmBindings,
     ];
     // For an ES module the transform reports its own lexical bindings, so the answer is a fact rather than an inference from

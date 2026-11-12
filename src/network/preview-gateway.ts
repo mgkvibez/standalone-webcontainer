@@ -23,7 +23,14 @@
 
 import { RequestRegistry, RequestTimeoutError } from "./request-registry.js";
 import { PortRegistry, type ServeProtocol } from "./port-registry.js";
-import { Server, type RequestListener, type ResponseSink, type WireRequest, type WireResponse } from "../shims/http.js";
+import {
+  Server,
+  type RequestListener,
+  type ResponseSink,
+  type UpgradeResult,
+  type WireRequest,
+  type WireResponse,
+} from "../shims/http.js";
 
 export interface GatewayOptions {
   readonly registry: PortRegistry;
@@ -170,6 +177,24 @@ export class PreviewGateway {
     const server = new Server(handler, { registry: this.#registry });
     this.attach(server);
     return server;
+  }
+
+  /**
+   * Hand a connection to the server on a port, for a protocol switch rather than a request.
+   *
+   * Deliberately NOT a `fetch` path. A browser's WebSocket handshake is not a fetch event, so a service worker never sees it and the
+   * proxy that routes `/preview/<port>/` cannot route one (ADR-0031). The connection therefore has to be opened by something inside the
+   * runtime, which is what `src/shims/websocket.ts` is, and this is the door it knocks on.
+   *
+   * The refusals are separated because a user meets them differently: a port nobody serves is a program that has not started, while a port
+   * that serves requests but no upgrades is a program that has not implemented one.
+   */
+  upgrade(target: ResolvedTarget, headers: Readonly<Record<string, string>>): UpgradeResult {
+    const server = this.#servers.get(target.port);
+    if (server === undefined) {
+      return { accepted: false, reason: `No preview server is listening on port ${target.port}. Start one with server.listen(${target.port}).` };
+    }
+    return server.dispatchUpgrade({ method: "GET", url: target.path, headers: withHost(headers, target.port), body: new Uint8Array(0) });
   }
 
   /** Fail everything outstanding. Called on teardown so no request outlives the runtime. */
