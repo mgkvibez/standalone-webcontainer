@@ -28,6 +28,16 @@ loads `loadOfflineRegistry`), and the network/snapshot lanes belong to the fixtu
 
 ---
 
+## 0. Baseline reconciliation, 2026-11-12 (`docs/audit/baseline-nov-12.md`)
+
+The forensic audit asked for the evidence discrepancies closed before any new build. Doing that produced a reproducible baseline
+and two defects in the *measurement*, not in the runtime. Every claimed pass was re-run in the lane the claim names.
+
+| # | Item | State and evidence | Next action |
+| --- | --- | --- | --- |
+| W-27 | Evidence does not record its registry lane, so a wrong-lane run silently overwrites a passing result | **Open, and it is why the audit found a PASS in the docs and a `SNAPSHOT_MISSING` failure in `.evidence/fixtures/fixture-08/`.** One slot per fixture (`evidenceRoot` = `.evidence/fixtures`) and neither `verdict.txt` nor `steps.json` names the registry. `fixture-08` has since been regenerated on `--registry=snapshot:fixtures/snapshots/express` and is a real PASS 3/3; `fixture-13`'s committed PASS was destroyed and replaced twice today, once by a corpus-lane run and once by a vite-snapshot run that timed out. | Write the lane into the evidence (`origin` already exists on `RegistryClient`), and either namespace evidence per lane or refuse to overwrite a run whose lane differs. Before that, no collected evidence is attributable. |
+| W-28 | The harness lane cannot observe a held-open server, so every dev-server fixture dies on its budget | **Open, and it is the reason 01 and 13 have no verdict.** W-26 gave the product a live ports report (`Container` subscribes to `runtime.onPorts`, `container.ts:104`), but only `src/browser/runtime.worker.ts` implements `onPorts`; `tools/harness/in-process-client.ts` has none, so `Container.execute("npm run dev …")` never resolves for a server and the step is killed at 60 s. Measured with `tools/probe-vite-start.ts`: Vite 5.4.21 boots here and prints its URL in ~5 s, then the harness waits forever. This is a harness defect, not a runtime one, and it is not a regression from W-26 (it reproduces at `3252dac`, before it). | Give `InProcessClient` the same live ports report the process Worker has, then re-run 01 and 13. Until then the gate number is 5/15 front-end (33%), not 7/15. |
+
 ## 1. Product connection (the audit's first priority, and it is right)
 
 | # | Item | State and evidence | Next action |
