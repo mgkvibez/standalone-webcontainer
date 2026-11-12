@@ -1,0 +1,209 @@
+/**
+ * The broker, over real `MessageChannel`s.
+ *
+ * `MessageChannel` exists in Node, so this is not a fake transport: the messages really are structured-cloned and really do arrive
+ * asynchronously, which is what makes the deadline, the correlation ids and the detach-clears-pending rule testable without a
+ * browser. What the browser lane adds is a real program inside a real Worker; what this file adds is the ability to test the
+ * failure paths, which a real program would only reach by being broken in exactly the right way.
+ */
+
+import { describe, expect, it } from "vitest";
+
+import {
+  portFromPreviewUrl,
+  ProcessTransportBroker,
+  type TransportReplyMessage,
+  type TransportRequestMessage,
+} from "../../src/process/process-transport.js";
+
+const decode = (body: Uint8Array): string => new TextDecoder().decode(body);
+
+const request = (url: string, over: Partial<{ method: string; headers: Record<string, string>; body: Uint8Array }> = {}) => ({
+  method: over.method ?? "GET",
+  url,
+  headers: over.headers ?? {},
+  body: over.body ?? new Uint8Array(),
+});
+
+/** A process end that answers with a fixed body, so the test is about the broker rather than about HTTP. */
+function answeringProcess(statusCode = 200, body = "hello from the process") {
+  const channel = new MessageChannel();
+  const received: TransportRequestMessage[] = [];
+  channel.port1.onmessage = (event: MessageEvent) => {
+    const message = event.data as TransportRequestMessage;
+    received.push(message);
+    const reply: TransportReplyMessage = {
+      type: "transport-reply",
+      id: message.id,
+      response: {
+        statusCode,
+        statusMessage: "",
+        headers: { "content-type": "text/plain" },
+        body: new TextEncoder().encode(body),
+      },
+    };
+    channel.port1.postMessage(reply);
+  };
+  return { channel, received };
+}
+
+describe("portFromPreviewUrl", () => {
+  it("reads the port a preview path addresses", () => {
+    expect(portFromPreviewUrl("/preview/3000/")).toBe(3000);
+    expect(portFromPreviewUrl("/preview/3200/src/main.js")).toBe(3200);
+    expect(portFromPreviewUrl("/preview/3200/a/b/c?x=1")).toBe(3200);
+  });
+
+  it("reads an absolute URL, because a Node-side probe has no browser to strip the origin", () => {
+    expect(portFromPreviewUrl("http://localhost:5173/preview/4000/index.html")).toBe(4000);
+  });
+
+  it("answers undefined for anything that is not a preview path", () => {
+    for (const url of ["/", "/src/main.js", "/preview/", "/preview/abc/x", "/previewx/3000/", "/preview/0/x", "/preview/70000/x"]) {
+      expect(portFromPreviewUrl(url), url).toBeUndefined();
+    }
+  });
+
+  it("honours a custom mount path, so a test can route somewhere else", () => {
+    expect(portFromPreviewUrl("/__preview/3000/x", "/__preview")).toBe(3000);
+    expect(portFromPreviewUrl("/preview/3000/x", "/__preview")).toBeUndefined();
+  });
+
+  it("is not confused by a second preview segment in the path underneath", () => {
+    // `/preview/4000/` must not be read from the delegated path: routing to the wrong port would serve another project's server.
+    expect(portFromPreviewUrl("/preview/3000/preview/4000/x")).toBe(3000);
+  });
+});
+
+describe("ProcessTransportBroker", () => {
+  it("forwards to the process that owns the port and returns its answer", async () => {
+    const broker = new ProcessTransportBroker();
+    const process = answeringProcess(201, "from pid 7");
+    broker.attach(7, process.channel.port2 as unknown as { postMessage(m: unknown): void; onmessage: ((e: { data: unknown }) => void) | null });
+    broker.setPorts(7, [{ protocol: "http", port: 3000 }]);
+
+    const response = await broker.handle(request("/preview/3000/page"));
+
+    expect(response.statusCode).toBe(201);
+    expect(decode(response.body)).toBe("from pid 7");
+    expect(process.received).toHaveLength(1);
+    // The URL is forwarded UNREWRITTEN: stripping the prefix is the serving runtime's gateway job, and doing it twice breaks every
+    // static site that would then serve its index at every path.
+    expect(process.received[0]?.request.url).toBe("/preview/3000/page");
+  });
+
+  it("routes by port when several processes are attached", async () => {
+    const broker = new ProcessTransportBroker();
+    const first = answeringProcess(200, "one");
+    const second = answeringProcess(200, "two");
+    broker.attach(1, first.channel.port2 as never);
+    broker.setPorts(1, [{ protocol: "http", port: 3000 }]);
+    broker.attach(2, second.channel.port2 as never);
+    broker.setPorts(2, [{ protocol: "http", port: 4000 }]);
+
+    expect(decode((await broker.handle(request("/preview/4000/"))).body)).toBe("two");
+    expect(decode((await broker.handle(request("/preview/3000/"))).body)).toBe("one");
+    // One message each: a broker that broadcast would have woken both processes for one request.
+    expect(first.received).toHaveLength(1);
+    expect(second.received).toHaveLength(1);
+  });
+
+  it("answers 503 for a port nobody serves, naming the port", async () => {
+    const broker = new ProcessTransportBroker();
+    const response = await broker.handle(request("/preview/9999/"));
+    expect(response.statusCode).toBe(503);
+    expect(decode(response.body)).toContain("9999");
+  });
+
+  it("answers 400 for a URL that addresses no port", async () => {
+    const broker = new ProcessTransportBroker();
+    expect((await broker.handle(request("/src/main.js"))).statusCode).toBe(400);
+  });
+
+  it("answers 504 when the process accepts the request and never answers, and does not leak the correlation entry", async () => {
+    const broker = new ProcessTransportBroker({ timeoutMs: 20 });
+    const channel = new MessageChannel();
+    // Deliberately silent: this is a server whose handler awaits forever.
+    channel.port1.onmessage = () => undefined;
+    broker.attach(3, channel.port2 as never);
+    broker.setPorts(3, [{ protocol: "http", port: 3000 }]);
+
+    const response = await broker.handle(request("/preview/3000/"));
+    expect(response.statusCode).toBe(504);
+    expect(decode(response.body)).toContain("3000");
+
+    // A late reply must find nothing. Sending one now would otherwise resolve the NEXT request with this answer, which is the
+    // defect a leaked correlation table produces and the reason the id is removed before the timeout resolves.
+    channel.port1.postMessage({
+      type: "transport-reply",
+      id: 1,
+      response: { statusCode: 200, statusMessage: "", headers: {}, body: new Uint8Array([1]) },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(broker.ownerOf(3000)).toBe(3);
+  });
+
+  it("fails a waiting request immediately when its process is detached, rather than at the deadline", async () => {
+    const broker = new ProcessTransportBroker({ timeoutMs: 5_000 });
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => undefined;
+    broker.attach(4, channel.port2 as never);
+    broker.setPorts(4, [{ protocol: "http", port: 3000 }]);
+
+    const startedAt = Date.now();
+    const pending = broker.handle(request("/preview/3000/"));
+    broker.detach(4);
+    const response = await pending;
+
+    expect(response.statusCode).toBe(503);
+    expect(decode(response.body)).toContain("pid 4");
+    // Well under the five-second deadline: a killed server must read as "nothing is listening" now, not after a timeout.
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(broker.ownerOf(3000)).toBeUndefined();
+  });
+
+  it("reports a process's own failure as a 500 that names it", async () => {
+    const broker = new ProcessTransportBroker();
+    const channel = new MessageChannel();
+    channel.port1.onmessage = (event: MessageEvent) => {
+      const message = event.data as TransportRequestMessage;
+      channel.port1.postMessage({ type: "transport-error", id: message.id, reason: "the handler threw" });
+    };
+    broker.attach(5, channel.port2 as never);
+    broker.setPorts(5, [{ protocol: "http", port: 3000 }]);
+
+    const response = await broker.handle(request("/preview/3000/"));
+    expect(response.statusCode).toBe(500);
+    expect(decode(response.body)).toBe("the handler threw");
+  });
+
+  it("tracks bindings across processes, and stops routing a port the process released", async () => {
+    const broker = new ProcessTransportBroker();
+    broker.attach(1, new MessageChannel().port2 as never);
+    broker.setPorts(1, [{ protocol: "http", port: 3000 }]);
+    expect(broker.bindings()).toEqual([{ pid: 1, protocol: "http", port: 3000 }]);
+
+    broker.setPorts(1, []);
+    expect(broker.ownerOf(3000)).toBeUndefined();
+    expect(broker.bindings()).toEqual([]);
+    expect((await broker.handle(request("/preview/3000/"))).statusCode).toBe(503);
+  });
+
+  it("accepts a raw ports message and ignores a malformed one instead of trusting it", async () => {
+    const broker = new ProcessTransportBroker();
+    broker.attach(1, new MessageChannel().port2 as never);
+
+    broker.accept(1, { type: "ports", ports: [{ protocol: "http", port: 3000 }, { protocol: "ftp", port: 21 }, { port: "3001" }] });
+    expect(broker.ownerOf(3000)).toBe(1);
+    expect(broker.ownerOf(21)).toBeUndefined();
+    expect(broker.bindings()).toHaveLength(1);
+  });
+
+  it("keeps http and https on the same number apart, because a browser treats them as two origins", () => {
+    const broker = new ProcessTransportBroker();
+    broker.attach(1, new MessageChannel().port2 as never);
+    broker.setPorts(1, [{ protocol: "https", port: 443 }]);
+    expect(broker.ownerOf(443, "http")).toBeUndefined();
+    expect(broker.ownerOf(443, "https")).toBe(1);
+  });
+});
