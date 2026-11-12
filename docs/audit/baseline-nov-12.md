@@ -47,8 +47,9 @@ ran against and the run that produced it, and one lane must not be able to overw
 **W-28 — the harness lane cannot observe a held-open server.** W-26 fixed this for the product: a server that never ends
 announces its ports live, through the broker's message funnel, instead of at settle. The in-process client the fixtures use has
 no `onPorts` implementation, so `Container.execute("npm run dev …")` never resolves and the step dies on its budget. Measured
-directly with `tools/probe-vite-start.ts`: **Vite 5.4.21 boots inside this runtime and prints its listening URL in about five
-seconds**; the harness cannot see it. That is why 01 and 13 are unmeasured, it is the single reason the two most important
+directly with `tools/probe-vite-start.ts`, whose whole output is one line: **`SERVING +5241ms url=http://127.0.0.1:3300/
+containerPorts=[]`**. Vite 5.4.21 is serving on port 3300 five seconds after the step began, and the container the harness reads
+reports no port at all. That is why 01 and 13 are unmeasured, it is the single reason the two most important
 front-end fixtures have no verdict, and it is a harness defect rather than a runtime one. It must be fixed before any gate
 number is quoted.
 
