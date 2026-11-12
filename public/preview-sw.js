@@ -15,7 +15,23 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(routePreviewRequest(event, url));
 });
 
+// The injected client, served from this origin rather than from the previewed server: a reserved path, checked before any routing, because
+// everything else a preview page asks for belongs to the dev server on the other side of the bridge.
+let clientSource = null;
+async function serveWebSocketClient() {
+  if (clientSource === null) clientSource = fetch("/preview-ws-client.js").then((response) => response.text());
+  return new Response(await clientSource, {
+    status: 200,
+    headers: {
+      "content-type": "application/javascript; charset=utf-8",
+      "cross-origin-resource-policy": "cross-origin",
+      "cache-control": "no-store",
+    },
+  });
+}
+
 async function routePreviewRequest(event, url) {
+  if (url.origin === self.location.origin && url.pathname === "/__swc/ws-client.js") return serveWebSocketClient();
   const client = event.clientId ? await self.clients.get(event.clientId) : undefined;
   const clientUrl = client ? new URL(client.url) : null;
   if (clientUrl?.searchParams.get("__preview_shell") === "1") return fetch(event.request);

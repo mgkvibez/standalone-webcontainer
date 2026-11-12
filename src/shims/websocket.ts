@@ -110,7 +110,14 @@ export function createWebSocketClass(connect: WebSocketConnector, options: WebSo
     public readyState: number = CONNECTING;
     public binaryType: "blob" | "arraybuffer" = "blob";
     public readonly url: string;
-    public readonly protocol = "";
+    /**
+     * The subprotocol the SERVER chose, empty when neither side asked for one.
+     *
+     * A browser sets this from the handshake response, and code reads it to know which protocol is in force (`ws` does, and so does anything that
+     * offers two). It was a constant empty string here until a preview page requested `echo` and got `""` back: the client sent the header and never
+     * looked at the answer, which is the quiet kind of incompleteness — the connection works, and only the negotiation is missing.
+     */
+    public protocol = "";
     public readonly extensions = "";
     /** Bytes handed to the socket and not yet written. Reported, not enforced: see the header. */
     public bufferedAmount = 0;
@@ -118,6 +125,8 @@ export function createWebSocketClass(connect: WebSocketConnector, options: WebSo
     #socket: Socket | null = null;
     /** The key sent in the handshake, kept so the accept header can be recomputed rather than guessed. */
     #key = "";
+    /** What the caller offered in `sec-websocket-protocol`, so the server's answer can be checked against it. */
+    #protocols: readonly string[] = [];
     #handshakeTimer: ReturnType<typeof setTimeout> | null = null;
     /** Bytes received before the handshake finished, and after it: one buffer, because the response and the first frame can arrive together. */
     #buffer: Uint8Array = new Uint8Array(0);
@@ -149,6 +158,8 @@ export function createWebSocketClass(connect: WebSocketConnector, options: WebSo
       }
 
       const list = protocols === undefined ? [] : typeof protocols === "string" ? [protocols] : [...protocols];
+      // Kept so the answer can be checked against what was actually offered, which is the only way to notice a server that chose for itself.
+      this.#protocols = list;
       const key = base64(randomKey());
       this.#key = key;
       const headers: Record<string, string> = {
@@ -292,6 +303,19 @@ export function createWebSocketClass(connect: WebSocketConnector, options: WebSo
         this.#fail("handshake failed: sec-websocket-accept did not match the key this client sent");
         return false;
       }
+
+      // The server's choice must be one the client offered. A browser fails the connection outright when it is not, because a peer that picks its
+      // own protocol is a peer the caller did not agree to talk to.
+      const selected = headers["sec-websocket-protocol"] ?? "";
+      if (selected !== "" && this.#protocols.length === 0) {
+        this.#fail(`handshake failed: the server chose the subprotocol "${selected}" when none was requested`);
+        return false;
+      }
+      if (selected !== "" && !this.#protocols.includes(selected)) {
+        this.#fail(`handshake failed: the server chose the subprotocol "${selected}", which was not offered`);
+        return false;
+      }
+      this.protocol = selected;
 
       this.#handshakeDone = true;
       this.readyState = OPEN;

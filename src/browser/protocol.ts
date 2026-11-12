@@ -140,8 +140,80 @@ export interface TransportError {
   readonly message: string;
 }
 
-export type TransportMessage = TransportRequest;
-export type TransportReply = TransportStart | TransportChunk | TransportResponse | TransportError;
+/**
+ * A websocket, from the page's point of view.
+ *
+ * The page cannot open one: a service worker never sees a handshake, so the preview proxy cannot route it (ADR-0031), and the previewed document
+ * is in another realm where the container's own `WebSocket` does not exist. What crosses this boundary instead is the *content* of the socket —
+ * open, send, message, close — and the RFC 6455 protocol itself runs in the runtime Worker, using the same client the container already tests
+ * against a real server (ADR-0033).
+ *
+ * That split is deliberate and it is the whole design: framing, masking, fragmentation, ping/pong and close codes live in ONE place, and the
+ * boundary only carries what a user's program would have read.
+ *
+ * `id` is the page's own, echoed back unchanged, so a previewed page can match replies without knowing anything about the runtime's id space.
+ */
+export interface SocketOpen {
+  readonly type: "socket-open";
+  readonly id: number;
+  /** The port the page was previewing. The runtime resolves it to a server; it is not a URL the page can aim anywhere. */
+  readonly port: number;
+  /** Request target for the handshake, path plus query, already resolved against the previewed page's location. */
+  readonly path: string;
+  readonly protocols: readonly string[];
+}
+
+/** Exactly one of `text` and `body` is present: what `WebSocket.send` was given, unchanged. */
+export interface SocketSend {
+  readonly type: "socket-send";
+  readonly id: number;
+  readonly text?: string;
+  readonly body?: Uint8Array;
+}
+
+export interface SocketClose {
+  readonly type: "socket-close";
+  readonly id: number;
+  readonly code?: number;
+  readonly reason?: string;
+}
+
+export type SocketMessage = SocketOpen | SocketSend | SocketClose;
+
+/** The server accepted the handshake. `protocol` is empty when neither side asked for one. */
+export interface SocketOpened {
+  readonly type: "socket-opened";
+  readonly id: number;
+  readonly protocol: string;
+}
+
+/** A message the page's handlers receive, in the form `binaryType` would have given it. */
+export interface SocketData {
+  readonly type: "socket-data";
+  readonly id: number;
+  readonly text?: string;
+  readonly body?: Uint8Array;
+}
+
+export interface SocketClosed {
+  readonly type: "socket-closed";
+  readonly id: number;
+  readonly code: number;
+  readonly reason: string;
+  readonly clean: boolean;
+}
+
+/** The connection never opened, with a sentence a user can act on: nothing listening, or nothing that speaks this protocol. */
+export interface SocketFailed {
+  readonly type: "socket-failed";
+  readonly id: number;
+  readonly message: string;
+}
+
+export type SocketReply = SocketOpened | SocketData | SocketClosed | SocketFailed;
+
+export type TransportMessage = TransportRequest | SocketMessage;
+export type TransportReply = TransportStart | TransportChunk | TransportResponse | TransportError | SocketReply;
 
 export interface OutputChunk {
   readonly type: "chunk";

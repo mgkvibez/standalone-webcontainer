@@ -48,7 +48,7 @@ interface Harness {
  * Frames are parsed with the same `decodeFrame` the client uses, which is a real dependency rather than a shortcut: the point is that the
  * two ends agree, and a test with two independent parsers would only prove the test's parser.
  */
-function harnessOn(port = 3000): Harness {
+function harnessOn(port = 3000, options: { readonly protocol?: string | null } = {}): Harness {
   const ports = new PortRegistry();
   const gateway = new PreviewGateway({ registry: ports });
   const sockets: Socket[] = [];
@@ -64,10 +64,14 @@ function harnessOn(port = 3000): Harness {
     const request = args[0] as { headers: Record<string, string> };
     const socket = args[1] as Socket;
     sockets.push(socket);
+    // A subprotocol header only when the test asks for one: a server that names a protocol nobody offered is a real failure mode, and it can only
+    // be tested if the harness can produce it.
+    const chosen = options.protocol === undefined || options.protocol === null ? "" : `Sec-WebSocket-Protocol: ${options.protocol}\r\n`;
     socket.write(
       "HTTP/1.1 101 Switching Protocols\r\n" +
         "Upgrade: websocket\r\n" +
         "Connection: Upgrade\r\n" +
+        `${chosen}` +
         `Sec-WebSocket-Accept: ${acceptKeyFor(request)}\r\n\r\n`,
     );
     let buffer = new Uint8Array(0);
@@ -162,6 +166,42 @@ describe("websocket handshake", () => {
 
     const event = (await once(socket, "error")) as { message: string };
     expect(event.message).toContain("no upgrade listener");
+  });
+});
+
+describe("subprotocol negotiation", () => {
+  it("records the protocol the server chose from the ones it offered", async () => {
+    const { WebSocketClass } = harnessOn(3300, { protocol: "echo" });
+    const socket = new WebSocketClass("ws://localhost:3300/live", "echo") as unknown as SocketLike & { protocol: string };
+
+    await once(socket, "open");
+    // A browser sets this from the response; `ws` and anything that offers two protocols reads it to know what it is talking to. The client sent
+    // the header and ignored the answer until a previewed page asked for `echo` and got `""` back.
+    expect(socket.protocol).toBe("echo");
+  });
+
+  it("refuses a protocol it never offered, rather than talking a language it did not agree to", async () => {
+    const { WebSocketClass } = harnessOn(3301, { protocol: "something-else" });
+    const socket = new WebSocketClass("ws://localhost:3301/live") as unknown as SocketLike;
+
+    const event = (await once(socket, "error")) as { message: string };
+    expect(event.message).toContain("when none was requested");
+  });
+
+  it("refuses a chosen protocol that is not in the list it offered", async () => {
+    const { WebSocketClass } = harnessOn(3302, { protocol: "other" });
+    const socket = new WebSocketClass("ws://localhost:3302/live", ["echo", "chat"]) as unknown as SocketLike;
+
+    const event = (await once(socket, "error")) as { message: string };
+    expect(event.message).toContain('"other", which was not offered');
+  });
+
+  it("one of several offered protocols is accepted, and reported as chosen", async () => {
+    const { WebSocketClass } = harnessOn(3303, { protocol: "chat" });
+    const socket = new WebSocketClass("ws://localhost:3303/live", ["echo", "chat"]) as unknown as SocketLike & { protocol: string };
+
+    await once(socket, "open");
+    expect(socket.protocol).toBe("chat");
   });
 });
 

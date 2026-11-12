@@ -1,5 +1,7 @@
 import "./styles.css";
 import type { TransportReply, TransportRequest } from "./protocol.js";
+import { createHtmlInjector, isHtmlDocument, type HtmlInjector } from "./html-inject.js";
+import { isSocketReply, toRuntimeSocketMessage } from "./socket-relay.js";
 
 const params = new URLSearchParams(window.location.search);
 const nonce = params.get("__preview_nonce");
@@ -44,8 +46,12 @@ window.parent.postMessage({ type: "preview-ready", nonce }, hostOrigin);
 
 let runtimePort: MessagePort | null = null;
 const inFlight = new Map<string, MessagePort>();
+/** One injector per response that is a document: the client has to land in the HTML the dev server wrote, and the body is still arriving. */
+const injectors = new Map<string, HtmlInjector>();
+let previewFrame: HTMLIFrameElement | null = null;
+const CLIENT_TAG = '<script data-swc-preview-client src="/__swc/ws-client.js"></script>';
 
-function isReply(value: unknown): value is TransportReply {
+function isReply(value: unknown): value is Extract<TransportReply, { id: string }> {
   if (typeof value !== "object" || value === null) return false;
   const message = value as Partial<TransportReply>;
   return (message.type === "response" || message.type === "error" || message.type === "start" || message.type === "chunk") &&
@@ -60,12 +66,42 @@ function isReply(value: unknown): value is TransportReply {
  * dropped there and nowhere else.
  */
 function onRuntimeMessage(event: MessageEvent<unknown>): void {
+  if (isSocketReply(event.data)) {
+    // A socket reply belongs to the previewed page, not to the service worker: it is not a response to anything the worker asked for.
+    previewFrame?.contentWindow?.postMessage(event.data, window.location.origin);
+    return;
+  }
   if (!isReply(event.data)) return;
   const responsePort = inFlight.get(event.data.id);
   if (responsePort === undefined) return;
-  const terminates = event.data.type === "response" || event.data.type === "error";
-  if (!terminates) {
+
+  if (event.data.type === "start") {
+    if (isHtmlDocument(event.data.headers["content-type"])) injectors.set(event.data.id, createHtmlInjector(CLIENT_TAG));
     responsePort.postMessage(event.data);
+    return;
+  }
+
+  if (event.data.type === "chunk") {
+    const injector = injectors.get(event.data.id);
+    if (injector === undefined) {
+      responsePort.postMessage(event.data);
+      return;
+    }
+    // Bytes before the closing head leave immediately; only the bounded tail is held, so the document still streams.
+    for (const body of injector.push(event.data.body)) responsePort.postMessage({ type: "chunk", id: event.data.id, body });
+    return;
+  }
+
+  const injector = injectors.get(event.data.id);
+  injectors.delete(event.data.id);
+  if (injector !== undefined) {
+    // Whatever the injector held goes out before the response ends, in the same order the server wrote it.
+    for (const body of injector.end()) responsePort.postMessage({ type: "chunk", id: event.data.id, body });
+  }
+  if (event.data.type === "error") {
+    inFlight.delete(event.data.id);
+    responsePort.postMessage(event.data);
+    responsePort.close();
     return;
   }
   inFlight.delete(event.data.id);
@@ -74,6 +110,7 @@ function onRuntimeMessage(event: MessageEvent<unknown>): void {
 }
 
 function failInFlight(message: string): void {
+  injectors.clear();
   for (const [id, responsePort] of inFlight) {
     responsePort.postMessage({ type: "error", id, message });
     responsePort.close();
@@ -95,10 +132,27 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
   window.parent.postMessage({ type: "preview-connected", nonce }, hostOrigin);
 
   const preview = document.createElement("iframe");
+  previewFrame = preview;
   preview.title = `Project preview on port ${port}`;
   preview.setAttribute("sandbox", "allow-scripts allow-forms allow-same-origin");
   preview.src = `/preview/${port}/?__preview_nonce=${encodeURIComponent(nonce)}`;
   document.body.append(preview);
+});
+
+// A websocket from the previewed page. The page has no other way to reach the runtime, so this frame is the only door, and it only opens for
+// the frame this shell created: a message from anywhere else is ignored rather than translated.
+window.addEventListener("message", (event: MessageEvent<unknown>) => {
+  if (previewFrame === null || event.source !== previewFrame.contentWindow || event.origin !== window.location.origin) return;
+  if (runtimePort === null) return;
+  const message = event.data as { type?: unknown } | null;
+  if (message === null || typeof message.type !== "string" || message.type.indexOf("socket-") !== 0) return;
+  const translated = toRuntimeSocketMessage(message, { origin: window.location.origin, port });
+  if ("refusal" in translated) {
+    const id = (message as { id?: unknown }).id;
+    if (typeof id === "number") previewFrame.contentWindow?.postMessage({ type: "socket-failed", id, message: translated.refusal }, window.location.origin);
+    return;
+  }
+  runtimePort.postMessage(translated);
 });
 
 navigator.serviceWorker.addEventListener("message", (event: MessageEvent<unknown>) => {
