@@ -20,7 +20,8 @@ import { ProcessKernel } from "../process/process-kernel.js";
 import type { TransportEvent } from "../process/process-transport.js";
 import { createProjectMirror } from "../process/project-mirror.js";
 import type { ProjectFileContents } from "../container/types.js";
-import type { ClientMessage, RunRequest, ServerMessage, TransportMessage } from "./protocol.js";
+import type { ClientMessage, RunRequest, ServerMessage, SocketClose, SocketOpen, TransportMessage } from "./protocol.js";
+import { createWebSocketClass } from "../shims/websocket.js";
 
 interface WorkerScope {
   onmessage: ((event: MessageEvent<ClientMessage>) => void) | null;
@@ -150,15 +151,177 @@ function isStringRecord(value: unknown): value is Record<string, string> {
     entries.reduce((size, [name, entry]) => size + name.length + entry.length, 0) <= MAX_TRANSPORT_HEADER_BYTES;
 }
 
+/**
+ * The websockets open on one transport port, by the page's id.
+ *
+ * A connection outlives the message that opened it, so it cannot be a local inside a handler: something has to hold it while the page is idle,
+ * and something has to close it when the page goes away.
+ */
+interface PageSocket {
+  readonly socket: WebSocket;
+  readonly detach: () => void;
+}
+
+const pageSocketsByPort = new WeakMap<MessagePort, Map<number, PageSocket>>();
+
+/**
+ * The class the container's own `WebSocket` is built from, with a connector that answers from this process's port table.
+ *
+ * One class for the whole worker: the connector takes the port from the message being served rather than from the URL, so every instance is
+ * created per connection from this factory.
+ */
+function webSocketFor(port: number): typeof WebSocket {
+  return createWebSocketClass(async (request) => {
+    if (kernel === null) return { refusal: "No project is loaded." };
+    // The two shapes are the same decision stated by two layers: the kernel says whether anybody accepted, the client wants a socket or a
+    // sentence. Translated here rather than by making the client understand the kernel's vocabulary.
+    const result = await kernel.upgrade(port, request.path, request.headers);
+    return result.accepted ? { socket: result.socket } : { refusal: result.reason };
+  });
+}
+
+/**
+ * Frame payloads as bytes, or nothing.
+ *
+ * The container client is a browser `WebSocket` and honours `binaryType`, so it can hand over a Blob as easily as an ArrayBuffer. `openPageSocket`
+ * sets `binaryType = "arraybuffer"` so that should not happen; this still accepts both, because a body silently dropped here is a binary frame a
+ * page never receives, and that failure looks exactly like a server that sent nothing.
+ */
+function socketBytes(value: unknown): Uint8Array | null {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  return null;
+}
+
+function openPageSocket(port: MessagePort, sockets: Map<number, PageSocket>, message: SocketOpen): void {
+  const id = message.id;
+  const live = kernel;
+  if (live === null) {
+    port.postMessage({ type: "socket-failed", id, message: "No project is loaded." });
+    return;
+  }
+  const WebSocketClass = webSocketFor(message.port);
+  let socket: WebSocket;
+  try {
+    const protocols = [...message.protocols];
+    socket = protocols.length === 0
+      ? new WebSocketClass(`ws://preview${message.path}`)
+      : new WebSocketClass(`ws://preview${message.path}`, protocols);
+  } catch (error) {
+    port.postMessage({ type: "socket-failed", id, message: error instanceof Error ? error.message : String(error) });
+    return;
+  }
+
+  // The page speaks bytes, and this is where the container's client is told which form to hand over. Leaving the default ("blob") would deliver
+  // every binary message as a Blob-nothing this boundary can copy.
+  socket.binaryType = "arraybuffer";
+
+  let closed = false;
+  const finish = (code: number, reason: string, clean: boolean): void => {
+    if (closed) return;
+    closed = true;
+    sockets.delete(id);
+    port.postMessage({ type: "socket-closed", id, code, reason, clean });
+  };
+
+  socket.addEventListener("open", () => {
+    port.postMessage({ type: "socket-opened", id, protocol: socket.protocol });
+  });
+  socket.addEventListener("message", (event: MessageEvent<unknown>) => {
+    const data = event.data;
+    if (typeof data === "string") {
+      port.postMessage({ type: "socket-data", id, text: data });
+      return;
+    }
+    const body = socketBytes(data);
+    if (body === null) return;
+    // Copied: the shim owns the buffer it handed over, and it is reused for the frames that follow.
+    port.postMessage({ type: "socket-data", id, body: body.slice() });
+  });
+  socket.addEventListener("close", (event: CloseEvent) => finish(event.code, event.reason, event.wasClean));
+  socket.addEventListener("error", () => {
+    // A browser fires `error` and then `close`; a connection that never opened gets the sentence instead, because the page's handlers would
+    // otherwise see a close for a socket they never saw open.
+    if (socket.readyState === WebSocket.CONNECTING) finish(1006, "The connection could not be opened.", false);
+  });
+
+  sockets.set(id, {
+    socket,
+    detach: () => {
+      if (closed) return;
+      closed = true;
+      socket.close();
+    },
+  });
+}
+
+/** Validate a socket message and act on it. A bad message fails the connection it names, never the shared message handler. */
+function handleSocketMessage(port: MessagePort, sockets: Map<number, PageSocket>, message: Partial<TransportMessage>): void {
+  const id = typeof message.id === "number" && Number.isInteger(message.id) ? message.id : -1;
+  if (id < 0) {
+    port.postMessage({ type: "socket-failed", id: -1, message: "Invalid socket message." });
+    return;
+  }
+  if (message.type === "socket-open") {
+    const valid = typeof message.port === "number" && Number.isInteger(message.port) && message.port >= 1 && message.port <= 65535 &&
+      typeof message.path === "string" && message.path.length > 0 && message.path.length <= 8192 &&
+      Array.isArray(message.protocols) && message.protocols.every((entry) => typeof entry === "string" && entry.length <= 128);
+    if (!valid) {
+      port.postMessage({ type: "socket-failed", id, message: "Invalid socket request." });
+      return;
+    }
+    openPageSocket(port, sockets, message as SocketOpen);
+    return;
+  }
+
+  const entry = sockets.get(id);
+  // A message for a socket that is already closed is dropped rather than refused: the page's own close and the server's race by construction,
+  // and treating the loser as an error would report a failure on every clean shutdown.
+  if (entry === undefined) return;
+
+  if (message.type === "socket-send") {
+    const text = typeof message.text === "string" ? message.text : undefined;
+    const body = message.body instanceof Uint8Array ? message.body : undefined;
+    if ((text === undefined) === (body === undefined)) {
+      entry.detach();
+      return;
+    }
+    try {
+      entry.socket.send((text ?? body) as string | Uint8Array);
+    } catch {
+      // `send` on a socket that is closing throws InvalidStateError, which is the page's race to lose; the close event already told it.
+      entry.detach();
+    }
+    return;
+  }
+
+  const request = message as Partial<SocketClose>;
+  try {
+    entry.socket.close(request.code ?? 1000, request.reason ?? "");
+  } catch {
+    entry.detach();
+  }
+}
+
 function attachTransport(id: number, port: MessagePort): void {
   transportPorts.set(id, port);
   const detach = (): void => {
     if (transportPorts.get(id) !== port) return;
     transportPorts.delete(id);
+    // A page that went away owns no sockets: leaving them open would keep a handler in the process writing frames nobody reads, and the server
+    // would never learn its client is gone.
+    for (const entry of sockets.values()) entry.detach();
+    sockets.clear();
     port.close();
   };
+  const sockets = new Map<number, PageSocket>();
+  pageSocketsByPort.set(port, sockets);
   port.onmessage = (event: MessageEvent<unknown>): void => {
     const message = event.data as Partial<TransportMessage> | null;
+    if (message !== null && (message.type === "socket-open" || message.type === "socket-send" || message.type === "socket-close")) {
+      handleSocketMessage(port, sockets, message);
+      return;
+    }
     if (
       message === null ||
       message.type !== "request" ||
