@@ -2,8 +2,10 @@
 
 > **Naming.** "R2" here is milestone 2 of Phase 6, not the ruling `P0-2`. See `docs/decisions/NUMBERING.md`.
 
-Status: **implemented** (Nov 10 2026) against the approved contract and the four owner decisions. `fixture-10.json` is untouched and
-nothing here changes a classification, per D-1. Implementation notes are in section 6. Baseline `ec9b6ea`, 511 tests.
+Status: **NOT IMPLEMENTED in the product** (ruling of Nov 13 2026, section 8). The contract is approved design; the profile was
+built once, in a harness interpreter the fixture CLI stopped calling five hours later, and no product code has ever implemented it.
+`fixture-10.json` is untouched and nothing here changes a classification, per D-1. Section 6 describes what that interpreter did;
+section 8 records why none of it counts as support today. Original baseline `ec9b6ea`, 511 tests.
 
 ## 1. Why this cannot be an alias
 
@@ -202,3 +204,46 @@ only worth what its evidence shows.
 The fixture-10 pin is the one that needed writing rather than checking. Its unscored status holds structurally today (`isScoreable`
 requires `frozen`), which is exactly the kind of fact that disappears the day someone edits one line of JSON. Freezing it now
 requires deliberately changing a test that names D-1.
+
+## 8. Status correction: the profile was never implemented in the product
+
+Section 6 above says "implemented", and on 2026-11-10 that was true of a file. It was never true of the product, and this section
+replaces that status rather than qualifying it.
+
+**What happened, in commit order.**
+
+| Time (2026-11-10) | Commit | What it did |
+|---|---|---|
+| 05:06 | `d646949` | Added the `pnpm-resolution` vocabulary to `src/harness/command.ts` and the deviation record to `src/harness/execute.ts` |
+| 10:05 | `94e3c92` | The fixture CLI stopped interpreting commands itself and began running steps through the product's `Container` |
+
+Nothing has called the interpreter since. The profile lived in `parseStepCommand`/`createStepExecutor`, whose only remaining consumers
+are test files; `tools/harness/fixture-executor.ts` — the adapter the CLI actually runs — drives `Container.execute`. The product
+refuses pnpm by name in `src/container/commands.ts` and has never parsed, installed or reported anything under the profile.
+
+**The ruling: pnpm is NOT YET IMPLEMENTED.**
+
+Not "deliberately unsupported", which would be a decision the product has made and recorded; the product has made no such decision,
+because the approved plan is to implement the profile. Not "supported", because no user and no fixture can run a pnpm command.
+
+**What follows from it, and is now enforced in code and tests.**
+
+1. A pnpm step is an **ordinary failure**. It reports the status the container recorded and classifies as `RUNTIME_INCOMPATIBILITY`
+   like any other command that did not work. It must never be counted as `UNSUPPORTED_BY_DESIGN`: that bucket means "we chose not to
+   support this", and filling it with unbuilt work would hide the work and flatter the gate. Pinned by
+   `tests/unit/harness.refusal-classification.test.ts` ("an unimplemented package manager is a failure, not a decision the product
+   never made").
+2. The **deviation sentence is not evidence**. `PNPM_RESOLUTION_DEVIATION` is produced only by the retired interpreter, so no run may
+   cite it. The tests that asserted it in `steps.json`, and the four that ran pnpm through the retired executor, are withdrawn with a
+   note in `tests/unit/harness.fixture-e2e.test.ts` and `tests/unit/harness.command.test.ts`.
+3. **The wording does not claim a decision.** The container says `pnpm is not implemented in this terminal; npm is the supported
+   package manager.` The D-4 sentence ("intentionally not supported: …") stays unused until a rung of the profile is deliberately
+   refused by a product that implements the rest of it.
+4. **Fixture 10 remains unscored**, exactly as D-1 decided, and for a stronger reason than before: there is nothing to measure yet.
+5. **Implementing it is a separate proposal.** No runtime, installer or vocabulary work for pnpm belongs in a correctness change; the
+   store question (D-2 of section 4), the lockfile question and fixture 10's fate all come back to the owner together.
+
+**Evidence.** Product path: `src/container/commands.ts` (`pnpm` in `REFUSED_COMMANDS`, no boundary), `src/container/types.ts`
+(`CommandBoundary` carries a policy only where the terminal declines permanently), `src/container/container.ts` (`execute` returns the
+outcome), `tools/harness/fixture-executor.ts` (maps a boundary to `restricted` and nothing else). Tests: the three named above plus
+`tests/unit/container.test.ts` (the decline and its wording).

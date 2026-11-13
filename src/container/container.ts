@@ -23,6 +23,8 @@ import {
   PROCESS_COMMANDS,
 } from "./commands.js";
 import type {
+  CommandBlock,
+  CommandOutcome,
   LogLine,
   ProcessRecord,
   ProjectFileContents,
@@ -35,6 +37,8 @@ import { installDependencies, loadLockfile, readPackageManifest, type PackageMan
 import { parseInstallSpec } from "../npm/spec.js";
 import { splitScriptLine } from "./script-line.js";
 import { VFSNotFoundError } from "../vfs/errors.js";
+
+import type { Refusal } from "../runtime/refusal.js";
 
 export interface ContainerOptions {
   readonly runtime: RuntimeClient;
@@ -113,6 +117,16 @@ export class Container {
    * an earlier line can never be what decides whether the rest of a script runs.
    */
   #lastExitCode = 0;
+  /**
+   * The line's own decline, if it was declined rather than run.
+   *
+   * Kept beside `#lastExitCode` rather than derived from the scrollback because the scrollback is what the container TOLD the
+   * user, and a caller outside the container cannot tell a policy sentence from a program's own stderr. A refusal writes to the
+   * SYSTEM stream; the harness used to look for prefixes in stdout/stderr, so it scored one as a clean exit.
+   */
+  #lastBlocked: CommandBlock | undefined;
+  /** The refusal that ended a program this line started, by reference from the runtime (ADR-0014). */
+  #lastRefusal: Refusal | undefined;
 
   constructor(options: ContainerOptions) {
     this.#runtime = options.runtime;
@@ -260,11 +274,39 @@ export class Container {
     ].join("\n");
   }
 
-  /** Run one line. Resolves when the line is finished, including any process it started. */
-  async execute(sessionId: string, line: string, scriptDepth = 0): Promise<void> {
+  /**
+   * Run one line. Resolves when the line is finished, including any process it started.
+   *
+   * The returned outcome is the same decision the terminal already made: the status the line left behind, whether it was
+   * declined and why. It exists because inferring that from scrollback is how a refusal came to be scored as a clean run — the
+   * sentence a refused command prints goes to the SYSTEM stream, matches no stdout/stderr prefix, and reads as silence.
+   */
+  async execute(sessionId: string, line: string, scriptDepth = 0): Promise<CommandOutcome> {
     const session = this.findSession(sessionId);
     if (session === undefined) throw new Error(`unknown session ${sessionId}`);
 
+    // Reset per line, but only at the outermost line: `npm run build` re-enters here for the script body, and the body's decline
+    // is the one worth reporting, not the wrapper's. A nested line's decline therefore survives to the outer outcome.
+    if (scriptDepth === 0) {
+      this.#lastBlocked = undefined;
+      this.#lastRefusal = undefined;
+    }
+
+    await this.#dispatch(session, line, scriptDepth);
+
+    const exitCode = this.#lastExitCode;
+    const blocked = this.#lastBlocked;
+    const refusal = this.#lastRefusal;
+    return {
+      exitCode,
+      // A decline explains a FAILURE. When a `||` recovered from one the line succeeded, and reporting a block beside a success
+      // would contradict the status in the same object.
+      ...(blocked === undefined || exitCode === 0 ? {} : { blocked }),
+      ...(refusal === undefined ? {} : { refusal }),
+    };
+  }
+
+  async #dispatch(session: Session, line: string, scriptDepth: number): Promise<void> {
     const command = parseCommand(line);
     if (command.kind === "empty") return;
     // `npx` is parsed as a builtin because it names no process, but it resolves a binary and runs one, so it goes through the process
@@ -281,16 +323,32 @@ export class Container {
 
     switch (command.kind) {
       case "refused":
-        // A command the container refuses by policy is a command that did not run, and sequencing has to see it that way.
+        // A command the container declines is a command that did not run, and sequencing has to see it that way.
+        this.#lastBlocked = {
+          kind: "refused",
+          name: command.name,
+          reason: command.reason,
+          ...(command.boundary === undefined ? {} : { boundary: command.boundary }),
+        };
         this.#line(session, "system", `${command.name}: ${command.reason}`);
         this.#lastExitCode = 1;
         this.#notify();
         return;
-      case "unsupported":
-        this.#line(session, "stderr", `${command.name}: not a supported command in this terminal. Type \`help\`.`);
+      case "unsupported": {
+        const reason = `${command.name}: not a supported command in this terminal. Type \`help\`.`;
+        // `boundary` is present for a name outside the closed set and absent for a malformed line, so a stray quote can never be
+        // reported as a policy the project chose.
+        this.#lastBlocked = {
+          kind: "unsupported",
+          name: command.name,
+          reason,
+          ...(command.boundary === undefined ? {} : { boundary: command.boundary }),
+        };
+        this.#line(session, "stderr", reason);
         this.#lastExitCode = 1;
         this.#notify();
         return;
+      }
       case "install":
         // `#install` sets the status itself: it is the only place that knows whether a package was actually written, and an install
         // that failed used to leave this at 0 because the branch assumed success.
@@ -810,6 +868,13 @@ export class Container {
       return;
     }
 
+    // A refusal the runtime made on purpose, carried by reference (ADR-0014 D-6). Recorded BEFORE the branch below because it is
+    // the program's outcome, not the server's: without it a native addon reads as exit 1 with a stack, which is indistinguishable
+    // from a crash and scores as RUNTIME_INCOMPATIBILITY instead of the by-design refusal the gate is entitled to count.
+    if (outcome.refusal !== undefined) {
+      process.refusal = outcome.refusal;
+      this.#lastRefusal = outcome.refusal;
+    }
     if (!outcome.timedOut && outcome.exitCode === 0 && (outcome.previewPorts?.length ?? 0) > 0) {
       process.previewPorts = [...(outcome.previewPorts ?? [])];
       process.state = "running";
