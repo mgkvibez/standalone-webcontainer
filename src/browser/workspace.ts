@@ -33,6 +33,14 @@ export interface WorkspaceOptions {
 
 export interface Workspace {
   refresh(): void;
+  /**
+   * Rebuild the installed tree from the project's lockfile, if the project has one and the tree is empty.
+   *
+   * Returns true when it ran. Called at boot rather than on first use: a `npm ci` that starts when the user types `npm run dev` makes the dev
+   * server's first output look like a package-manager problem, and a project that is silently missing its dependencies is the shape of failure
+   * that costs an hour to diagnose.
+   */
+  restoreDependencies(): Promise<boolean>;
   openFile(path: string): void;
   /** Exposed for the browser tests: current editor text, without going near CodeMirror internals. */
   editorText(): string;
@@ -625,9 +633,29 @@ export function createWorkspace(options: WorkspaceOptions): Workspace {
     refresh();
   });
 
+  /**
+   * Put the dependency tree back after a reload.
+   *
+   * Project storage holds the project's own files and its lockfile; the installed tree lives in the container's memory, because a Vite tree is
+   * several megabytes and the storage quota belongs to the whole origin (ADR-0027). So recovery is a `npm ci`: the lockfile pins every version
+   * and every integrity, no packument is fetched for a pinned entry, and the result is the same tree the last session had.
+   *
+   * Silent when there is nothing to do, which is the common case: a project with no lockfile has never installed anything.
+   */
+  const restoreDependencies = async (): Promise<boolean> => {
+    if (container.hasDependencies()) return false;
+    const lockfile = store.active().files["/package-lock.json"];
+    if (lockfile === undefined) return false;
+    container.announce(activeSessionId, "restoring dependencies from /package-lock.json");
+    await container.execute(activeSessionId, "npm ci");
+    refresh();
+    return true;
+  };
+
   return {
     refresh,
     openFile,
     editorText: () => view.state.doc.toString(),
+    restoreDependencies,
   };
 }

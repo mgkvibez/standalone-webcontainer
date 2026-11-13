@@ -68,6 +68,9 @@ export class Socket extends EventEmitter {
   #deliveriesPerTurn: number;
   /** Set once `end` has been delivered, so a second half-close cannot double-emit. */
   #endDelivered = false;
+  /** Node's `cork()` nesting depth. `ws` corks around a frame so its header and payload leave as one write. */
+  #corkDepth = 0;
+  #corked: Uint8Array[] = [];
 
   constructor(options: SocketOptions = {}) {
     super();
@@ -101,6 +104,13 @@ export class Socket extends EventEmitter {
     }
     const bytes = toBytes(chunk, encoding ?? this.#encoder ?? "utf8");
     this.#touch();
+    if (this.#corkDepth > 0) {
+      // Held, not sent: that is the whole meaning of cork. A caller that corks writes a header and a payload expecting the peer to see them
+      // together, and handing each to the peer as it arrives would deliver a frame in pieces that a strict parser may reject.
+      this.#corked.push(bytes);
+      callback?.(null);
+      return true;
+    }
     const peer = this.#peer;
     if (peer !== null) peer.receiveFromPeer(bytes);
     callback?.(null);
@@ -110,6 +120,8 @@ export class Socket extends EventEmitter {
   /** Half-close. The peer sees `end` once everything already written has been delivered, which is why this queues rather than cuts. */
   end(chunk?: string | Uint8Array, encoding?: string, callback?: () => void): this {
     if (chunk !== undefined) this.write(chunk, encoding);
+    // Everything corked leaves before the half-close does, or the peer would see `end` ahead of bytes that were written before it.
+    this.#flushCorked();
     this.writable = false;
     this.#touch();
     const peer = this.#peer;
@@ -170,6 +182,39 @@ export class Socket extends EventEmitter {
     if (callback !== undefined) this.once("timeout", callback);
     this.#touch();
     return this;
+  }
+
+  /** How many `cork()` calls are waiting on an `uncork()`, as Node reports it. */
+  get writableCorked(): number {
+    return this.#corkDepth;
+  }
+
+  /**
+   * Hold writes until `uncork()`, the way Node's stream does.
+   *
+   * Not cosmetic: `ws` corks around every frame so the header and the payload are handed over as one piece, and calling `cork` on this socket
+   * used to be a `TypeError` inside the library, which surfaced as a page that connected and then died mid-handshake.
+   */
+  cork(): void {
+    this.#corkDepth += 1;
+  }
+
+  uncork(): void {
+    if (this.#corkDepth === 0) return;
+    this.#corkDepth -= 1;
+    if (this.#corkDepth > 0) return;
+    this.#flushCorked();
+  }
+
+  #flushCorked(): void {
+    const held = this.#corked;
+    this.#corked = [];
+    const peer = this.#peer;
+    if (peer === null) return;
+    for (const bytes of held) {
+      this.#touch();
+      peer.receiveFromPeer(bytes);
+    }
   }
 
   /** There is no Nagle algorithm here. Returns the socket so the chain `socket.setNoDelay().setKeepAlive()` works, which is what callers write. */

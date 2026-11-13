@@ -2,9 +2,10 @@
  * Parsing the package spec a user types after `npm install`.
  *
  * npm accepts seven kinds of spec: a name with an optional range, a folder, a tarball file, a tarball URL, a git URL, a
- * `<name>@npm:<other>@<range>` alias, and a workspace name. Only the first is implemented, and the rest are refused **by kind**
- * rather than by a generic parse failure, because "we do not install from git yet" and "that is not a package name" are different
- * facts and a user acting on the second one would be misled.
+ * `<name>@npm:<other>@<range>` alias, and a workspace name. Two are implemented - a name with a range, and an alias, because real
+ * dependency trees contain aliases (`wrap-ansi-cjs` declares `"wrap-ansi": "npm:wrap-ansi@^7"`) and the resolver handles them. The rest are
+ * refused **by kind** rather than by a generic parse failure, because "we do not install from git yet" and "that is not a package name" are
+ * different facts and a user acting on the second one would be misled.
  *
  * The name/range split is the subtle part: `@scope/pkg` has an `@` that is not a version separator, `@scope/pkg@1.2.3` has two,
  * and `pkg@` (a trailing separator with nothing after it) is a range of `latest` in npm rather than an error.
@@ -74,8 +75,20 @@ export function parseInstallSpec(token: string): InstallSpec {
 
   // An alias (`express@npm:express@4`) carries an `@` inside the range, so it has to be recognised before the split: reading the
   // last `@` as the separator makes the name `express@npm:express`, and the user then gets told their package name is invalid.
-  if (trimmed.includes("@npm:")) {
-    throw new SpecError("UNSUPPORTED_SPEC_KIND", `${trimmed}: an alias spec (npm:<other>) is not supported`);
+  //
+  // The alias is kept whole in `range` and resolved by the installer, which is what makes the CLI and a manifest alias behave identically: the
+  // directory is the alias name, the bytes and the version come from the target. `npm install npm:react@18` (no alias name) installs under the
+  // target's own name, which is npm's reading of that shorthand.
+  if (trimmed.startsWith("npm:") || trimmed.includes("@npm:")) {
+    const aliasIndex = trimmed.startsWith("npm:") ? -1 : trimmed.indexOf("@npm:");
+    const name = aliasIndex === -1 ? "" : trimmed.slice(0, aliasIndex);
+    const range = aliasIndex === -1 ? trimmed : trimmed.slice(aliasIndex + 1);
+    const target = range.startsWith("npm:") ? range.slice("npm:".length) : "";
+    if (name === "" && target !== "") return { name: splitSpec(target)?.name ?? target, range };
+    if (!NAME_PATTERN.test(name)) {
+      throw new SpecError("INVALID_PACKAGE_NAME", `${name}: not a package name (names are lowercase, may be scoped as @scope/name, and contain no spaces or paths)`);
+    }
+    return { name, range };
   }
 
   const parts = splitSpec(trimmed);

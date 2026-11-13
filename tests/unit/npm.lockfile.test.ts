@@ -118,11 +118,14 @@ describe("lockfile model", () => {
     });
 
     const parsed = parseLockfile(npmWritten);
+    // `license`, `engines`, `bin` and `dev` are still ignored by design. `peerDependencies` is NOT ignored any more: a peer nobody checked is a
+    // tree that loads and fails at run time, so it is modeled, read and re-checked on every install from this lockfile.
     expect(parsed.packages["node_modules/a"]).toEqual({
       version: "1.0.0",
       resolved: "https://registry.npmjs.org/a/-/a-1.0.0.tgz",
       integrity: "sha512-xyz",
       dependencies: { b: "^2.0.0" },
+      peerDependencies: { c: "^3.0.0" },
     });
   });
 

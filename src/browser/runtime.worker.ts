@@ -116,8 +116,10 @@ async function handleRun(request: RunRequest): Promise<void> {
   const startedAt = Date.now();
   capture.set(request.id, { stdout: "", stderr: "" });
   let pid = 0;
+  // Hoisted for the `finally`: whether the process outlived this run is a question about the kernel, answered where the run is retired.
+  let target: ProcessKernel | null = null;
   try {
-    const target = activeKernel(request.projectId, request.files);
+    target = activeKernel(request.projectId, request.files);
     pid = target.start({
       argv: [...request.argv],
       cwd: request.cwd,
@@ -157,9 +159,13 @@ async function handleRun(request: RunRequest): Promise<void> {
   } finally {
     capture.delete(request.id);
     processByRun.delete(request.processId);
-    // Only this run's entry: a process held open by a server outlives the run, and its late output must not be attributed to whichever run
-    // happens to be next.
-    if (pid !== 0 && runByPid.get(pid) === request.id) runByPid.delete(pid);
+    // A process HELD OPEN by a listening port outlives its run, so the output route has to outlive it too: a dev server prints its ready banner,
+    // its `hmr update` lines and its request errors after the body settled, and dropping the route here made all of that vanish while the server
+    // answered requests perfectly. Measured as zero chunk messages reaching the page for a running vite. The run id is unique per run, so keeping
+    // it cannot attribute a live process's output to a later command.
+    const heldOpen = pid !== 0 && (target?.ports().some((binding) => binding.pid === pid) ?? false);
+    // Only this run's entry: a late route must not be reused by whichever run happens to be next.
+    if (!heldOpen && pid !== 0 && runByPid.get(pid) === request.id) runByPid.delete(pid);
   }
 }
 
@@ -240,9 +246,11 @@ function openPageSocket(port: MessagePort, sockets: Map<number, PageSocket>, mes
   let socket: WebSocket;
   try {
     const protocols = [...message.protocols];
-    socket = protocols.length === 0
-      ? new WebSocketClass(`ws://preview${message.path}`)
-      : new WebSocketClass(`ws://preview${message.path}`, protocols);
+    // The host is the container's own address, not a placeholder. The connector answers from the port table and ignores it, but this URL is also
+    // what the client's handshake puts in `Host:`, and a server is entitled to read that: Vite's allowedHosts check refuses a host it does not
+    // recognise, which is how a placeholder turned into "the server answered 400 Bad Request" for every HMR connection.
+    const url = `ws://localhost:${String(message.port)}${message.path}`;
+    socket = protocols.length === 0 ? new WebSocketClass(url) : new WebSocketClass(url, protocols);
   } catch (error) {
     port.postMessage({ type: "socket-failed", id, message: error instanceof Error ? error.message : String(error) });
     return;
@@ -275,10 +283,15 @@ function openPageSocket(port: MessagePort, sockets: Map<number, PageSocket>, mes
     port.postMessage({ type: "socket-data", id, body: body.slice() });
   });
   socket.addEventListener("close", (event: CloseEvent) => finish(event.code, event.reason, event.wasClean));
-  socket.addEventListener("error", () => {
+  socket.addEventListener("error", (event: Event) => {
     // A browser fires `error` and then `close`; a connection that never opened gets the sentence instead, because the page's handlers would
     // otherwise see a close for a socket they never saw open.
-    if (socket.readyState === WebSocket.CONNECTING) finish(1006, "The connection could not be opened.", false);
+    //
+    // The shim's own sentence is forwarded rather than replaced. It knows WHY - a refused upgrade, a rejected accept key, a server that never
+    // wrote `101` - and a generic "could not be opened" threw that away at the one boundary where the page's developer could have read it.
+    if (socket.readyState !== WebSocket.CONNECTING) return;
+    const detail = (event as unknown as { message?: unknown }).message;
+    finish(1006, typeof detail === "string" && detail !== "" ? detail : "The connection could not be opened.", false);
   });
 
   sockets.set(id, {

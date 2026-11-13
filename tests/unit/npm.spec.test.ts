@@ -22,7 +22,15 @@ describe("parseInstallSpec", () => {
     expect(splitSpec("@scope/pkg")).toEqual({ name: "@scope/pkg", range: "latest" });
   });
 
-  it("refuses a URL, a folder and an alias by naming the kind, not as a typo", () => {
+  it("reads an alias spec, keeping the alias name and the target range", () => {
+    // A real tree needs this: `wrap-ansi-cjs` declares `"wrap-ansi": "npm:wrap-ansi@^7"`, and a Vite install resolves it.
+    expect(parseInstallSpec("pkg@npm:other@1")).toEqual({ name: "pkg", range: "npm:other@1" });
+    expect(parseInstallSpec("pkg@npm:@scope/other@^2.0.0")).toEqual({ name: "pkg", range: "npm:@scope/other@^2.0.0" });
+    // npm's shorthand with no alias name installs under the target's own name.
+    expect(parseInstallSpec("npm:react@18")).toEqual({ name: "react", range: "npm:react@18" });
+  });
+
+  it("refuses a URL and a folder by naming the kind, not as a typo", () => {
     for (const spec of ["https://example.com/x.tgz", "git+ssh://git@host/x.git", "git@github.com:a/b.git"]) {
       expect(() => parseInstallSpec(spec)).toThrow(SpecError);
       expect(() => parseInstallSpec(spec)).toThrow(/URL or a git remote/);
@@ -30,7 +38,6 @@ describe("parseInstallSpec", () => {
     for (const spec of ["file:./x.tgz", "./pkg", "../pkg", "/pkg"]) {
       expect(() => parseInstallSpec(spec)).toThrow(/folder or a local tarball/);
     }
-    expect(() => parseInstallSpec("pkg@npm:other@1")).toThrow(/alias spec/);
     expect(() => parseInstallSpec("workspace:pkg")).toThrow(/workspaces are not supported/);
   });
 

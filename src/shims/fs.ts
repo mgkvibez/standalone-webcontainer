@@ -59,8 +59,8 @@ const CODE_MAP: Readonly<Record<string, string>> = {
  */
 const toNodeError = (error: unknown, syscall: string, path: FsPath): NodeFsError => {
   const shown = typeof path === "string" ? path : path.href;
-  if (error instanceof VFSError) {
-    const code = CODE_MAP[error.code] ?? "EIO";
+  const code = error instanceof VFSError ? CODE_MAP[error.code] ?? "EIO" : carriedCode(error);
+  if (code !== undefined) {
     const wrapped = new Error(`${code}: ${syscall} '${shown}'`) as NodeFsError;
     wrapped.code = code;
     wrapped.errno = ERRNO[code] ?? -1;
@@ -68,9 +68,29 @@ const toNodeError = (error: unknown, syscall: string, path: FsPath): NodeFsError
     wrapped.path = shown;
     return wrapped;
   }
-  // Anything that is not a VFS error is a bug in this shim, not user error: do
-  // not masquerade it as a filesystem condition.
+  // Anything with no POSIX code is a bug in this shim, not user error: do not
+  // masquerade it as a filesystem condition.
   throw error;
+};
+
+/** A POSIX code, which is what a failure that crossed the syscall channel arrives carrying. */
+const CARRIED_CODE = /^E[A-Z0-9]+$/u;
+
+/**
+ * The POSIX code a failure already carries, if it carries one.
+ *
+ * A call made in a process Worker does not fail with a `VFSError`: the kernel's rejection crosses the channel and comes back as a
+ * `SyscallRejectedError` holding the same `code` (see `src/process/syscall-channel.ts`). That is the same filesystem condition after a round trip, and
+ * the mapper used to RETHROW it as "a bug in this shim" — so in the process lane an `ENOENT` was not an error a program could catch.
+ *
+ * Measured: vite's config resolver calls `fs.stat("/tsconfig.json")` for a file that does not exist, that rethrow escaped the async member, the whole
+ * config parse was abandoned, and the dependency optimizer therefore never ran, which served `504 Outdated Optimize Dep` and no application. The code is
+ * the evidence that this is a filesystem condition: a genuine bug in this shim does not arrive wearing `ENOENT`.
+ */
+const carriedCode = (error: unknown): string | undefined => {
+  if (typeof error !== "object" || error === null) return undefined;
+  const code = (error as { readonly code?: unknown }).code;
+  return typeof code === "string" && CARRIED_CODE.test(code) ? code : undefined;
 };
 
 /**
@@ -1029,22 +1049,33 @@ AbsoluteFsShim => {
   },
 
   stat(path: FsPath, callback: StatCallback) {
-    const resolvedPath = pathOf(path);
+    // The callback is invoked OUTSIDE the try, and the path is resolved inside it. Two reasons, both measured: a callback that throws (vite's own
+    // resolver does) must not be caught here and called a second time with its own exception as the stat's failure, and an async member's whole
+    // contract is that it never throws at the call site - so the resolution belongs on the failure side of that line, not in front of it.
+    let resolvedPath: string | undefined;
+    let stats: StatsShim;
     try {
-      callback(null, asStats(vfs.statSync(resolvedPath)));
+      resolvedPath = pathOf(path);
+      stats = asStats(vfs.statSync(resolvedPath));
     } catch (error) {
-      callback(toNodeError(error, "stat", resolvedPath));
+      callback(toNodeError(error, "stat", resolvedPath ?? String(path)));
+      return;
     }
+    callback(null, stats);
   },
 
   /** `lstat` is `stat`, as above, because nothing in this VFS is a symbolic link. */
   lstat(path: FsPath, callback: StatCallback) {
-    const resolvedPath = pathOf(path);
+    let resolvedPath: string | undefined;
+    let stats: StatsShim;
     try {
-      callback(null, asStats(vfs.statSync(resolvedPath)));
+      resolvedPath = pathOf(path);
+      stats = asStats(vfs.statSync(resolvedPath));
     } catch (error) {
-      callback(toNodeError(error, "lstat", resolvedPath));
+      callback(toNodeError(error, "lstat", resolvedPath ?? String(path)));
+      return;
     }
+    callback(null, stats);
   },
 
   statSync(path) {
@@ -1485,6 +1516,28 @@ export const createFsShim = (
     return [typeof optionsOrCallback === "function" ? undefined : optionsOrCallback, callback];
   };
 
+  /**
+   * Deliver an async member's outcome, and never throw at the call site.
+   *
+   * This is the boundary a program actually holds, and it exists because the inner member's own try/catch is not enough on every path: vite's config
+   * resolver calls `fs.stat` and the ENOENT from a missing `/tsconfig.json` escaped to the process top level as a failure, which aborted the config
+   * parse, which left the dependency optimizer never running, which served `504 Outdated Optimize Dep` and no application. An async member that
+   * throws changes the meaning of every `try` in every package that calls it, so the promise is enforced here, where the object is handed out.
+   */
+  const deliver = <R>(callback: (error: unknown, result?: R) => void, call: () => void): void => {
+    let settled = false;
+    const once = (error: unknown, result?: R): void => {
+      if (settled) return;
+      settled = true;
+      callback(error, result);
+    };
+    try {
+      call();
+    } catch (error) {
+      once(error);
+    }
+  };
+
   const realpathSync = Object.assign((path: FsPath) => inner.realpathSync(at(path)), {
     native: (path: FsPath) => inner.realpathSync(at(path)),
   });
@@ -1513,8 +1566,17 @@ export const createFsShim = (
     readSync: (fd) => inner.readSync(fd),
     writeSync: (fd, data, offsetOrPosition, lengthOrEncoding, position) =>
       inner.writeSync(fd, data, offsetOrPosition, lengthOrEncoding, position),
-    stat: (path, callback) => inner.stat(at(path), callback),
-    lstat: (path, callback) => inner.lstat(at(path), callback),
+    // W-35: an async member must deliver a filesystem CONDITION to its callback, never throw at its call site. Node's promise wrapper
+    // would turn such a throw into a rejection of the promisified call; a bare rethrow escapes it and abandons the caller, which is how
+    // vite's config parse died on a `/tsconfig.json` that does not exist. `deliver` invokes the callback outside the try and at most once.
+    stat: (path, callback) =>
+      deliver(callback, () => {
+        inner.stat(at(path), callback);
+      }),
+    lstat: (path, callback) =>
+      deliver(callback, () => {
+        inner.lstat(at(path), callback);
+      }),
     utimes: (path, atime, mtime, callback) => inner.utimes(at(path), atime, mtime, callback),
     lutimes: (path, atime, mtime, callback) => inner.lutimes(at(path), atime, mtime, callback),
     // The refusals still rewrite their paths first, so the message names the path the program actually passed. `symlink` takes an OPTIONAL

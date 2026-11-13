@@ -24,6 +24,14 @@ export const DEFAULT_MAX_CALLBACKS = 10_000;
 export const DEFAULT_MAX_REAL_MS = 5_000;
 /** How often a drain with outstanding handles checks whether anything happened. Real milliseconds. */
 export const DEFAULT_KEEP_ALIVE_POLL_MS = 10;
+/**
+ * How long a live process's queue may stay empty before the resident pump stops waiting on it. Real milliseconds.
+ *
+ * The pump exists for work a running program schedules for itself, and a program that has queued nothing for this long is waiting on an event -
+ * a request, a socket, a watcher - rather than on a timer it set. Stopping then is what keeps an idle server from being polled for its whole life;
+ * the next request or run starts a pump again.
+ */
+export const DEFAULT_RESIDENT_IDLE_MS = 400;
 
 /**
  * The allowance for ONE served request, which is a different thing from one execution.
@@ -54,6 +62,24 @@ interface PumpScope {
   readonly limits: Required<PumpLimits>;
   /** Whether the request this pump serves has been answered. A settled request ends the pass rather than finishing the queue. */
   readonly settled: () => boolean;
+  /**
+   * Whether virtual time may only advance as fast as real time.
+   *
+   * Set for a resident pump, which is running a LIVE program: a one-second interval must fire about once a second, not thousands of times while
+   * the window's 60 s virtual ceiling is consumed in a moment. Without this the pump is a CPU firehose - measured as a 100 ms interval writing a
+   * file 600 times per window and starving every real timer in the Worker, which is how these very tests hung. A request pump stays unbound on
+   * purpose: a handler awaiting 800 ms is bounded by its own deadline, and the differential cases pin that behaviour.
+   */
+  readonly realTimeBound?: boolean;
+  /**
+   * The instant the whole resident pump began, paired with the virtual clock at that moment.
+   *
+   * These are per-PUMP, not per-window, and that is the whole point: a window's own start is only microseconds old when the drain first looks, so a
+   * per-window anchor lets the virtual clock advance by nothing at all and every timer stays unreachable forever. Only time since the pump began
+   * says how much virtual time has been earned.
+   */
+  readonly anchorVirtualStart?: number;
+  readonly anchorRealStart?: number;
 }
 
 export interface SchedulerLimits {
@@ -180,6 +206,8 @@ export class Scheduler {
   #nextId = 1;
   #queue: Entry[] = [];
   #intervalsTruncated = 0;
+  /** Intervals the execution budget paused, waiting for a pump to say the program is still alive. */
+  readonly #heldIntervals: Entry[] = [];
   #unrefPending = 0;
   /** Totals across every drain pass, so the callback guard bounds the WHOLE execution rather than one pass. */
   #callbacks = 0;
@@ -246,6 +274,16 @@ export class Scheduler {
 
   get timeOrigin(): number {
     return this.#baselineEpoch;
+  }
+
+  /**
+   * How many live handles the program still holds, which is the runtime's answer to "is this process still alive?".
+   *
+   * A caller that outlives a run needs it. The count was private while the only consumer was this file's own loop; a pump that has to decide whether
+   * a program still deserves one is a second consumer, and duplicating the sense of "alive" would let the two disagree.
+   */
+  liveHandles(): number {
+    return this.#keepAlive === undefined ? 0 : this.#keepAlive();
   }
 
   get budgetMs(): number {
@@ -408,8 +446,120 @@ export class Scheduler {
    * ONE PUMP AT A TIME. Two loops over one queue would interleave callbacks in an order nobody wrote, so a nested call refuses
    * instead of pretending to share. The runtime serialises requests before reaching here.
    */
+  /**
+   * Keep a live process's own work running while nothing is in flight, and stop once it has queued nothing for `idleMs`.
+   *
+   * THE DEFECT THIS EXISTS FOR, MEASURED. `pumpWhile` is bound to a request: it runs while an answer is owed, then stops. Everything a server
+   * schedules for itself between requests therefore had no moment in which to run. Vite's dependency optimizer is the case that exposed it - the
+   * dev server starts pre-bundling from its own queue, so with the server idle nothing was written and the page waited forever on
+   * `504 Outdated Optimize Dep`. Measured on the previous commit: `optimizer wrote picocolors.js: never within 60s` with the server idle, then
+   * `200` in 54 ms the instant a request arrived. A live process in Node has no such gap; its loop turns whether or not anyone is talking to it.
+   *
+   * The same budget question as a request, answered the same way: a window gets the pump's ceilings rather than the execution's, because the
+   * execution's were spent on the program body. A window that ends on its own ceiling is not the process ending - the next window starts - but
+   * several guarded windows in a row is a program spinning on its own queue, and that stops the pump instead of burning the host.
+   */
+  async pumpResident(options: {
+    stillAlive: () => boolean;
+    /**
+     * Whether something is in flight that this pump is responsible for, such as a request whose answer is owed.
+     *
+     * The idle rule must not fire then. A request whose handler is waiting on the outside world leaves the queue empty, so an idle timeout would
+     * end the pump in the middle of serving it, and the caller that declined to start a second pump - correctly, one pump at a time - would wait
+     * for an answer nobody was going to produce. Measured: three request tests hung for their full 15 s timeout with this rule missing.
+     */
+    busy?: () => boolean;
+    /**
+     * How many handles the program itself still owns (timers, waiting readers).
+     *
+     * A program with a live handle is never idle, and this is where that stopped being true. "Queue empty for 400 ms" is the right rule for a
+     * server that is only ever woken by a request, and the wrong one for a server that scheduled its own work: vite's file watcher polls on its
+     * own timers, so the pump went idle 400 ms after boot and every later tick stayed pending forever. Measured in the browser product: a
+     * `setInterval` in a real vite process printed exactly one tick and then nothing, while the server kept answering requests. Node has no such
+     * rule - a ref'd timer keeps the loop turning - so a program that owns one keeps its pump.
+     */
+    liveHandles?: () => number;
+    idleMs?: number;
+    pollMs?: number;
+  }): Promise<SchedulerStop> {
+    if (this.#pump !== null) return "aborted";
+    // A pump means the program is still alive, so its repeating work resumes here: the execution-budget cap paused it, and the program's life is
+    // not that budget.
+    this.#unpauseIntervals();
+    const idleMs = options.idleMs ?? DEFAULT_RESIDENT_IDLE_MS;
+    const pollMs = options.pollMs ?? DEFAULT_KEEP_ALIVE_POLL_MS;
+    let idleSince = Date.now();
+    let guardedWindows = 0;
+    let windows = 0;
+    let stop: SchedulerStop = "queue-empty";
+    // Captured once for the life of the pump: the clock a live program is allowed to reach grows with real time from here.
+    const anchorVirtualStart = this.#virtual;
+    const anchorRealStart = Date.now();
+
+    for (;;) {
+      if (this.#aborted) return "aborted";
+      if (!options.stillAlive()) return "queue-empty";
+      // Every window, not just the first one. The body can settle - and the pump start - BEFORE the program creates the interval that the body budget
+      // will cap, which is exactly what a dev server does: vite's watcher interval is born while it prints its first ready line. Resuming only at pump
+      // start left that interval held aside forever, measured as one tick and then silence in the browser product while the in-process lane was fine.
+      this.#unpauseIntervals();
+
+      const scope: PumpScope = {
+        virtualStart: this.#virtual,
+        callbacksStart: this.#callbacks,
+        realStart: Date.now(),
+        limits: {
+          maxVirtualMs: DEFAULT_PUMP_VIRTUAL_MS,
+          maxCallbacks: DEFAULT_PUMP_CALLBACKS,
+          maxRealMs: DEFAULT_PUMP_REAL_MS,
+        },
+        settled: () => false,
+        realTimeBound: true,
+        anchorVirtualStart,
+        anchorRealStart,
+      };
+      this.#pump = scope;
+      let pass: SchedulerStop | "settled";
+      try {
+        pass = await this.#drainPass();
+      } finally {
+        this.#pump = null;
+      }
+      await drainContinuations();
+
+      if (pass === "aborted") return "aborted";
+      // A pass cannot report `settled` here: this pump has no request, and the predicate above always says no. Narrowed for the type, not the run.
+      if (pass === "settled") pass = "queue-empty";
+      // A window that stopped on a ceiling did its share; three in a row with an empty queue between them is a spin, not a program.
+      // A window that stopped on its VIRTUAL ceiling made progress cheaply, so it is not evidence of a spin: a live interval that fires every
+      // second fills 60 s of virtual time in a window and would otherwise be pronounced a spinning program after three windows. Only a window
+      // that burned the real-time or callback ceilings is the shape this guard exists for.
+      guardedWindows = pass === "queue-empty" || pass === "budget-exhausted" ? 0 : guardedWindows + 1;
+      if (guardedWindows >= 3) return pass;
+
+      const elapsedReal = Date.now() - anchorRealStart;
+      if (windows < 8 || (elapsedReal >= 900 && windows < 16)) {
+        windows += 1;
+      }
+      // Any pending entry is work the program owns, so the idle rule cannot fire: a timer that is not due yet is precisely what the pump waits for.
+      if (this.#queue.length > 0) idleSince = Date.now();
+      // Runnable work: straight into the next window, as before.
+      if (this.#queue.length > 0 && pass !== "budget-exhausted") continue;
+      // A window that ended at its virtual ceiling had nothing runnable: with the clock bound to real time the next entry is simply not due yet, so
+      // the pump must WAIT rather than loop. Looping here burned a whole window in microseconds and starved every real timer in the Worker - measured
+      // as ten ticks becoming zero.
+      // Idle means "nothing of the program's own is left to run". A live timer is the program's own wake-up, so the pump keeps turning for it.
+      if (this.#queue.length === 0 && Date.now() - idleSince >= idleMs && !(options.busy?.() ?? false) && (options.liveHandles?.() ?? 0) === 0) return stop;
+      stop = "queue-empty";
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, pollMs);
+      });
+    }
+  }
+
   async pumpWhile(pending: Promise<unknown>, limits: PumpLimits = {}): Promise<SchedulerStop> {
     if (this.#pump !== null) return "aborted";
+    this.#unpauseIntervals();
 
     let settled = false;
     void Promise.resolve(pending).then(
@@ -563,7 +713,15 @@ export class Scheduler {
       }
       // The ceilings are the execution's during a run and the pump's while a request is being served. One set of checks, two
       // accountings: duplicating the pass would let the two drift, which is the class of bug this file keeps meeting.
-      const budgetCeiling = this.#pump === null ? this.#budgetMs : this.#pump.virtualStart + this.#pump.limits.maxVirtualMs;
+      // A resident pump runs a live program, so its clock follows the wall clock instead of racing ahead of it: an interval due a second from now
+      // fires about a second from now, not thousands of times while a 60 s virtual ceiling is consumed in an instant.
+      const pumpCeiling = this.#pump === null
+        ? this.#budgetMs
+        : this.#pump.realTimeBound === true
+          ? (this.#pump.anchorVirtualStart ?? this.#pump.virtualStart)
+            + Math.min(this.#pump.limits.maxVirtualMs, Math.max(0, Date.now() - (this.#pump.anchorRealStart ?? this.#pump.realStart)))
+          : this.#pump.virtualStart + this.#pump.limits.maxVirtualMs;
+      const budgetCeiling = pumpCeiling;
       if (next.due > budgetCeiling) {
         stop = "budget-exhausted";
         break;
@@ -594,8 +752,19 @@ export class Scheduler {
       const fireAt = next.due;
       if (next.kind === "interval") {
         next.fires += 1;
-        if (next.fires >= next.maxFires) {
+        // The fire cap comes from the EXECUTION budget (`ceil(budget / delay)`), which is the right guard for a program body that must not spin
+        // forever and the wrong one for a live program: under a 1 s budget a 1 s interval has a cap of ONE, so vite's own watcher fired once
+        // and then stopped existing in the queue. Measured in the browser product as a single tick and then silence while the pump kept turning.
+        // While a pump window is running, that window's callback and real-time ceilings are the bound, so a live interval is re-armed.
+        if (next.fires >= next.maxFires && this.#pump === null) {
           this.#intervalsTruncated += 1;
+          // Held aside, neither queued nor dropped. Whether it deserves more fires is not knowable yet: the same interval belongs to a script that
+          // will exit (the cap is the whole answer) or to a live process that will be pumped (the cap is an artefact of the body budget). It stays
+          // OUT of the queue, so every "is the loop quiet?" question keeps the answer it had before - queueing it instead made `drain()` spin
+          // forever, because that loop only exits when the queue is empty.
+          next.due = fireAt + (next.intervalMs === 0 ? 0 : next.intervalMs);
+          next.live = false;
+          this.#heldIntervals.push(next);
         } else {
           next.due = fireAt + (next.intervalMs === 0 ? 0 : next.intervalMs);
           next.seq = this.#seq++;
@@ -690,6 +859,25 @@ export class Scheduler {
   }
 
   /** Earliest due, ties broken by creation order. Both are integers, so the order cannot depend on machine timing. */
+  /**
+   * Let every interval paused by its execution-budget cap fire again.
+   *
+   * Called when a pump scope opens, because a pump means the program is still alive: its repeating work is what it wants to do, and the cap that
+   * stopped it during the body was measuring the body's budget, not the program's life.
+   */
+  #unpauseIntervals(): number {
+    const resumed = this.#heldIntervals.length;
+    for (const entry of this.#heldIntervals) {
+      // Never in the past: the clock kept running while the interval was held, and a due time before now would fire instantly in a burst.
+      entry.due = Math.max(entry.due, this.#virtual);
+      entry.seq = this.#seq++;
+      entry.live = true;
+      this.#queue.push(entry);
+    }
+    this.#heldIntervals.length = 0;
+    return resumed;
+  }
+
   #earliest(): Entry | undefined {
     let best: Entry | undefined;
     for (const entry of this.#queue) {

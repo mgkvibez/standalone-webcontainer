@@ -417,6 +417,38 @@ describe("honest refusal", () => {
     expect(textOf(runtime.requests.at(-1)?.files, "/node_modules/@corpus/hello/index.js")).toContain("installed");
   });
 
+  it("records a requested dependency without discarding the rest of the user's package.json", async () => {
+    // Measured in the real-registry journey: the installer reads a narrow view of the manifest, and writing that view back deleted
+    // `"scripts": { "dev": "vite" }`, so `npm run dev` answered "missing script: dev" for a file the user had just written. The manifest is a
+    // file the user owns; an install may add to it and must not regenerate it.
+    const manifest = {
+      name: "app",
+      private: true,
+      type: "module",
+      scripts: { dev: "vite", build: "vite build" },
+      devDependencies: { "@corpus/dev": "^1.0.0" },
+      futureFieldThisRuntimeHasNeverHeardOf: { keep: true },
+    };
+    const project = new FakeProject({ "/index.js": "console.log(1);", "/package.json": JSON.stringify(manifest) });
+    const registry = await createFakeRegistry({
+      packages: { "@corpus/hello": [{ version: "1.0.0" }], "@corpus/dev": [{ version: "1.0.0" }] },
+    });
+    const container = new Container({ runtime: new FakeRuntime(), files: project, registry });
+    const session = container.createSession();
+
+    await container.execute(session.id, "npm install @corpus/hello");
+
+    // Two, because the manifest's own devDependency is installed as well: both the requested package and the one the user had already declared.
+    expect(output(container, session.id).join("\n")).toContain("added 2 package");
+    const saved = JSON.parse(project.read("/package.json") ?? "{}") as Record<string, unknown>;
+    expect(saved["scripts"]).toEqual({ dev: "vite", build: "vite build" });
+    expect(saved["type"]).toBe("module");
+    expect(saved["private"]).toBe(true);
+    expect(saved["devDependencies"]).toEqual({ "@corpus/dev": "^1.0.0" });
+    expect(saved["futureFieldThisRuntimeHasNeverHeardOf"]).toEqual({ keep: true });
+    expect(saved["dependencies"]).toEqual({ "@corpus/hello": "latest" });
+  });
+
   it("carries a package's binary file into the runtime unchanged", async () => {
     // The bytes are deliberately not valid UTF-8: 0xff and 0xfe have no encoding, so any decode on the way turns them into replacement
     // characters and the comparison fails. This is the shape of the bug that stopped vite: an 11 MB wasm went through `TextDecoder` while the

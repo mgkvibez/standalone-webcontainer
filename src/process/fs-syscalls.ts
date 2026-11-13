@@ -15,7 +15,14 @@ import type { FileSystemPort } from "../vfs/port.js";
 import type { WatchRegistry } from "./watch-registry.js";
 
 export type FsRequest =
-  | { readonly op: "read"; readonly path: string; readonly encoding?: "utf8" }
+  | {
+      readonly op: "read";
+      readonly path: string;
+      readonly encoding?: "utf8";
+      /** Byte range for a file too large for one response frame. Absent means the whole file. */
+      readonly offset?: number;
+      readonly length?: number;
+    }
   | {
       readonly op: "write";
       readonly path: string;
@@ -24,6 +31,13 @@ export type FsRequest =
       // Declared as `evictable`, which is what both ends have always sent. The union said `mode?: number`, and the object
       // spread in the client hid the mismatch from the typechecker, so the declared shape described nothing.
       readonly evictable?: boolean;
+      /**
+       * Append instead of replacing the file.
+       *
+       * A request frame is fixed-size, so a file bigger than one frame has to arrive in pieces, and the pieces after the first one have nothing to
+       * replace: they continue it. Without this flag a large write has no legal encoding at all, which is what a 1.7 MB pre-bundled dependency hit.
+       */
+      readonly append?: boolean;
     }
   | { readonly op: "mkdir"; readonly path: string; readonly recursive?: boolean }
   | { readonly op: "readdir"; readonly path: string }
@@ -91,6 +105,37 @@ function requireString(value: unknown, field: string): string {
   return value;
 }
 
+/** A validated byte range, or null when the request asked for the whole file. */
+/** The bytes of a file, or empty when it does not exist yet, which is what an append to a new file means. */
+function readExisting(fs: FileSystemPort, path: string): Uint8Array {
+  try {
+    const existing = fs.readFileSync(path);
+    return typeof existing === "string" ? new TextEncoder().encode(existing) : existing;
+  } catch {
+    return new Uint8Array(0);
+  }
+}
+
+/** Two pieces as one, in the order they arrived. */
+function join(before: Uint8Array, after: string | Uint8Array): Uint8Array {
+  const tail = typeof after === "string" ? new TextEncoder().encode(after) : after;
+  const joined = new Uint8Array(before.byteLength + tail.byteLength);
+  joined.set(before, 0);
+  joined.set(tail, before.byteLength);
+  return joined;
+}
+
+function readRange(offset: unknown, length: unknown): { readonly offset: number; readonly length?: number } | null {
+  if (offset === undefined && length === undefined) return null;
+  if (offset !== undefined && (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0)) {
+    refuse("filesystem read offset must be a non-negative integer");
+  }
+  if (length !== undefined && (typeof length !== "number" || !Number.isInteger(length) || length <= 0)) {
+    refuse("filesystem read length must be a positive integer");
+  }
+  return { offset: offset === undefined ? 0 : offset, ...(length === undefined ? {} : { length }) };
+}
+
 export interface FsHandlerOptions {
   /**
    * Watches live in the kernel, so the handler needs the registry to register and drain them.
@@ -130,8 +175,24 @@ export function createFsSyscallHandler(
     try {
       switch (op) {
         case "read": {
-          const { path, encoding } = request as { path?: unknown; encoding?: unknown };
+          const { path, encoding, offset, length } = request as {
+            path?: unknown;
+            encoding?: unknown;
+            offset?: unknown;
+            length?: unknown;
+          };
           const target = requireString(path, "path");
+          // A range read exists because one response frame is a fixed-size shared region: vite's node chunk is 2.1 MB and the frame refused
+          // it with ERESPTOOLARGE, which no amount of retrying fixes. The slice is resolved HERE, where the bytes are, so the client never
+          // has to know the frame size and a small file still costs one round trip.
+          const range = readRange(offset, length);
+          if (range !== null) {
+            if (encoding !== undefined) refuse('filesystem range read does not take an encoding; decode the joined bytes at the caller');
+            const whole = fs.readFileSync(target) as Uint8Array;
+            const start = Math.min(range.offset, whole.byteLength);
+            const end = range.length === undefined ? whole.byteLength : Math.min(start + range.length, whole.byteLength);
+            return { kind: "bytes", bytes: whole.subarray(start, end) };
+          }
           if (encoding === "utf8") {
             return { kind: "text", text: fs.readFileSync(target, "utf8") as string };
           }
@@ -140,11 +201,12 @@ export function createFsSyscallHandler(
           return { kind: "bytes", bytes };
         }
         case "write": {
-          const { path, data, dataEncoding, evictable } = request as {
+          const { path, data, dataEncoding, evictable, append } = request as {
             path?: unknown;
             data?: unknown;
             dataEncoding?: unknown;
             evictable?: unknown;
+            append?: unknown;
           };
           const target = requireString(path, "path");
           if (evictable !== undefined && typeof evictable !== "boolean") refuse("filesystem write evictable must be a boolean");
@@ -160,6 +222,14 @@ export function createFsSyscallHandler(
                   ? data
                   : refuse("filesystem write data must be a Uint8Array when dataEncoding is binary")
                 : refuse('filesystem write dataEncoding must be "utf8" or "binary"');
+          if (append !== undefined && typeof append !== "boolean") refuse("filesystem write append must be a boolean");
+          if (append === true) {
+            // Read-modify-write, because the port's only write replaces a whole file. A missing target is the normal case for the
+            // first piece of a chunked write (append creates), so it starts from empty rather than failing.
+            const existing = readExisting(fs, target);
+            fs.writeFileSync(target, join(existing, payload), evictable === undefined ? {} : { evictable });
+            return { kind: "empty" };
+          }
           fs.writeFileSync(target, payload, evictable === undefined ? {} : { evictable });
           return { kind: "empty" };
         }

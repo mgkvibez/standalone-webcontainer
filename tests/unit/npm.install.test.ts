@@ -183,13 +183,14 @@ describe("installDependencies", () => {
   });
 
   it("refuses a spec that is not a registry range, naming the reason", async () => {
+    // An alias (`npm:other@^1`) used to be on this list. It is a registry spec, real trees contain them, and it is now resolved rather than
+    // refused - see "npm alias specs" in tests/unit/npm.policy.test.ts.
     const registry = await fakeRegistry({ packages: { dep: [{ version: "1.0.0" }] } });
 
     const cases: ReadonlyArray<readonly [string, RegExp]> = [
       ["file:../shared", /file:\.\.\/shared uses a protocol/],
       ["workspace:*", /uses a protocol/],
       ["git+https://github.com/x/y.git", /uses a protocol/],
-      ["npm:other@^1.0.0", /uses a protocol/],
       ["https://example.test/p.tgz", /is a URL, not a registry range/],
       ["../local-pkg", /is a local path/],
       ["someuser/somerepo", /looks like a GitHub shorthand/],

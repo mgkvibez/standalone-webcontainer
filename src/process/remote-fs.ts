@@ -29,6 +29,68 @@ export interface RemoteFileSystemOptions {
 }
 
 /**
+ * The largest slice a ranged read asks for.
+ *
+ * Deliberately far below the frame size: the payload is JSON with binary carried as a byte array, so one byte on disk costs several bytes on the
+ * wire, and a slice sized to the frame would overflow it again. 64 KiB is small enough to fit any configured region and large enough that a
+ * multi-megabyte file costs tens of round trips rather than thousands.
+ */
+const READ_RANGE_BYTES = 64 * 1024;
+
+/**
+ * The largest piece of a write that one request frame can carry.
+ *
+ * A quarter of the 512 KiB request region, not at its edge: the frame carries a JSON header plus the bytes themselves, and the frame size is a
+ * deployment detail, so a chunk sized to today's region would overflow the moment one were configured smaller. Chosen against a quarter rather than a
+ * half because the first attempt at half failed by 141 bytes - the header and path - which is exactly the margin a "fits" that was never measured
+ * leaves. `tests/unit/fs-bridge.test.ts` measures every chunk with the channel's own encoder against a 256 KiB budget, deliberately smaller than the
+ * 512 KiB production region so a smaller frame fails in the test and not in a browser.
+ */
+const WRITE_CHUNK_BYTES = 128 * 1024;
+
+/** Whether a failed call failed because the answer did not fit one frame. */
+function isTooLargeResponse(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const coded = error as { readonly code?: unknown; readonly message?: unknown };
+  if (coded.code === "ERESPTOOLARGE") return true;
+  return typeof coded.message === "string" && coded.message.includes("ERESPTOOLARGE");
+}
+
+/**
+ * Read a file that does not fit one frame, in slices, and join them.
+ *
+ * The text form is decoded ONCE at the end rather than per slice: a slice boundary falls inside a multi-byte character often enough to matter, and
+ * decoding each piece would corrupt exactly the files this path exists to load.
+ */
+function readInRanges(
+  send: (request: FsRequest) => FsResponse,
+  path: string,
+  encoding: "utf8" | undefined,
+): Uint8Array | string {
+  const pieces: Uint8Array[] = [];
+  let offset = 0;
+  for (;;) {
+    const answer = send({ op: "read", path, offset, length: READ_RANGE_BYTES });
+    if (answer.kind !== "bytes") {
+      throw new Error(`filesystem range read of "${path}" returned "${answer.kind}" where bytes were expected`);
+    }
+    const piece = answer.bytes;
+    if (piece.byteLength === 0) break;
+    pieces.push(piece);
+    offset += piece.byteLength;
+    if (piece.byteLength < READ_RANGE_BYTES) break;
+  }
+  const total = pieces.reduce((sum, piece) => sum + piece.byteLength, 0);
+  const joined = new Uint8Array(total);
+  let at = 0;
+  for (const piece of pieces) {
+    joined.set(piece, at);
+    at += piece.byteLength;
+  }
+  return encoding === "utf8" ? new TextDecoder().decode(joined) : joined;
+}
+
+/**
  * Deadline for a syscall when the caller does not choose one.
  *
  * Every call must carry a deadline — an un-deadlined wait on a kernel that died is a hang, which is the failure mode this
@@ -57,26 +119,55 @@ export function createRemoteFileSystem(
 
   return {
     readFileSync(path: string, encoding?: "utf8"): Uint8Array | string {
-      const answer = send(encoding === "utf8" ? { op: "read", path, encoding } : { op: "read", path });
-      if (encoding === "utf8") {
-        if (answer.kind !== "text") throw new Error(`filesystem read of "${path}" returned "${answer.kind}" where text was expected`);
-        return answer.text;
+      const whole = (): Uint8Array | string => {
+        const answer = send(encoding === "utf8" ? { op: "read", path, encoding } : { op: "read", path });
+        if (encoding === "utf8") {
+          if (answer.kind !== "text") throw new Error(`filesystem read of "${path}" returned "${answer.kind}" where text was expected`);
+          return answer.text;
+        }
+        if (answer.kind !== "bytes") throw new Error(`filesystem read of "${path}" returned "${answer.kind}" where bytes were expected`);
+        return answer.bytes;
+      };
+      try {
+        return whole();
+      } catch (error) {
+        // A response travels in one fixed-size shared region, so a file larger than that region cannot come back in one frame. Measured need:
+        // `vite` ships a 2.1 MB node chunk, and the dev server died on `ERESPTOOLARGE` while the loader read it. Falling back to ranged reads
+        // keeps the fast path (one call for every ordinary file) and makes the large one work instead of being a hard ceiling nobody can see.
+        if (!isTooLargeResponse(error)) throw error;
+        return readInRanges(send, path, encoding);
       }
-      if (answer.kind !== "bytes") throw new Error(`filesystem read of "${path}" returned "${answer.kind}" where bytes were expected`);
-      return answer.bytes;
     },
+    /**
+     * Write a file, in pieces when it does not fit one request frame.
+     *
+     * A request region is fixed, and a frame larger than it has no legal encoding: it throws `SyscallCapacityError` rather than truncating. Anything
+     * bigger therefore had no way to be written at all - which is how the browser product lost vite's dependency
+     * optimizer: it writes a 1.7 MB pre-bundled `react-dom_client.js`, the write threw, the optimizer aborted with `error while updating
+     * dependencies`, and every page load then asked for a dependency file that had never been created and got `504 Outdated Optimize Dep`.
+     *
+     * The first piece replaces the file and the rest append, so a half-written file is never visible as a whole one, and the small path stays a single
+     * call with the caller's own encoding. A string too large for one frame is encoded to UTF-8 bytes and travels as binary: the bytes are what the
+     * file would have held either way, and a chunk boundary inside a multi-byte character is then not a thing that can happen.
+     */
     writeFileSync(path: string, data: string | Uint8Array, writeOptions?: WriteOptionsPort): void {
-      const request: FsRequest =
-        typeof data === "string"
-          ? { op: "write", path, data, dataEncoding: "utf8", ...(writeOptions?.evictable === undefined ? {} : { evictable: writeOptions.evictable }) }
-          : {
-              op: "write",
-              path,
-              data,
-              dataEncoding: "binary",
-              ...(writeOptions?.evictable === undefined ? {} : { evictable: writeOptions.evictable }),
-            };
-      expectEmpty(send(request), "write");
+      const evictable = writeOptions?.evictable === undefined ? {} : { evictable: writeOptions.evictable };
+      const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+      if (bytes.byteLength <= WRITE_CHUNK_BYTES) {
+        const request: FsRequest =
+          typeof data === "string"
+            ? { op: "write", path, data, dataEncoding: "utf8", ...evictable }
+            : { op: "write", path, data, dataEncoding: "binary", ...evictable };
+        expectEmpty(send(request), "write");
+        return;
+      }
+      for (let at = 0; at < bytes.byteLength; at += WRITE_CHUNK_BYTES) {
+        const piece = bytes.slice(at, Math.min(at + WRITE_CHUNK_BYTES, bytes.byteLength));
+        expectEmpty(
+          send({ op: "write", path, data: piece, dataEncoding: "binary", ...(at === 0 ? {} : { append: true }), ...evictable }),
+          "write",
+        );
+      }
     },
     mkdirSync(path: string, mkdirOptions?: MkdirOptionsPort): void {
       expectEmpty(

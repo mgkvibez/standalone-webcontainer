@@ -26,6 +26,11 @@ export interface FakeVersion {
   readonly rawTarball?: Uint8Array;
   /** Published as dist.integrity, so a mismatch can be tested. */
   readonly integrity?: string;
+  /** Published as dist.shasum (sha1), for the fallback a package older than integrity metadata needs. */
+  readonly shasum?: string;
+  readonly peerDependencies?: Record<string, string>;
+  readonly peerDependenciesMeta?: Record<string, { readonly optional?: boolean }>;
+  readonly hasInstallScript?: boolean;
 }
 
 export interface FakeRegistryOptions {
@@ -67,6 +72,10 @@ export async function createFakeRegistry(options: FakeRegistryOptions): Promise<
       os?: readonly string[];
       cpu?: readonly string[];
       integrity?: string;
+      shasum?: string;
+      peerDependencies?: Record<string, string>;
+      peerDependenciesMeta?: Record<string, { readonly optional?: boolean }>;
+      hasInstallScript?: boolean;
     }> = [];
 
     for (const entry of versions) {
@@ -95,6 +104,10 @@ export async function createFakeRegistry(options: FakeRegistryOptions): Promise<
         ...(entry.os === undefined ? {} : { os: entry.os }),
         ...(entry.cpu === undefined ? {} : { cpu: entry.cpu }),
         ...(integrity === undefined ? {} : { integrity }),
+        ...(entry.shasum === undefined ? {} : { shasum: entry.shasum }),
+        ...(entry.peerDependencies === undefined ? {} : { peerDependencies: entry.peerDependencies }),
+        ...(entry.peerDependenciesMeta === undefined ? {} : { peerDependenciesMeta: entry.peerDependenciesMeta }),
+        ...(entry.hasInstallScript === true ? { hasInstallScript: true } : {}),
       });
     }
 

@@ -10,6 +10,9 @@ import { describe, expect, it } from "vitest";
 import { FileSystem } from "../../src/vfs/index.js";
 import { createFsSyscallHandler, FileSystemSyscallError, type FsResponse } from "../../src/process/fs-syscalls.js";
 import { createRemoteFileSystem, DEFAULT_SYSCALL_TIMEOUT_MS, type SyscallTransport } from "../../src/process/remote-fs.js";
+// The channel's own encoder, so the budget measured here is the budget production pays. Reformatting the request as plain JSON would count a
+// `Uint8Array` as a list of numbers and overstate every binary write about six times.
+import { framedEncoding } from "../../src/process/frame.js";
 
 /** Stands in for the channel: same envelope, same code-preserving rejection, no Atomics. */
 const transportOver = (fs: FileSystem): SyscallTransport => {
@@ -41,6 +44,113 @@ const bridge = (): { fs: FileSystem; remote: ReturnType<typeof createRemoteFileS
   return { fs, remote: createRemoteFileSystem(transportOver(fs)) };
 };
 
+/**
+ * A transport whose response region is smaller than the file, which is what the real channel is.
+ *
+ * The channel refuses an answer that does not fit its fixed region with `ERESPTOOLARGE`; this double does the same for any single `read` of a
+ * whole file over the limit, so the ranged-read fallback is exercised against the failure that produced it (a 2.1 MB vite chunk).
+ */
+const crampedTransport = (fs: FileSystem, limitBytes: number): SyscallTransport => {
+  const handler = createFsSyscallHandler(fs);
+  return {
+    call(request: unknown): FsResponse {
+      const read = request as { op?: unknown; offset?: unknown };
+      if (read.op === "read" && read.offset === undefined) {
+        const target = (request as { path?: string }).path ?? "";
+        const size = (fs.readFileSync(target) as Uint8Array).byteLength;
+        if (size > limitBytes) {
+          throw Object.assign(new Error(`response payload is ${String(size)} bytes`), {
+            code: "ERESPTOOLARGE",
+            name: "SyscallRejectedError",
+          });
+        }
+      }
+      try {
+        return handler(request);
+      } catch (error) {
+        const rejection = error as FileSystemSyscallError;
+        throw Object.assign(new Error(rejection.message), { code: rejection.code, name: "SyscallRejectedError" });
+      }
+    },
+  };
+};
+
+/**
+ * A transport with the channel's REAL encoding and no room to spare.
+ *
+ * The doubles above limit one thing each; this one measures the actual wire size of a request with the channel's own encoder against a budget, and
+ * refuses anything larger with the error the channel raises. That is what makes the write test
+ * below a reproduction rather than a restatement: before chunked writes, a 1.7 MB write to a 64 KiB frame could not be sent at all.
+ */
+const measuredTransport = (
+  fs: FileSystem,
+  requestBytes: number,
+): { readonly transport: SyscallTransport; readonly largest: () => number } => {
+  const handler = createFsSyscallHandler(fs);
+  let largest = 0;
+  return {
+    largest: () => largest,
+    transport: {
+      call(request: unknown): FsResponse {
+        const size = framedEncoding.encode(request).byteLength;
+        largest = Math.max(largest, size);
+        if (size > requestBytes) {
+          throw Object.assign(new Error(`request payload is ${String(size)} bytes, which exceeds its ${String(requestBytes)}-byte region.`), {
+            code: "EREQTOOLARGE",
+            name: "SyscallCapacityError",
+          });
+        }
+        try {
+          return handler(request);
+        } catch (error) {
+          const rejection = error as FileSystemSyscallError;
+          throw Object.assign(new Error(rejection.message), { code: rejection.code, name: "SyscallRejectedError" });
+        }
+      },
+    },
+  };
+};
+
+describe("a write larger than one request frame", () => {
+  // The size that broke the browser product: vite's pre-bundled `react-dom_client.js` is 1 130 361 bytes, and the optimizer aborted on it.
+  const BIG = Uint8Array.from({ length: 1_700_000 }, (_unused, index) => (index * 7) % 256);
+
+  it("arrives whole, in pieces, without ever exceeding the frame", () => {
+    const fs = new FileSystem();
+    const measured = measuredTransport(fs, 256 * 1024);
+    const remote = createRemoteFileSystem(measured.transport);
+
+    remote.writeFileSync("/node_modules/.vite/deps/react-dom_client.js", BIG);
+
+    const written = fs.readFileSync("/node_modules/.vite/deps/react-dom_client.js") as Uint8Array;
+    expect(written.byteLength).toBe(BIG.byteLength);
+    expect(written.every((byte, index) => byte === BIG[index])).toBe(true);
+    expect(measured.largest()).toBeLessThanOrEqual(256 * 1024);
+  });
+
+  it("replaces what was there, rather than appending to a stale file", () => {
+    const fs = new FileSystem();
+    fs.writeFileSync("/bundle.js", BIG);
+    const remote = createRemoteFileSystem(measuredTransport(fs, 256 * 1024).transport);
+
+    const replacement = Uint8Array.from({ length: 400_000 }, () => 9);
+    remote.writeFileSync("/bundle.js", replacement);
+    const written = fs.readFileSync("/bundle.js") as Uint8Array;
+    expect(written.byteLength).toBe(replacement.byteLength);
+    expect(written.every((byte) => byte === 9)).toBe(true);
+  });
+
+  it("carries a large utf8 string as bytes, so a chunk boundary cannot split a character", () => {
+    const fs = new FileSystem();
+    const remote = createRemoteFileSystem(measuredTransport(fs, 256 * 1024).transport);
+    // 4-byte characters, and the chunk size is not a multiple of 4: a per-character boundary would corrupt these.
+    const text = "\u{1F600}".repeat(120_000);
+
+    remote.writeFileSync("/notes.txt", text);
+    expect(remote.readFileSync("/notes.txt", "utf8")).toBe(text);
+  });
+});
+
 describe("filesystem bridge", () => {
   it("reads text back through the wire", () => {
     const { fs, remote } = bridge();
@@ -54,6 +164,32 @@ describe("filesystem bridge", () => {
     remote.writeFileSync("/blob.bin", original);
     expect([...fs.readFileSync("/blob.bin")]).toEqual([...original]);
     expect([...remote.readFileSync("/blob.bin")]).toEqual([...original]);
+  });
+
+  it("reads a file too large for one response frame by falling back to ranged reads", () => {
+    const fs = new FileSystem();
+    // Larger than the double's frame, and not a multiple of the 64 KiB slice, so the last slice is short and the boundary is exercised.
+    const original = Uint8Array.from({ length: 300_000 }, (_unused, index) => index % 251);
+    fs.writeFileSync("/big.bin", original);
+    const remote = createRemoteFileSystem(crampedTransport(fs, 100_000));
+
+    const read = remote.readFileSync("/big.bin") as Uint8Array;
+    expect(read.byteLength).toBe(original.byteLength);
+    expect([...read.subarray(0, 4)]).toEqual([...original.subarray(0, 4)]);
+    expect([...read.subarray(-4)]).toEqual([...original.subarray(-4)]);
+    expect(read.every((byte, index) => byte === original[index])).toBe(true);
+  });
+
+  it("joins ranged slices before decoding, so a multi-byte character across a boundary survives", () => {
+    const fs = new FileSystem();
+    // 4-byte emoji repeated: a 64 KiB slice boundary lands inside one, which per-slice decoding would turn into replacement characters.
+    const text = "\u{1F600}".repeat(50_000);
+    fs.writeFileSync("/emoji.txt", text);
+    const remote = createRemoteFileSystem(crampedTransport(fs, 100_000));
+
+    const read = remote.readFileSync("/emoji.txt", "utf8") as string;
+    expect(read).toBe(text);
+    expect(read.includes("\uFFFD")).toBe(false);
   });
 
   it("survives a payload larger than one base64 chunk", () => {

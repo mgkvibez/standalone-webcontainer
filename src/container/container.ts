@@ -63,6 +63,30 @@ const DEFAULT_TIMEOUT_MS = 0;
 const DEFAULT_TERMINAL_COLUMNS = 80;
 const DEFAULT_TERMINAL_ROWS = 24;
 
+/**
+ * Put the requested dependencies back into the project's OWN package.json, preserving every other field.
+ *
+ * The installer reads a narrow view of that file - name, version, dependencies - and writing that view back is data loss. Measured in the
+ * real-registry acceptance journey: `"scripts": { "dev": "vite" }` disappeared after `npm install`, and `npm run dev` then answered "missing
+ * script: dev" for a file the test had just written. So the user's file is edited in place rather than regenerated: only the `dependencies` map
+ * is replaced, and `type`, `private`, `scripts`, `devDependencies` and any field this runtime has never heard of survive an install.
+ *
+ * Returns null when the file is not a JSON object, in which case nothing is written: a manifest we cannot parse is a manifest we must not
+ * overwrite.
+ */
+function mergeDependencies(raw: string | null, dependencies: Record<string, string>): string | null {
+  if (raw === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const record: Record<string, unknown> = { ...(parsed as Record<string, unknown>), dependencies };
+  return `${JSON.stringify(record, null, 2)}\n`;
+}
+
 export class Container {
   readonly #runtime: RuntimeClient;
   readonly #files: ProjectFiles;
@@ -586,7 +610,8 @@ export class Container {
       }
       // npm saves a requested dependency into package.json when there is one, and leaves the tree alone when there is not.
       if (requested.length > 0 && manifestExists) {
-        this.#files.write(`${root}package.json`, `${JSON.stringify(manifest, null, 2)}\n`);
+        const merged = mergeDependencies(this.#files.read(`${root}package.json`), manifest.dependencies ?? {});
+        if (merged !== null) this.#files.write(`${root}package.json`, merged);
       }
       const lockContents = staged.get(`${root}package-lock.json`);
       // The lockfile is text by definition, so it is decoded here rather than at the staging write, which has to stay byte-faithful for every
@@ -608,6 +633,24 @@ export class Container {
       this.#lastExitCode = 1;
     }
     this.#notify();
+  }
+
+  /**
+   * A system line with no command behind it.
+   *
+   * For a notice the page raises before the user types anything - a dependency tree being rebuilt from a lockfile, or that rebuild failing -
+   * because the alternative is a scrollback that starts mid-story and a person who cannot tell why `npm run dev` worked a minute ago.
+   */
+  announce(sessionId: string, text: string): void {
+    const session = this.findSession(sessionId);
+    if (session === undefined) return;
+    this.#line(session, "system", text);
+    this.#notify();
+  }
+
+  /** Whether an installed tree is in memory. False after a reload, which is when a project's lockfile is worth reinstalling from. */
+  hasDependencies(): boolean {
+    return this.#dependencies.size > 0;
   }
 
   /**

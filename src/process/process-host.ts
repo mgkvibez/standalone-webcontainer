@@ -102,7 +102,14 @@ export class ProcessWorkerUnavailableError extends Error {
   }
 }
 
-const DEFAULT_CHANNEL_SIZES: ChannelSizes = { requestBytes: 64 * 1024, responseBytes: 256 * 1024 };
+/**
+ * Request 512 KiB, response 256 KiB.
+ *
+ * The request region was 64 KiB, which is smaller than the files real packages write: vite's optimizer emits a 1.7 MB pre-bundled dependency in one
+ * `writeFileSync`, and the write threw on capacity before any of it reached the kernel. 512 KiB lets a chunked write (see `remote-fs.ts`) carry 256 KiB
+ * of file per call, so a 2 MB bundle costs eight round trips instead of failing, at a cost of 448 KiB of shared memory per process.
+ */
+const DEFAULT_CHANNEL_SIZES: ChannelSizes = { requestBytes: 512 * 1024, responseBytes: 256 * 1024 };
 
 /** Only names the Worker in devtools; the pid is assigned by the table after the Worker exists. */
 let spawned = 0;

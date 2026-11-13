@@ -8,7 +8,9 @@
  * the runtime in a dedicated worker precisely so `terminate()` exists. The
  * `timeoutMs` option below bounds async gaps only, and says so in its result.
  */
-import { Buffer } from "buffer";
+// Through the shim, not the package: the shim is where `base64url` is added, and importing the class from here applies that patch before any
+// program runs. A direct import would hand programs the bare polyfill, which is the class that refused vite.
+import { Buffer } from "../shims/buffer.js";
 
 import { eventsModule } from "../shims/events.js";
 import {
@@ -213,6 +215,14 @@ export class InProcessRuntime implements Runtime {
   #lastScheduler: Scheduler | null = null;
   /** Runs in progress. A run pumps its own queue, so a request pump must not start a second loop over the same one. */
   #running = 0;
+  /**
+   * The pump that keeps a program's own scheduled work running after its run has ended, and whether it is running.
+   *
+   * A process that owns a port outlives the run that started it. `pumpWhile` only runs while a request is owed, so between requests the queue stood
+   * still and everything the program scheduled for itself - Vite's dependency optimizer most visibly - never ran. `Scheduler.pumpResident` is that
+   * pump; this is the decision about when a program still deserves one.
+   */
+  #resident: Promise<void> | null = null;
   #pumping = false;
   /**
    * Requests waiting for an answer.
@@ -291,6 +301,60 @@ export class InProcessRuntime implements Runtime {
     await this.#pumpUntilIdle();
   }
 
+  /**
+   * Give a live program a resident pump, or do nothing when it does not deserve one.
+   *
+   * "Alive" is two facts, not one: a ref'd handle the scheduler counts (a watcher, a waiting reader) or a bound port. Measured with a probe on the
+   * previous commit, a server holding port 4310 reported `handles=0` - the container was routing requests to a process the scheduler believed was
+   * finished, so a pump gated on handles alone would never have started.
+   *
+   * ONE PUMP AT A TIME. `#pumping` is shared with the request pump deliberately: a request arriving mid-window sees a pump already running and lets
+   * it do the work, which is exactly what the resident pump does. It is cleared by whoever finishes, so the next request starts its own.
+   */
+  #startResidentPump(): void {
+    const scheduler = this.#lastScheduler;
+    if (scheduler === null || this.#resident !== null || this.#running > 0 || this.#pumping) return;
+    if (this.#pendingRequests.size > 0) return;
+    if (this.#registry.list().length === 0 && scheduler.liveHandles() === 0) return;
+
+    this.#pumping = true;
+    const running = (async () => {
+      try {
+        await scheduler.pumpResident({
+          // The pump serves this program, requests included, so a pending request is not a reason to stop: it is the reason to keep going.
+          stillAlive: () => this.#running === 0 && (this.#registry.list().length > 0 || scheduler.liveHandles() > 0),
+          busy: () => this.#pendingRequests.size > 0,
+          liveHandles: () => scheduler.liveHandles(),
+        });
+      } catch {
+        // The pump is not the caller's answer and has no caller: a fault here must not become a runtime state nobody can leave. The next window,
+        // request or run asks again.
+      } finally {
+        this.#resident = null;
+        this.#pumping = false;
+      }
+    })();
+    this.#resident = running;
+  }
+
+  /**
+   * Wait for the resident pump to stop, if one is running.
+   *
+   * Exists so a caller that tears down a runtime is not racing a loop over a queue it is about to discard. It is a `Promise` rather than a flag
+   * because "stopped" has to mean the loop returned, and the pump decides that itself - it stops when the program owns nothing, or when its queue
+   * has been empty long enough.
+   */
+  async #settleResident(): Promise<void> {
+    const running = this.#resident;
+    if (running === null) return;
+    await running;
+  }
+
+  /** Public form of `#settleResident`, for hosts that dispose a runtime and want no loop left behind. */
+  async settleLiveWork(): Promise<void> {
+    await this.#settleResident();
+  }
+
   #forgetRequest(pending: Promise<unknown>): void {
     this.#pendingRequests.delete(pending);
     if (this.#pendingRequests.size > 0) return;
@@ -323,6 +387,8 @@ export class InProcessRuntime implements Runtime {
     // would then have nothing scheduling its work at all: measured as every other request to a live server hanging until the gateway's deadline
     // (probe order 0, 10, 0, 10, 0 answered 200, hang, 200, 200, hang). The deferred request gets its pump here instead.
     if (this.#pendingRequests.size > 0) await this.#pumpUntilIdle();
+    // Requests are served; a program that is still alive goes back to owning its own queue.
+    this.#startResidentPump();
   }
 
   /**
@@ -393,6 +459,9 @@ export class InProcessRuntime implements Runtime {
       this.#running -= 1;
       // A request that arrived during the run had no pump of its own; now that the run is over, its work needs one.
       if (this.#pendingRequests.size > 0) void this.#pumpUntilIdle();
+      // A program that kept a port is still running, and its queue belongs to it now. Without this the process was listed as running and answered
+      // requests while everything it had scheduled for itself stayed frozen, which is how a dev server's dependency pre-bundling never finished.
+      this.#startResidentPump();
     }
   }
 

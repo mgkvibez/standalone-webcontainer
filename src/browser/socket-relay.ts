@@ -70,7 +70,13 @@ export function resolveSocketTarget(url: string, options: SocketTargetOptions): 
 
   const prefix = PREVIEW_PREFIX.exec(parsed.pathname);
   const explicitPort = parsed.port === "" ? null : Number(parsed.port);
-  const port = explicitPort ?? (prefix === null ? options.port : Number(prefix[1]));
+  // The page's OWN port is the gateway's, never a container port. Measured need: Vite's HMR client builds its socket URL from the page's
+  // location, so it asked for `ws://<preview host>:5199/?token=...` while the dev server it wanted listens on 3000 inside the container. Reading
+  // 5199 as a container port produced "no preview server is listening on port 5199", which names the gateway as if it were the server.
+  const originPort = portOfOrigin(base);
+  const port = explicitPort === null || explicitPort === originPort
+    ? (prefix === null ? options.port : Number(prefix[1]))
+    : explicitPort;
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     return { refusal: `Not a port: ${parsed.port || String(port)}` };
   }
@@ -79,6 +85,16 @@ export function resolveSocketTarget(url: string, options: SocketTargetOptions): 
   // URL that does not carry it is already a path on the server.
   const path = prefix === null ? parsed.pathname : (prefix[2] ?? "/");
   return { port, path: `${path === "" ? "/" : path}${parsed.search}` };
+}
+
+/** The port the shell's own origin was served from, or null when the origin names none. */
+function portOfOrigin(origin: string): number | null {
+  try {
+    const parsed = new URL(origin);
+    return parsed.port === "" ? null : Number(parsed.port);
+  } catch {
+    return null;
+  }
 }
 
 function isId(value: unknown): value is number {
