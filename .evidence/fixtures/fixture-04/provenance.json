@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "runId": "20261113014735-7dcadd5c-aa4d5b9c",
+  "fixture": {
+    "id": 4,
+    "slug": "fixture-04",
+    "lane": "front-end-only"
+  },
+  "definition": {
+    "sha256": "7dcadd5c0166cc32c9de43a6243a8ecaf003ee2dd0e565afa01a65306fe88217",
+    "formatVersion": 1,
+    "steps": 2,
+    "assertions": 6
+  },
+  "harness": {
+    "name": "standalone-webcontainer fixture runner",
+    "version": "0.0.0"
+  },
+  "runtime": {
+    "name": "node",
+    "version": "v20.20.2"
+  },
+  "commit": "30bdd41d018ec0e24bd94879ebaee7018b311580",
+  "tree": {
+    "dirty": true,
+    "changedFiles": 67
+  },
+  "command": {
+    "argv": [
+      "--id",
+      "4",
+      "--replace-unattributed"
+    ],
+    "steps": [
+      "npm install",
+      "node core.mjs"
+    ]
+  },
+  "registry": {
+    "lane": "corpus",
+    "label": "offline corpus (fixtures/registry)"
+  },
+  "startedAt": "2026-11-13T01:47:35.882Z",
+  "endedAt": "2026-11-13T01:47:35.910Z",
+  "durationMs": 28,
+  "budgets": {
+    "install": 180000,
+    "build": 240000,
+    "run": 60000
+  },
+  "verdict": {
+    "classification": "PASS",
+    "reason": "all 6 assertion(s) passed"
+  }
+}

@@ -1,4 +1,11 @@
-# The twenty fixtures, run for the first time
+# Fixture scorecard
+
+> **Superseded, 2026-11-13.** This file is history. The operative table is `docs/audit/baseline-nov-13.md`, which is
+> built from the `provenance.json` records the runs themselves write. The rows below predate evidence carrying a lane or a run
+> id, and several describe a tree that no longer exists: `fixture-01` and `fixture-13` both PASS now, and `fixture-11` and
+> `fixture-18` were recorded as passing here while a clean re-run at `30bdd41` failed on `process.stdout.clearLine` (W-29).
+
+## The twenty fixtures, run for the first time
 
 **Date:** 2026-11-10. **Commit:** `4ded40e` plus this change. **Instrument:** `tools/harness/fixture-executor.ts` driven by
 `tools/harness/run-fixture.ts` (`npm run fixtures:run -- --all`), which takes each definition through the real `Container`, the

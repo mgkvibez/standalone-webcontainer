@@ -7,6 +7,7 @@ import { runFixture } from "../../src/harness/runner.js";
 import type { AssertionEnvironment } from "../../src/harness/assertions.js";
 import { createRefusal, type Refusal } from "../../src/runtime/refusal.js";
 import type { FixtureDefinition } from "../../src/harness/definition.js";
+import { EVIDENCE_SCHEMA_VERSION, testProvenance } from "../helpers/provenance.js";
 
 const tempDir = (): string => mkdtempSync(join(tmpdir(), "evidence-v2-"));
 
@@ -51,12 +52,14 @@ describe("evidence schema version", () => {
       executeStep: async () => ({ termination: "ok", detail: "ran", record: record(0) }),
       environment: environment(),
       evidenceRoot: root,
+      provenance: testProvenance(),
     });
     const schema = JSON.parse(readFileSync(join(root, "fixture-15", "schema.json"), "utf8"));
-    // 3, because steps.json now carries the HTTP observations taken at the end of each step (see StepRecord.http). A shape a consumer
-    // can observe changing is exactly what this version number exists to announce.
-    expect(schema.schemaVersion).toBe(3);
-    expect(readFileSync(join(root, "fixture-15", "verdict.txt"), "utf8")).toContain("evidence schema: 3");
+    // 4: the bundle gained provenance.json (W-27), which is a shape a consumer can observe changing — exactly what this number
+    // exists to announce. 3 added the per-step HTTP observations; 4 adds how the run was executed.
+    expect(schema.schemaVersion).toBe(EVIDENCE_SCHEMA_VERSION);
+    expect(schema.lane).toBe("corpus");
+    expect(readFileSync(join(root, "fixture-15", "verdict.txt"), "utf8")).toContain(`evidence schema: ${EVIDENCE_SCHEMA_VERSION}`);
   });
 
   it("keeps steps.json and assertions.json as bare arrays, so existing consumers keep working", async () => {
@@ -66,6 +69,7 @@ describe("evidence schema version", () => {
       executeStep: async () => ({ termination: "ok", detail: "ran", record: record(0) }),
       environment: environment(),
       evidenceRoot: root,
+      provenance: testProvenance(),
     });
     const steps = JSON.parse(readFileSync(join(root, "fixture-15", "steps.json"), "utf8"));
     const assertions = JSON.parse(readFileSync(join(root, "fixture-15", "assertions.json"), "utf8"));
@@ -83,6 +87,7 @@ describe("evidence schema version", () => {
       executeStep: async () => ({ termination: "ok", detail: "ran", record: record(0) }),
       environment: environment(),
       evidenceRoot: root,
+      provenance: testProvenance(),
     });
     // Exit 1 satisfies the assertion, so the run is a PASS and the definition expected a refusal: a bad baseline.
     expect(report.classification).toBe("INVALID_BASELINE");
@@ -102,6 +107,7 @@ describe("evidence schema version", () => {
       }),
       environment: environment(),
       evidenceRoot: root,
+      provenance: testProvenance(),
     });
 
     expect(report.classification).toBe("UNSUPPORTED_BY_DESIGN");
@@ -126,6 +132,7 @@ describe("evidence schema version", () => {
       }),
       environment: environment(),
       evidenceRoot: root,
+      provenance: testProvenance(),
     });
     const refusals = JSON.parse(readFileSync(join(root, "fixture-15", "refusals.json"), "utf8"));
     expect(refusals.refusal.message).toBe(awkward);
@@ -144,6 +151,7 @@ describe("evidence schema version", () => {
       }),
       environment: environment(),
       evidenceRoot: root,
+      provenance: testProvenance(),
     });
     const carried = report.steps[0]?.refusal;
     expect(carried).toBeDefined();

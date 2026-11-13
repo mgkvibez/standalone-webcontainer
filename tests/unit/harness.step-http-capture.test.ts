@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { runFixture } from "../../src/harness/runner.js";
 import type { FixtureDefinition } from "../../src/harness/definition.js";
+import { testProvenance } from "../helpers/provenance.js";
 
 /**
  * Assertions are evaluated after every step has run, so a live fetch can only answer "what does this URL serve now".
@@ -67,6 +68,7 @@ describe("per-step HTTP observation", () => {
       definition: twoSided,
       ...world(),
       evidenceRoot: null,
+      provenance: testProvenance(),
     });
 
     // The whole point: before the capture, one of these two had to fail, because both read the post-edit body.
@@ -92,7 +94,7 @@ describe("per-step HTTP observation", () => {
 
   it("writes the observation into steps.json, where a human can read it", async () => {
     const root = tempDir();
-    await runFixture({ definition: twoSided, ...world(), evidenceRoot: root });
+    await runFixture({ definition: twoSided, ...world(), evidenceRoot: root, provenance: testProvenance() });
 
     const steps = JSON.parse(readFileSync(join(root, "fixture-13", "steps.json"), "utf8")) as {
       record: { http?: Record<string, { body: string }> } | null;
@@ -130,6 +132,7 @@ describe("per-step HTTP observation", () => {
         },
       },
       evidenceRoot: null,
+      provenance: testProvenance(),
     });
 
     // Both captures failed, so both assertions fell back to live fetches, which then answered from the same world: the first passes.

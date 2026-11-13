@@ -16,6 +16,7 @@ import { evaluateAssertion, ProbeFault, type AssertionEnvironment, type StepReco
 import { parseDefinition, type FixtureDefinition } from "../../src/harness/definition.js";
 import { decideVerdict, runFixture, type StepRun } from "../../src/harness/runner.js";
 import { createRefusal, type Refusal } from "../../src/runtime/refusal.js";
+import { testProvenance } from "../helpers/provenance.js";
 
 const created: string[] = [];
 
@@ -290,6 +291,7 @@ describe("runFixture", () => {
       executeStep: async () => ({ termination: "ok", detail: "installed", record: record({ stdout: "added 43 packages" }) }),
       environment: environment({ responses: { "http://localhost:3000/": { status: 200, body: "<div id=\"root\">" } } }),
       evidenceRoot,
+      provenance: testProvenance(),
     });
 
     expect(report.classification).toBe("PASS");
@@ -319,6 +321,7 @@ describe("runFixture", () => {
       },
       environment: environment(),
       evidenceRoot: null,
+      provenance: testProvenance(),
       budgets: { install: 1000, build: 1000, run: 25 },
     });
 
@@ -355,6 +358,7 @@ describe("runFixture", () => {
       }),
       environment: environment(),
       evidenceRoot: null,
+      provenance: testProvenance(),
     });
     expect(report.classification).toBe("UNSUPPORTED_BY_DESIGN");
     // The point of the fixture: its evidence was actually checked, not skipped.
@@ -369,6 +373,7 @@ describe("runFixture", () => {
       executeStep: async () => ({ termination: "ok", detail: "installed", record: record() }),
       environment: environment({ responses: { "http://localhost:3000/": { status: 200, body: "<div id=\"root\">" } } }),
       evidenceRoot: null,
+      provenance: testProvenance(),
     });
     expect(surprisePass.classification).toBe("INVALID_BASELINE");
     expect(surprisePass.reason).toContain("observed PASS");
@@ -391,6 +396,7 @@ describe("runFixture", () => {
       }),
       environment: environment(),
       evidenceRoot: null,
+      provenance: testProvenance(),
     });
     expect(report.classification).toBe("UNSUPPORTED_BY_DESIGN");
     expect(report.reason).not.toContain("INVALID_BASELINE");
@@ -402,6 +408,7 @@ describe("runFixture", () => {
       executeStep: async () => ({ termination: "ok", detail: "installed", record: record() }),
       environment: environment({ requestError: new ProbeFault("HARNESS_BUG", "preview route never reached the gateway") }),
       evidenceRoot: null,
+      provenance: testProvenance(),
     });
     expect(report.classification).toBe("HARNESS_BUG");
     expect(report.reason).toContain("preview route");
@@ -413,6 +420,7 @@ describe("runFixture", () => {
       executeStep: async () => ({ termination: "ok", detail: "installed", record: record() }),
       environment: environment({ requestError: new Error("ECONNREFUSED") }),
       evidenceRoot: null,
+      provenance: testProvenance(),
     });
     expect(report.classification).toBe("NETWORK");
   });
@@ -423,6 +431,7 @@ describe("runFixture", () => {
       executeStep: async () => ({ termination: "ok", detail: "installed", record: record() }),
       environment: environment({ responses: { "http://localhost:3000/": { status: 200, body: "<div id=\"root\">" } } }),
       evidenceRoot: null,
+      provenance: testProvenance(),
     });
     expect(report.classification).toBe("PASS");
     expect(report.outcome).toBeNull();

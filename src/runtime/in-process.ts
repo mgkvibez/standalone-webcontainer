@@ -199,6 +199,15 @@ export class InProcessRuntime implements Runtime {
   readonly #vfs: FileSystemPort;
   readonly #registry: PortRegistry;
   readonly #gateway: PreviewGateway;
+  /**
+   * Every server this runtime created, so a caller can shut them down.
+   *
+   * Node keeps a server alive for as long as it is listening, and a harness that runs one fixture after another cannot inherit
+   * that: an unclosed server would answer a later fixture's probe for a port nobody bound in it. The gateway holds the same
+   * objects for routing, so closing here and detaching there are one action, taken deliberately rather than by discarding the
+   * whole runtime and hoping.
+   */
+  readonly #servers = new Set<Server>();
   readonly #watches: WatchSourcePort | undefined;
   /** The scheduler of the most recent run, kept so a served request always has a queue to be resumed on. */
   #lastScheduler: Scheduler | null = null;
@@ -237,6 +246,29 @@ export class InProcessRuntime implements Runtime {
    */
   get gateway(): PreviewGateway {
     return this.#gateway;
+  }
+
+  /**
+   * Close every server this runtime started, and report the ports that therefore stopped answering.
+   *
+   * Deterministic shutdown for a caller that owns the runtime's lifetime: a port is reported as released only if it was
+   * actually bound, so "cleaned up" is a fact about the registry rather than a promise that close() was called.
+   */
+  closeServers(): readonly number[] {
+    const httpPorts = (): number[] =>
+      this.#registry.list().filter((binding) => binding.protocol === "http").map((binding) => binding.port);
+    const before = httpPorts();
+    for (const server of this.#servers) {
+      // Detach first: the gateway must stop routing to a server before it stops answering, or a probe arriving mid-close
+      // gets a 503 from a port the registry still lists.
+      this.#gateway.attach(server)();
+      server.close();
+    }
+    this.#servers.clear();
+    const remaining = new Set(httpPorts());
+    // Only ports that were actually released: a server that had already closed reports nothing, and "cleaned up" has to be a
+    // fact about the registry rather than a promise that close() was called.
+    return before.filter((port) => !remaining.has(port));
   }
 
   /**
@@ -595,6 +627,7 @@ export class InProcessRuntime implements Runtime {
           createServer: (handler?: RequestListener): Server => {
             const server = createServer(handler, { registry: this.#registry });
             this.#gateway.attach(server);
+            this.#servers.add(server);
             return server;
           },
           Server,

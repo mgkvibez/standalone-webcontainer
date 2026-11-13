@@ -33,6 +33,22 @@ export interface StepRecord {
    * therefore belongs to the step that was current when it was taken, and this is where it is kept.
    */
   readonly http?: Readonly<Record<string, HttpProbe>>;
+  /**
+   * What happened while the harness waited for this step's server to answer (W-28).
+   *
+   * A step that binds a port is RUNNING, which is not the same claim as READY: measured through vite, the port is bound at
+   * ~1.1 s and the first request is answered at ~5.1 s. Readiness is therefore never inferred from a bound port or from a line
+   * of terminal output — it is a real request, counted, with the deadline it ran under. Absent on a step that started no server.
+   */
+  readonly readiness?: {
+    readonly port: number;
+    readonly ready: boolean;
+    readonly attempts: number;
+    readonly elapsedMs: number;
+    readonly deadlineMs: number;
+    readonly status?: number;
+    readonly lastError?: string;
+  };
 }
 
 export interface HttpProbe {

@@ -2,17 +2,17 @@
   {
     "index": 0,
     "kind": "http-status",
-    "state": "not-evaluated",
-    "passed": false,
+    "state": "passed",
+    "passed": true,
     "stepAvailable": true,
-    "detail": "step 1 exceeded its run budget after 60000ms before this could be checked"
+    "detail": "expected status 200 from http://localhost:3000/ (as observed at the end of step 1), observed 200"
   },
   {
     "index": 1,
     "kind": "http-body-contains",
-    "state": "not-evaluated",
-    "passed": false,
+    "state": "passed",
+    "passed": true,
     "stepAvailable": true,
-    "detail": "step 1 exceeded its run budget after 60000ms before this could be checked"
+    "detail": "body of http://localhost:3000/ (as observed at the end of step 1) contained the expected text"
   }
 ]

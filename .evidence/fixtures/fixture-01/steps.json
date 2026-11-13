@@ -6,7 +6,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "builtin command completed: added 8 package(s) from snapshot \"vite\" (8 pinned packages)",
-    "elapsedMs": 269,
+    "elapsedMs": 265,
     "record": {
       "index": 0,
       "exitCode": 0,
@@ -19,9 +19,20 @@
     "kind": "run",
     "command": "npm run dev -- --port 3000 --host 127.0.0.1",
     "state": "ran",
-    "termination": "timeout",
-    "detail": "no result within 60000ms",
-    "elapsedMs": 60000,
-    "record": null
+    "termination": "ok",
+    "detail": "process 1 exited 0 and left a server listening on port(s) 3000",
+    "elapsedMs": 1223,
+    "record": {
+      "index": 1,
+      "exitCode": 0,
+      "stdout": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\u001b[1;1H\u001b[0J\n  \u001b[32m\u001b[1mVITE\u001b[22m v5.4.21\u001b[39m  \n\n  \u001b[32m➜\u001b[39m  \u001b[1mLocal\u001b[22m:   \u001b[36mhttp://127.0.0.1:\u001b[1m3000\u001b[22m/\u001b[39m\n\u001b[2m\u001b[32m  ➜\u001b[39m\u001b[22m\u001b[2m  press \u001b[22m\u001b[1mh + enter\u001b[22m\u001b[2m to show help\u001b[22m\n",
+      "stderr": "",
+      "http": {
+        "http://localhost:3000/": {
+          "status": 200,
+          "body": "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <script type=\"module\" src=\"/@vite/client\"></script>\n\n    <meta charset=\"utf-8\" />\n    <title>fixture-01</title>\n  </head>\n  <body>\n    <div id=\"root\"></div>\n    <script type=\"module\" src=\"/src/main.js\"></script>\n  </body>\n</html>\n"
+        }
+      }
+    }
   }
 ]

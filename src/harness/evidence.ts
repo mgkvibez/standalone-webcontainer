@@ -6,10 +6,11 @@
  * are data, so a hostile or fat-fingered slug must not be able to write outside the run directory.
  */
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 
 import type { EvidenceBundle } from "./evidence-bundle.js";
+import { PROVENANCE_FILE, RUNS_DIRECTORY, type RunProvenance } from "./provenance.js";
 
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
@@ -45,4 +46,57 @@ export async function writeEvidence(
   }
 
   return { dir, files: written };
+}
+
+/** A run id is a file name, so it is validated like a slug rather than trusted. */
+const RUN_ID = /^[a-z0-9][a-z0-9-]*$/;
+
+/**
+ * Read the provenance already on disk for a fixture, if there is any.
+ *
+ * A bundle written before provenance existed has none, and that must be a DISTINCT answer from "unreadable": the caller
+ * refuses both, but it refuses them with different words because only one of them is the operator's old evidence. A corrupt
+ * `provenance.json` is not "no provenance" either — it is evidence nobody can interpret, so it comes back as the old schema
+ * number rather than as a licence to overwrite.
+ */
+export async function readProvenance(rootDir: string, fixtureSlug: string): Promise<RunProvenance | null> {
+  assertSafeSlug(fixtureSlug);
+  const path = resolve(join(rootDir, fixtureSlug, PROVENANCE_FILE));
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch {
+    // No provenance file. That is NOT the same as no evidence: a bundle written before this existed has a `verdict.txt` and no
+    // provenance, and calling that "nothing to replace" is precisely how it would be overwritten without a word. A directory
+    // that holds evidence but cannot say where it came from is reported as schema 0.
+    try {
+      await readFile(join(rootDir, fixtureSlug, "verdict.txt"), "utf8");
+      return { schemaVersion: 0 } as RunProvenance;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return JSON.parse(text) as RunProvenance;
+  } catch {
+    return { schemaVersion: 0 } as RunProvenance;
+  }
+}
+
+/**
+ * Write the per-run record, beside the canonical bundle rather than over it.
+ *
+ * This is what makes two runs distinguishable after the fact: `verdict.txt` says what is true now, `runs/<runId>.json` says
+ * what happened, including runs the canonical slot has since replaced.
+ */
+export async function writeRunRecord(rootDir: string, fixtureSlug: string, runId: string, contents: string): Promise<string> {
+  assertSafeSlug(fixtureSlug);
+  if (!RUN_ID.test(runId)) throw new Error(`unsafe run id ${JSON.stringify(runId)}: expected lowercase alphanumeric and hyphens`);
+  const root = resolve(rootDir);
+  const dir = resolve(join(root, fixtureSlug, RUNS_DIRECTORY));
+  if (!dir.startsWith(root + sep)) throw new Error(`evidence path escapes the run directory: ${dir}`);
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, `${runId}.json`);
+  await writeFile(path, contents, "utf8");
+  return path;
 }

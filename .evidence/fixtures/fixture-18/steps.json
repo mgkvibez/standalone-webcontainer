@@ -6,7 +6,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "builtin command completed: added 8 package(s) from snapshot \"vite\" (8 pinned packages)",
-    "elapsedMs": 221,
+    "elapsedMs": 249,
     "record": {
       "index": 0,
       "exitCode": 0,
@@ -21,11 +21,11 @@
     "state": "ran",
     "termination": "ok",
     "detail": "process 2 exited with exit 0",
-    "elapsedMs": 1488,
+    "elapsedMs": 1562,
     "record": {
       "index": 1,
       "exitCode": 0,
-      "stdout": "vite v5.4.21 building for production...\ntransforming...\n✓ 4 modules transformed.\nrendering chunks...\ncomputing gzip size...\ndist/index.html     0.23 kB │ gzip: 0.17 kB\ndist/assets/app.js  0.81 kB │ gzip: 0.45 kB\n✓ built in 251ms\n",
+      "stdout": "\u001b[36mvite v5.4.21 \u001b[32mbuilding for production...\u001b[36m\u001b[39m\n\u001b[2K\rtransforming (1) \u001b[2mindex.html\u001b[22m\u001b[2K\r\u001b[32m✓\u001b[39m 4 modules transformed.\n\u001b[2K\rrendering chunks (1)...\u001b[2K\r\u001b[2K\rcomputing gzip size (0)...\u001b[2K\rcomputing gzip size (1)...\u001b[2K\rcomputing gzip size (2)...\u001b[2K\r\u001b[2mdist/\u001b[22m\u001b[32mindex.html     \u001b[39m\u001b[1m\u001b[2m0.23 kB\u001b[22m\u001b[1m\u001b[22m\u001b[2m │ gzip: 0.17 kB\u001b[22m\n\u001b[2mdist/\u001b[22m\u001b[2massets/\u001b[22m\u001b[36mapp.js  \u001b[39m\u001b[1m\u001b[2m0.81 kB\u001b[22m\u001b[1m\u001b[22m\u001b[2m │ gzip: 0.45 kB\u001b[22m\n\u001b[32m✓ built in 100ms\u001b[39m\n",
       "stderr": ""
     }
   }

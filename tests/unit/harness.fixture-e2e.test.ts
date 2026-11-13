@@ -19,6 +19,7 @@ import { InProcessRuntime } from "../../src/runtime/in-process.js";
 import type { FileSystem } from "../../src/vfs/index.js";
 import { createFakeRegistry } from "../helpers/registry.js";
 import { bootVfs, exists, text } from "../helpers/vfs.js";
+import { testProvenance } from "../helpers/provenance.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "swc-fixture-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -109,6 +110,7 @@ function environmentFor(vfs: FileSystem): AssertionEnvironment {
       executeStep: createStepExecutor({ runtime, registry, root }),
       environment: environmentFor(vfs),
       evidenceRoot: null,
+      provenance: testProvenance(),
     });
 
     expect(report.steps.map((entry) => entry.termination)).toEqual(["ok", "ok"]);
@@ -137,6 +139,7 @@ describe("a whole fixture through the harness", () => {
       executeStep: createStepExecutor({ runtime, registry, root }),
       environment: environmentFor(vfs),
       evidenceRoot: scratch,
+      provenance: testProvenance(),
     });
 
     expect(report.classification).toBe("PASS");
@@ -173,6 +176,7 @@ describe("a whole fixture through the harness", () => {
       executeStep: createStepExecutor({ runtime, registry, root }),
       environment: environmentFor(vfs),
       evidenceRoot: null,
+      provenance: testProvenance(),
     });
 
     expect(report.classification).toBe("RUNTIME_INCOMPATIBILITY");
@@ -196,6 +200,7 @@ describe("a whole fixture through the harness", () => {
       },
       environment: environmentFor(vfs),
       evidenceRoot: null,
+      provenance: testProvenance(),
       budgets: { install: 1000, build: 1000, run: 10 },
     });
 
@@ -270,6 +275,7 @@ describe("the pnpm profile through a whole fixture", () => {
       executeStep: createStepExecutor({ runtime, registry, root }),
       environment: environmentFor(vfs),
       evidenceRoot: scratch,
+      provenance: testProvenance(),
     });
 
     expect(report.classification).toBe("PASS");
@@ -298,6 +304,7 @@ describe("the pnpm profile through a whole fixture", () => {
       executeStep: createStepExecutor({ runtime, registry, root }),
       environment: environmentFor(vfs),
       evidenceRoot: scratch,
+      provenance: testProvenance(),
     });
 
     expect(report.classification).toBe("PASS");
@@ -320,6 +327,7 @@ describe("the pnpm profile through a whole fixture", () => {
       executeStep: createStepExecutor({ runtime, registry, root }),
       environment: environmentFor(vfs),
       evidenceRoot: scratch,
+      provenance: testProvenance(),
     });
 
     // Not HARNESS_BUG: a boundary we chose must never read as a defect to be fixed.
@@ -377,6 +385,7 @@ describe("what a pnpm install actually leaves on disk", () => {
       executeStep: createStepExecutor({ runtime, registry, root }),
       environment: environmentFor(vfs),
       evidenceRoot: null,
+      provenance: testProvenance(),
     });
 
     expect(report.classification).toBe("PASS");

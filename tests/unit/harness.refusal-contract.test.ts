@@ -15,6 +15,8 @@ import { assertionState, decideVerdict, runFixture, type StepRun } from "../../s
 import type { AssertionEnvironment, AssertionResult, StepRecord } from "../../src/harness/assertions.js";
 import { GATE_THRESHOLD } from "../../src/harness/score.js";
 import { createRefusal, type Refusal } from "../../src/runtime/refusal.js";
+import { testProvenance } from "../helpers/provenance.js";
+import type { RunProvenanceInput } from "../../src/harness/provenance.js";
 
 const MESSAGE = "Cannot load native addon /app/node_modules/x/x.node: native addons are not supported in this runtime.";
 const NATIVE_ADDON: Refusal = createRefusal({
@@ -71,6 +73,7 @@ async function refuse(options: {
   refusal?: unknown;
   record?: StepRecord;
   evidenceRoot?: string | null;
+  provenance?: RunProvenanceInput;
 } = {}) {
   return runFixture({
     definition: options.definition ?? definition(),
@@ -85,6 +88,8 @@ async function refuse(options: {
     },
     environment: environment(),
     evidenceRoot: options.evidenceRoot ?? null,
+    // Evidence without provenance is refused now (W-27), so every call through this helper carries one.
+    provenance: options.provenance ?? testProvenance(),
   });
 }
 
@@ -208,6 +213,7 @@ describe("T9 the diagnostic is preserved exactly", () => {
     const awkward = "  Cannot load native addon:\ttabs, unicode ✓, trailing space ";
     await refuse({
       evidenceRoot: root,
+      provenance: testProvenance(),
       refusal: createRefusal({
         code: "native-addon",
         capability: "native addon",
@@ -247,6 +253,7 @@ describe("T11 an expected refusal that never happened", () => {
       }),
       environment: environment(),
       evidenceRoot: null,
+      provenance: testProvenance(),
     });
     expect(report.classification).toBe("INVALID_BASELINE");
   });
@@ -266,6 +273,7 @@ describe("T12 a refusal the program handled is not a refusal event", () => {
       }),
       environment: environment(),
       evidenceRoot: null,
+      provenance: testProvenance(),
     });
     expect(report.classification).toBe("PASS");
     expect(report.steps[1]?.refusal).toBeUndefined();

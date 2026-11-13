@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "runId": "20261112213354-0b31018a-4d87856a",
+  "fixture": {
+    "id": 11,
+    "slug": "fixture-11",
+    "lane": "front-end-only"
+  },
+  "definition": {
+    "sha256": "0b31018a72ef392e3bf810db0d97695e36efef7214ff6199104c406fb1ba9ada",
+    "formatVersion": 1,
+    "steps": 2,
+    "assertions": 2
+  },
+  "harness": {
+    "name": "standalone-webcontainer fixture runner",
+    "version": "0.0.0"
+  },
+  "runtime": {
+    "name": "node",
+    "version": "v20.20.2"
+  },
+  "commit": "30bdd41d018ec0e24bd94879ebaee7018b311580",
+  "command": {
+    "argv": [
+      "--id",
+      "11",
+      "--registry=snapshot:fixtures/snapshots/vite"
+    ],
+    "steps": [
+      "npm install",
+      "npm run build"
+    ]
+  },
+  "registry": {
+    "lane": "snapshot",
+    "label": "fixtures/snapshots/vite",
+    "snapshot": {
+      "directory": "fixtures/snapshots/vite",
+      "capturedAt": "2026-11-11T06:10:11.376Z",
+      "digest": "5ac9db3d359b010aed6c769266763d5b964599bd8382042f0c5b4c7e272b8305",
+      "packages": 8
+    }
+  },
+  "startedAt": "2026-11-12T21:33:54.161Z",
+  "endedAt": "2026-11-12T21:33:55.053Z",
+  "durationMs": 892,
+  "budgets": {
+    "install": 180000,
+    "build": 240000,
+    "run": 60000
+  },
+  "verdict": {
+    "classification": "RUNTIME_INCOMPATIBILITY",
+    "reason": "assertion failed: exit-code: expected exit code 0, observed 1 (and 1 more)"
+  }
+}
