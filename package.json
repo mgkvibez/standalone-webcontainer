@@ -25,6 +25,7 @@
     "build:browser:preview": "vite build --mode preview",
     "preview:browser": "vite preview",
     "test:browser": "playwright test",
+    "probe:browser": "playwright test --config tools/probes/playwright.config.ts",
     "deploy:plan": "vite-node tools/deploy/vercel.ts",
     "deploy:apply": "vite-node tools/deploy/vercel.ts --apply",
     "verify:deployment": "vite-node tools/verify/deployment.ts",
