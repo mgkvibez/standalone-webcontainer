@@ -1,4 +1,6 @@
 {
-  "schemaVersion": 3,
-  "fixture": "fixture-01"
+  "schemaVersion": 4,
+  "fixture": "fixture-01",
+  "runId": "20261113014731-899b4714-c53a671d",
+  "lane": "snapshot"
 }

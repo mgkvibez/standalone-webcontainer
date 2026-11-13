@@ -13,6 +13,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import { loadRegistry, runDefinition, type Registry } from "../../tools/harness/fixture-executor.js";
 import type { FixtureDefinition } from "../../src/harness/definition.js";
+import { testProvenance } from "../helpers/provenance.js";
 
 const definition = (overrides: Partial<FixtureDefinition>): FixtureDefinition =>
   ({
@@ -65,6 +66,7 @@ describe("runFixture through the real container", () => {
       }),
       registry,
       evidenceRoot,
+      testProvenance(),
     );
 
     expect(report.assertions.map((assertion) => `${assertion.kind}#${assertion.index} ${assertion.state}`)).toEqual([
@@ -86,6 +88,7 @@ describe("runFixture through the real container", () => {
       }),
       registry,
       evidenceRoot,
+      testProvenance(),
     );
 
     expect(report.assertions[0]?.state).toBe("failed");
@@ -101,6 +104,7 @@ describe("runFixture through the real container", () => {
       }),
       registry,
       evidenceRoot,
+      testProvenance(),
     );
 
     expect(report.classification).toBe("HARNESS_BUG");

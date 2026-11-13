@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "runId": "20261112213315-259b86e1-ababe3a2",
+  "fixture": {
+    "id": 8,
+    "slug": "fixture-08",
+    "lane": "front-end-only"
+  },
+  "definition": {
+    "sha256": "259b86e10121f0c14d007a33cb5f8de6b650ac9742ef7599434d2dec855a5e55",
+    "formatVersion": 1,
+    "steps": 2,
+    "assertions": 3
+  },
+  "harness": {
+    "name": "standalone-webcontainer fixture runner",
+    "version": "0.0.0"
+  },
+  "runtime": {
+    "name": "node",
+    "version": "v20.20.2"
+  },
+  "commit": "30bdd41d018ec0e24bd94879ebaee7018b311580",
+  "command": {
+    "argv": [
+      "--id",
+      "8",
+      "--registry=snapshot:fixtures/snapshots/express",
+      "--replace-unattributed"
+    ],
+    "steps": [
+      "npm install express",
+      "node server.mjs"
+    ]
+  },
+  "registry": {
+    "lane": "snapshot",
+    "label": "fixtures/snapshots/express",
+    "snapshot": {
+      "directory": "fixtures/snapshots/express",
+      "capturedAt": "2026-11-10T12:12:13.785Z",
+      "digest": "770a4b14a8e899a8bdf0e59028602de89ba18ac375f19f277b8a33f6139e1399",
+      "packages": 68
+    }
+  },
+  "startedAt": "2026-11-12T21:33:15.855Z",
+  "endedAt": "2026-11-12T21:33:16.140Z",
+  "durationMs": 285,
+  "budgets": {
+    "install": 180000,
+    "build": 240000,
+    "run": 60000
+  },
+  "verdict": {
+    "classification": "PASS",
+    "reason": "all 3 assertion(s) passed"
+  }
+}

@@ -22,17 +22,31 @@ import type { HttpProbe } from "../../src/harness/assertions.js";
 import { createTerminal } from "../../src/terminal/pty.js";
 import { previewRequestUrl } from "../../src/harness/preview-target.js";
 
+/**
+ * How long a run that owns a listening port is given to finish printing before its outcome is handed back.
+ *
+ * This affects CAPTURED OUTPUT ONLY. It cannot make a server ready: readiness is a real HTTP request (`tools/harness/readiness.ts`),
+ * and a program that binds a port and prints nothing still gets no banner to point at.
+ */
+const HOLD_GRACE_MS = 250;
+
+/** How often a live run's port registry is read while the program is still going. */
+const PORT_POLL_MS = 5;
+
 export class InProcessClient implements RuntimeClient {
   #files = new FileSystem();
   #runtime = new InProcessRuntime(this.#files);
   readonly #mirror = createProjectMirror();
+  readonly #portListeners = new Set<(processId: number, ports: readonly number[]) => void>();
 
   async run(request: RuntimeRunRequest): Promise<RuntimeRunOutcome> {
-    // A fresh filesystem and runtime per run, seeded from the request's snapshot. The product's container does this diffing at each
-    // command boundary against a kernel that outlives the run; here the fixture is the whole world, so starting clean is both simpler
-    // and stricter: nothing one fixture writes can be seen by the next.
-    this.#files = new FileSystem();
-    this.#runtime = new InProcessRuntime(this.#files);
+    // ONE runtime per fixture, not per command, which is what W-28 turned out to need.
+    //
+    // The product keeps a kernel per project, so a command that leaves a server listening is still there for the next command. This
+    // client used to build a fresh filesystem and runtime for every run, which is stricter about isolation and wrong about
+    // continuity: fixture-13 starts a dev server, edits a file in a LATER step, and asks the same server what it now serves. With a
+    // runtime per run, step 2's edit landed in a brand-new filesystem and the observation at the end of step 2 found no server on
+    // port 3300 at all. Isolation between FIXTURES is preserved by `reset()`, which the runner calls once per definition.
     this.#mirror.reset();
     const target = this.#files;
     this.#mirror.sync(
@@ -48,30 +62,117 @@ export class InProcessClient implements RuntimeClient {
       request.files,
     );
 
-    const before = new Set(this.#runtime.ports.list().filter((binding) => binding.protocol === "http").map((binding) => binding.port));
-    const result = await this.#runtime.run(request.entry, {
+    const httpPorts = (): readonly number[] =>
+      this.#runtime.ports
+        .list()
+        .filter((binding) => binding.protocol === "http")
+        .map((binding) => binding.port);
+    const before = new Set(httpPorts());
+    const fresh = (): readonly number[] => httpPorts().filter((port) => !before.has(port));
+
+    // The output is re-collected here as well as forwarded, because a run that is held open never returns its own stdout: its body
+    // has not settled, so there is no outcome to read it from. Faking an outcome needs the bytes it already printed.
+    const printed: string[] = [];
+    const run = this.#runtime.run(request.entry, {
       argv: [...request.argv],
       cwd: request.cwd,
       env: { ...request.env },
       timeoutMs: request.timeoutMs,
-      onOutput: request.onOutput,
+      onOutput: (stream, text) => {
+        if (stream === "stdout") printed.push(text);
+        request.onOutput(stream, text);
+      },
       ...(request.terminal === undefined ? {} : { terminal: createTerminal(request.terminal) }),
     });
-    const previewPorts = this.#runtime.ports
-      .list()
-      .filter((binding) => binding.protocol === "http" && !before.has(binding.port))
-      .map((binding) => binding.port);
-    return { ...result, killed: false, previewPorts };
+
+    /**
+     * The hold-open rule, applied where this client can see it (W-28).
+     *
+     * Node keeps a process alive for a listening server, so `run` would never return and a fixture's budget would end the step as a
+     * TIMEOUT — the exact shape measured on fixtures 01 and 13. The product answers this in ProcessHost (`holdOpen`): the process
+     * settles, but it is not retired. Here the same answer is a race: the first http port to appear settles the run and leaves the
+     * program running, so its server can be probed, and its ports are reported the moment they exist rather than at a settle that
+     * never comes.
+     */
+    const held = new Promise<readonly number[]>((resolve) => {
+      const poll = setInterval(() => {
+        const ports = fresh();
+        if (ports.length > 0) resolve(ports);
+      }, PORT_POLL_MS);
+      // Unref'd where the host allows it, so a probe script does not fail to exit because of this timer.
+      (poll as unknown as { unref?: () => void }).unref?.();
+    });
+
+    const settled = await Promise.race([
+      run.then((result) => ({ kind: "settled" as const, result })),
+      held.then((ports) => ({ kind: "held" as const, ports })),
+    ]);
+
+    if (settled.kind === "held") {
+      // Report the ports immediately: a preview list must not wait for a settle that cannot come.
+      for (const listener of this.#portListeners) listener(request.processId ?? 0, fresh());
+      // A short grace so a banner printed just after bind() is captured. It cannot make an unready server ready.
+      await Promise.race([run.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, HOLD_GRACE_MS))]);
+      for (const listener of this.#portListeners) listener(request.processId ?? 0, fresh());
+      return {
+        stdout: printed.join(""),
+        stderr: "",
+        exitCode: 0,
+        durationMs: 0,
+        timedOut: false,
+        killed: false,
+        previewPorts: fresh(),
+      };
+    }
+
+    // A run that went on after the hold must not become an unhandled rejection; its output already reached the caller.
+    run.catch(() => undefined);
+    const previewPorts = fresh();
+    if (previewPorts.length > 0) {
+      for (const listener of this.#portListeners) listener(request.processId ?? 0, previewPorts);
+    }
+    return { ...settled.result, killed: false, previewPorts };
   }
 
   /**
-   * Nothing to discard between fixtures, because each one gets a fresh runtime.
+   * Discard this fixture's runtime, filesystem and servers.
    *
-   * Kept as a no-op rather than removed: the interface asks a client whether it can reset, and "always already reset" is a different
-   * answer from "cannot".
+   * This is the isolation boundary now: one runtime lives for the length of a fixture so a server can outlive the command that
+   * started it, and nothing survives into the next fixture. Servers are closed rather than abandoned, so a later fixture cannot be
+   * answered by a port it never bound.
    */
   reset(): void {
-    return undefined;
+    this.#runtime.closeServers();
+    this.#files = new FileSystem();
+    this.#runtime = new InProcessRuntime(this.#files);
+  }
+
+  /**
+   * Ports as this runtime knows them right now, whether or not the run that bound them has settled.
+   *
+   * The observation the harness was missing: `containerPorts=[]` was the harness not asking, not the runtime not knowing.
+   */
+  boundPorts(): readonly number[] {
+    return this.#runtime.ports
+      .list()
+      .filter((binding) => binding.protocol === "http")
+      .map((binding) => binding.port);
+  }
+
+  /**
+   * Ports a process is serving, as they appear.
+   *
+   * Single-threaded, so this is a poll of the same registry the product reads across a MessagePort boundary: the fact reported is
+   * identical, only the transport differs. Called from `run`, so a listener sees a port the moment it is bound.
+   */
+  onPorts(listener: (processId: number, ports: readonly number[]) => void): () => void {
+    this.#portListeners.add(listener);
+    return () => this.#portListeners.delete(listener);
+  }
+
+  /** Deterministic shutdown: close every server this runtime started and report the ports that stopped answering. */
+  stopServers(): readonly number[] {
+    return this.#runtime.closeServers();
   }
 
   /** What a program wrote, which the project snapshot cannot show. */

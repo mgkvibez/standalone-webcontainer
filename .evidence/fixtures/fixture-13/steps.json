@@ -6,7 +6,7 @@
     "state": "ran",
     "termination": "ok",
     "detail": "builtin command completed: added 8 package(s) from snapshot \"vite\" (8 pinned packages)",
-    "elapsedMs": 227,
+    "elapsedMs": 255,
     "record": {
       "index": 0,
       "exitCode": 0,
@@ -19,20 +19,41 @@
     "kind": "run",
     "command": "npm run dev -- --port 3300 --host 127.0.0.1",
     "state": "ran",
-    "termination": "timeout",
-    "detail": "no result within 60000ms",
-    "elapsedMs": 60000,
-    "record": null
+    "termination": "ok",
+    "detail": "process 1 exited 0 and left a server listening on port(s) 3300",
+    "elapsedMs": 1211,
+    "record": {
+      "index": 1,
+      "exitCode": 0,
+      "stdout": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\u001b[1;1H\u001b[0J\n  \u001b[32m\u001b[1mVITE\u001b[22m v5.4.21\u001b[39m  \n\n  \u001b[32m➜\u001b[39m  \u001b[1mLocal\u001b[22m:   \u001b[36mhttp://127.0.0.1:\u001b[1m3300\u001b[22m/\u001b[39m\n\u001b[2m\u001b[32m  ➜\u001b[39m\u001b[22m\u001b[2m  press \u001b[22m\u001b[1mh + enter\u001b[22m\u001b[2m to show help\u001b[22m\n",
+      "stderr": "",
+      "http": {
+        "http://localhost:3300/": {
+          "status": 200,
+          "body": "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <script type=\"module\" src=\"/@vite/client\"></script>\n\n    <meta charset=\"utf-8\" />\n    <title>fixture-13</title>\n  </head>\n  <body>\n    <div id=\"root\">initial-marker</div>\n    <script type=\"module\" src=\"/src/main.js\"></script>\n  </body>\n</html>\n"
+        }
+      }
+    }
   },
   {
     "index": 2,
     "kind": "run",
     "command": "node edit.mjs",
-    "state": "skipped",
-    "skipReason": "step 1 exceeded its run budget after 60000ms",
-    "termination": "not-run",
-    "detail": "not run: step 1 exceeded its run budget after 60000ms",
-    "elapsedMs": 0,
-    "record": null
+    "state": "ran",
+    "termination": "ok",
+    "detail": "process 2 exited with exit 0",
+    "elapsedMs": 17,
+    "record": {
+      "index": 2,
+      "exitCode": 0,
+      "stdout": "rewrote /index.html\n",
+      "stderr": "",
+      "http": {
+        "http://localhost:3300/": {
+          "status": 200,
+          "body": "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <script type=\"module\" src=\"/@vite/client\"></script>\n\n    <meta charset=\"utf-8\" />\n    <title>fixture-13</title>\n  </head>\n  <body>\n    <div id=\"root\">edited-marker</div>\n    <script type=\"module\" src=\"/src/main.js\"></script>\n  </body>\n</html>\n"
+        }
+      }
+    }
   }
 ]

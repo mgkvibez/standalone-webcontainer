@@ -2,17 +2,17 @@
   {
     "index": 0,
     "kind": "http-body-contains",
-    "state": "not-evaluated",
-    "passed": false,
+    "state": "passed",
+    "passed": true,
     "stepAvailable": true,
-    "detail": "step 1 exceeded its run budget after 60000ms before this could be checked"
+    "detail": "body of http://localhost:3300/ (as observed at the end of step 1) contained the expected text"
   },
   {
     "index": 1,
     "kind": "http-body-contains",
-    "state": "not-evaluated",
-    "passed": false,
-    "stepAvailable": false,
-    "detail": "step 2 did not run (step 1 exceeded its run budget after 60000ms), so http-body-contains cannot be checked"
+    "state": "passed",
+    "passed": true,
+    "stepAvailable": true,
+    "detail": "body of http://localhost:3300/ (as observed at the end of step 2) contained the expected text"
   }
 ]

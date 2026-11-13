@@ -1,4 +1,7 @@
 fixture: fixture-01
-evidence schema: 3
-classification: TIMEOUT
-reason: step 1 (npm run dev -- --port 3000 --host 127.0.0.1) exceeded its run budget after 60000ms
+evidence schema: 4
+run: 20261113014731-899b4714-c53a671d
+lane: fixtures/snapshots/vite
+commit: 30bdd41d018ec0e24bd94879ebaee7018b311580
+classification: PASS
+reason: all 2 assertion(s) passed

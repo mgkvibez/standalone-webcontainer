@@ -23,7 +23,16 @@
 import type { AssertionResult, AssertionEnvironment, HttpProbe, StepRecord } from "./assertions.js";
 import { evaluateAssertion, ProbeFault } from "./assertions.js";
 import type { FixtureDefinition, FixtureStep, TimeoutClass } from "./definition.js";
-import { writeEvidence } from "./evidence.js";
+import { readProvenance, writeEvidence, writeRunRecord } from "./evidence.js";
+import {
+  decideEvidenceWrite,
+  EVIDENCE_SCHEMA_VERSION,
+  EvidenceRefusedError,
+  PROVENANCE_FILE,
+  PROVENANCE_SCHEMA_VERSION,
+  type RunProvenance,
+  type RunProvenanceInput,
+} from "./provenance.js";
 import { withTimeout } from "./timeout.js";
 import { CLASSIFICATIONS, TIMEOUTS, type Classification, type FixtureOutcome } from "./types.js";
 import type { Refusal } from "../runtime/refusal.js";
@@ -192,6 +201,16 @@ export interface FixtureRunInput {
   /** Absolute directory for raw evidence, or null to run without writing any (unit tests do this). */
   readonly evidenceRoot: string | null;
   readonly budgets?: Readonly<Record<TimeoutClass, number>>;
+  /**
+   * How this run was executed (W-27). Required whenever evidence is written: evidence that cannot name its lane, definition
+   * and commit is exactly the artefact that let a wrong-lane run replace a passing result without a word.
+   */
+  readonly provenance?: RunProvenanceInput;
+  /**
+   * Replace evidence from another lane, or from before provenance existed. Off unless a human asked for it, and the refusal
+   * message names the flag, because the whole point is that this is never the silent path.
+   */
+  readonly replaceForeignEvidence?: boolean;
 }
 
 export interface FixtureRunReport {
@@ -356,8 +375,49 @@ async function writeRunEvidence(
   steps: readonly StepRun[],
   assertions: readonly AssertionResult[],
   verdict: Verdict,
+  startedAt: Date,
 ): Promise<FixtureOutcome | null> {
   if (input.evidenceRoot === null) return null;
+
+  const provided = input.provenance;
+  if (provided === undefined) {
+    // Structural, not advisory: a writer that will accept evidence without provenance will be called without it.
+    throw new EvidenceRefusedError(
+      "UNATTRIBUTED_EVIDENCE",
+      "refusing to write evidence for a run that cannot name its lane, definition and commit",
+      input.definition.slug,
+    );
+  }
+  const endedAt = new Date();
+  const provenance: RunProvenance = {
+    schemaVersion: PROVENANCE_SCHEMA_VERSION,
+    runId: provided.runId,
+    fixture: { id: input.definition.id, slug: input.definition.slug, lane: input.definition.lane },
+    definition: provided.definition,
+    harness: provided.harness,
+    ...(provided.runtime === undefined ? {} : { runtime: provided.runtime }),
+    commit: provided.commit,
+    // Absent only when a caller could not be asked; a caller that omitted it is recorded as unknown rather than clean.
+    tree: provided.tree ?? { dirty: true, changedFiles: null },
+    command: provided.command,
+    registry: provided.registry,
+    startedAt: startedAt.toISOString(),
+    endedAt: endedAt.toISOString(),
+    durationMs: endedAt.getTime() - startedAt.getTime(),
+    budgets: provided.budgets,
+    verdict: { classification: verdict.classification, reason: verdict.reason },
+  };
+
+  // The decision is made against what is on disk, not against what this process remembers writing.
+  const existing = await readProvenance(input.evidenceRoot, input.definition.slug);
+  const decision = decideEvidenceWrite({
+    existing,
+    incoming: provenance.registry,
+    ...(input.replaceForeignEvidence === undefined ? {} : { replaceForeign: input.replaceForeignEvidence }),
+  });
+  if (decision.action === "refuse") {
+    throw new EvidenceRefusedError(decision.code, decision.message, input.definition.slug);
+  }
 
   // One capture, two files (ADR-0014 D-11). The refusal is the SAME frozen object in both renders and is never copied
   // into a mutable shape: JSON.stringify reads it, so what lands on disk is what the runtime captured.
@@ -368,11 +428,18 @@ async function writeRunEvidence(
     // The version therefore lives in schema.json and in verdict.txt, beside the files rather than inside them.
     "steps.json": `${JSON.stringify(steps, null, 2)}\n`,
     "assertions.json": `${JSON.stringify(assertions, null, 2)}\n`,
-    "schema.json": `${JSON.stringify({ schemaVersion: 3, fixture: input.definition.slug }, null, 2)}\n`,
+    "schema.json": `${JSON.stringify(
+      { schemaVersion: EVIDENCE_SCHEMA_VERSION, fixture: input.definition.slug, runId: provenance.runId, lane: provenance.registry.lane },
+      null,
+      2,
+    )}\n`,
     // The verdict is text so a human reading the evidence directory sees it without a tool.
     "verdict.txt":
       `fixture: ${input.definition.slug}\n` +
-      `evidence schema: 3\n` +
+      `evidence schema: ${EVIDENCE_SCHEMA_VERSION}\n` +
+      `run: ${provenance.runId}\n` +
+      `lane: ${provenance.registry.label}\n` +
+      `commit: ${provenance.commit}\n` +
       `classification: ${verdict.classification}\n` +
       `reason: ${verdict.reason}\n`,
   };
@@ -391,7 +458,10 @@ async function writeRunEvidence(
     files["verdict.txt"] += `refusal: ${refusedStep.refusal?.code ?? "unknown"} (${refusedStep.refusal?.capability ?? "unknown"})\n`;
   }
 
+  files[PROVENANCE_FILE] = `${JSON.stringify(provenance, null, 2)}\n`;
   const bundle = await writeEvidence(input.evidenceRoot, input.definition.slug, files);
+  // Beside the canonical bundle, not over it: the canonical slot says what is true now, the run record says what happened.
+  await writeRunRecord(input.evidenceRoot, input.definition.slug, provenance.runId, `${JSON.stringify(provenance, null, 2)}\n`);
 
   return {
     fixture: { id: input.definition.id, slug: input.definition.slug, lane: input.definition.lane },
@@ -401,6 +471,7 @@ async function writeRunEvidence(
 }
 
 export async function runFixture(input: FixtureRunInput): Promise<FixtureRunReport> {
+  const startedAt = new Date();
   const budgets = input.budgets ?? DEFAULT_BUDGETS;
   const steps: StepRun[] = [];
   const records: StepRecord[] = [];
@@ -565,7 +636,7 @@ export async function runFixture(input: FixtureRunInput): Promise<FixtureRunRepo
       }
     : verdict;
 
-  const outcome = await writeRunEvidence(input, steps, assertions, finalVerdict);
+  const outcome = await writeRunEvidence(input, steps, assertions, finalVerdict, startedAt);
   return {
     classification: finalVerdict.classification,
     reason: finalVerdict.reason,

@@ -1,6 +1,11 @@
 # Fresh baseline, 2026-11-12: what reproduces, what does not, and what the gate actually is
 
 **Commit:** `db53ed3`. **Suite:** `npm run verify` exit 0 (1,433 tests / 103 files); browser lane 52 passed + 2 skipped.
+> **Superseded for the score by `docs/audit/baseline-nov-13.md`.** Two rows below (11 and 18) were written from the evidence on
+> disk rather than from a run, and a re-run at `30bdd41` with a clean tree failed: our stdout claimed `isTTY` and had no
+> `clearLine`. The Nov 13 file corrects those rows, records the fixes for W-27, W-28 and the TTY surface, and re-counts the gate.
+> This file is kept as history.
+
 This file exists because the audit asked for the evidence discrepancies closed **before** any new build, and because a test
 count is not a compatibility result.
 

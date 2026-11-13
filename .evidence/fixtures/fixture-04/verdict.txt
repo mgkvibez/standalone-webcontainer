@@ -1,4 +1,7 @@
 fixture: fixture-04
-evidence schema: 3
+evidence schema: 4
+run: 20261113014735-7dcadd5c-aa4d5b9c
+lane: offline corpus (fixtures/registry)
+commit: 30bdd41d018ec0e24bd94879ebaee7018b311580
 classification: PASS
 reason: all 6 assertion(s) passed

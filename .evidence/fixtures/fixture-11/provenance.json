@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "runId": "20261113014742-0b31018a-8f53f2c3",
+  "fixture": {
+    "id": 11,
+    "slug": "fixture-11",
+    "lane": "front-end-only"
+  },
+  "definition": {
+    "sha256": "0b31018a72ef392e3bf810db0d97695e36efef7214ff6199104c406fb1ba9ada",
+    "formatVersion": 1,
+    "steps": 2,
+    "assertions": 2
+  },
+  "harness": {
+    "name": "standalone-webcontainer fixture runner",
+    "version": "0.0.0"
+  },
+  "runtime": {
+    "name": "node",
+    "version": "v20.20.2"
+  },
+  "commit": "30bdd41d018ec0e24bd94879ebaee7018b311580",
+  "tree": {
+    "dirty": true,
+    "changedFiles": 67
+  },
+  "command": {
+    "argv": [
+      "--id",
+      "11",
+      "--registry=snapshot:fixtures/snapshots/vite",
+      "--replace-unattributed"
+    ],
+    "steps": [
+      "npm install",
+      "npm run build"
+    ]
+  },
+  "registry": {
+    "lane": "snapshot",
+    "label": "fixtures/snapshots/vite",
+    "snapshot": {
+      "directory": "fixtures/snapshots/vite",
+      "capturedAt": "2026-11-11T06:10:11.376Z",
+      "digest": "5ac9db3d359b010aed6c769266763d5b964599bd8382042f0c5b4c7e272b8305",
+      "packages": 8
+    }
+  },
+  "startedAt": "2026-11-13T01:47:42.920Z",
+  "endedAt": "2026-11-13T01:47:44.593Z",
+  "durationMs": 1673,
+  "budgets": {
+    "install": 180000,
+    "build": 240000,
+    "run": 60000
+  },
+  "verdict": {
+    "classification": "PASS",
+    "reason": "all 2 assertion(s) passed"
+  }
+}

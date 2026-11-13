@@ -1,4 +1,7 @@
 fixture: fixture-08
-evidence schema: 3
+evidence schema: 4
+run: 20261113014740-259b86e1-f6353e29
+lane: fixtures/snapshots/express
+commit: 30bdd41d018ec0e24bd94879ebaee7018b311580
 classification: PASS
 reason: all 3 assertion(s) passed

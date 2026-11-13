@@ -32,6 +32,7 @@ import { InProcessClient } from "./in-process-client.js";
 
 export { InProcessClient };
 import { runFixture, type ExecuteStep, type FixtureRunReport } from "../../src/harness/runner.js";
+import type { RunProvenanceInput } from "../../src/harness/provenance.js";
 import { loadCorpusRegistry } from "../../src/registry/corpus.js";
 
 export const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -121,7 +122,13 @@ export const readDefinitions = (): FixtureDefinition[] => {
     .map((name) => JSON.parse(readFileSync(join(dir, name), "utf8")) as FixtureDefinition);
 };
 
-export const runDefinition = async (definition: FixtureDefinition, registry: Registry, evidenceRoot: string): Promise<FixtureRunReport> => {
+export const runDefinition = async (
+  definition: FixtureDefinition,
+  registry: Registry,
+  evidenceRoot: string,
+  provenance?: RunProvenanceInput,
+  replaceForeignEvidence?: boolean,
+): Promise<FixtureRunReport> => {
   const files = new MapFiles(definition.files ?? {});
   const runtime = new InProcessClient();
   const container = new Container({ runtime, files, registry });
@@ -189,6 +196,14 @@ export const runDefinition = async (definition: FixtureDefinition, registry: Reg
     },
   };
 
-  return runFixture({ definition, executeStep, environment, evidenceRoot });
+  return runFixture({
+    definition,
+    executeStep,
+    environment,
+    evidenceRoot,
+    // Passed straight through: a run that cannot say how it was executed does not get to write evidence (W-27).
+    ...(provenance === undefined ? {} : { provenance }),
+    ...(replaceForeignEvidence === undefined ? {} : { replaceForeignEvidence }),
+  });
 };
 

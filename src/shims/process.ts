@@ -21,6 +21,7 @@
 import type { TickQueue } from "../runtime/ticks.js";
 import { VIRTUAL_ENVIRONMENT } from "../runtime/environment.js";
 import { createInertInput, type ProcessStdin, type Terminal, type TerminalInput } from "../terminal/pty.js";
+import { clearLine, clearScreenDown, cursorTo, moveCursor } from "./readline.js";
 export class ProcessExit extends Error {
   readonly code: number;
 
@@ -40,6 +41,17 @@ export interface WritableSink {
    * compares against `false` gets the truth.
    */
   readonly isTTY?: boolean;
+  /**
+   * The cursor methods of a `tty.WriteStream`, present only when a terminal is attached.
+   *
+   * Optional in the type because they are genuinely absent on a pipe, which is Node's own shape: `process.stdout.clearLine` is
+   * `undefined` when stdout is not a TTY. Declaring them optional is what makes the flag and the API impossible to separate by
+   * accident — the sink either reports `isTTY: true` and carries all four, or reports nothing and carries none.
+   */
+  clearLine?(dir: number): boolean;
+  cursorTo?(x: number, y?: number): boolean;
+  moveCursor?(dx: number, dy: number): boolean;
+  clearScreenDown?(): boolean;
   readonly columns?: number;
   readonly rows?: number;
 }
@@ -169,10 +181,17 @@ export interface ProcessOptions {
 }
 
 /**
- * Gives a sink the terminal's live dimensions.
+ * Gives a sink the terminal's live dimensions and the cursor methods that come with claiming to be a terminal.
  *
  * Getters, not copies: a program that resizes and then reads `process.stdout.columns` must see the new number, and a snapshot
  * taken at construction would keep answering 80 forever.
+ *
+ * THE CURSOR METHODS ARE PART OF THE CLAIM. Node's `process.stdout` on a TTY is a `tty.WriteStream`, which carries `clearLine`,
+ * `cursorTo`, `moveCursor` and `clearScreenDown` alongside `isTTY`. This shim used to answer `isTTY: true` and then throw
+ * `process.stdout.clearLine is not a function`, which is worse than answering `isTTY: undefined`: code that checks the flag takes
+ * the TTY branch, and the failure arrives in the middle of a program that had every right to expect the API. `vite build` died
+ * exactly there (`dep-BK3b2jBa.js:65845`), so fixtures 11 and 18 could not pass while the flag lied. These are ANSI writes to the
+ * sink, which is all Node does too, and they come from the same `readline` shim a program would call directly.
  */
 const withTerminal = (sink: WritableSink, terminal: Terminal | null | undefined): WritableSink => {
   if (terminal === null || terminal === undefined) return sink;
@@ -180,6 +199,10 @@ const withTerminal = (sink: WritableSink, terminal: Terminal | null | undefined)
     isTTY: { get: () => true, enumerable: true },
     columns: { get: () => terminal.columns, enumerable: true },
     rows: { get: () => terminal.rows, enumerable: true },
+    clearLine: { value: (dir: number) => clearLine(sink, dir), enumerable: true },
+    cursorTo: { value: (x: number, y?: number) => cursorTo(sink, x, y), enumerable: true },
+    moveCursor: { value: (dx: number, dy: number) => moveCursor(sink, dx, dy), enumerable: true },
+    clearScreenDown: { value: () => clearScreenDown(sink), enumerable: true },
   });
 };
 

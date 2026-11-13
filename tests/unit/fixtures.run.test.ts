@@ -21,6 +21,7 @@ import type { AssertionEnvironment } from "../../src/harness/assertions.js";
 import { InProcessRuntime } from "../../src/runtime/in-process.js";
 import { FileSystem } from "../../src/vfs/index.js";
 import { createFakeRegistry } from "../helpers/registry.js";
+import { testProvenance } from "../helpers/provenance.js";
 
 const definitionsDir = fileURLToPath(new URL("../../fixtures/definitions/", import.meta.url));
 const scratch = mkdtempSync(join(tmpdir(), "swc-run-"));
@@ -64,6 +65,7 @@ describe("the corpus runs", () => {
       executeStep: createStepExecutor({ runtime, registry, root }),
       environment,
       evidenceRoot: join(scratch, "fixture-07"),
+      provenance: testProvenance(),
     });
 
     expect(report.reason).toBe("all 3 assertion(s) passed");
@@ -81,6 +83,7 @@ describe("the corpus runs", () => {
       executeStep: createStepExecutor({ runtime, registry, root }),
       environment,
       evidenceRoot: join(scratch, "fixture-04"),
+      provenance: testProvenance(),
     });
 
     expect(report.classification).toBe("PASS");

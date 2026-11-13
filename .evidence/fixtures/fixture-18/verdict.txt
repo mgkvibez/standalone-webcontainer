@@ -1,4 +1,7 @@
 fixture: fixture-18
-evidence schema: 3
+evidence schema: 4
+run: 20261113014755-07e9b4d5-06080052
+lane: fixtures/snapshots/vite
+commit: 30bdd41d018ec0e24bd94879ebaee7018b311580
 classification: PASS
 reason: all 3 assertion(s) passed
