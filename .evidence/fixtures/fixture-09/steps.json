@@ -5,13 +5,13 @@
     "command": "npm install is-odd@3.0.1",
     "state": "ran",
     "termination": "ok",
-    "detail": "builtin command reported a failure: npm: only npm install/npm ci and --omit=dev are supported; package arguments and other flags are refused",
-    "elapsedMs": 0,
+    "detail": "builtin command completed: added 2 package(s) from registry.npmjs.org",
+    "elapsedMs": 99,
     "record": {
       "index": 0,
-      "exitCode": 1,
-      "stdout": "",
-      "stderr": "npm: only npm install/npm ci and --omit=dev are supported; package arguments and other flags are refused"
+      "exitCode": 0,
+      "stdout": "added 2 package(s) from registry.npmjs.org",
+      "stderr": ""
     }
   },
   {
@@ -20,13 +20,13 @@
     "command": "node check.mjs",
     "state": "ran",
     "termination": "ok",
-    "detail": "builtin command completed: node: cannot find module '/check.mjs'",
-    "elapsedMs": 0,
+    "detail": "process 1 exited with exit 0",
+    "elapsedMs": 17,
     "record": {
       "index": 1,
       "exitCode": 0,
-      "stdout": "",
-      "stderr": "node: cannot find module '/check.mjs'"
+      "stdout": "is-odd(3)=true is-odd(4)=false\nresolved-and-correct: true\n",
+      "stderr": ""
     }
   }
 ]

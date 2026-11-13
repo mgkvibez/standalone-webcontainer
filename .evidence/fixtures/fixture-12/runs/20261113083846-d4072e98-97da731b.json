@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "runId": "20261113083846-d4072e98-97da731b",
+  "fixture": {
+    "id": 12,
+    "slug": "fixture-12",
+    "lane": "front-end-only"
+  },
+  "definition": {
+    "sha256": "d4072e9824ae23d610e56a9a722de56f80fdd91787fb5d1004f2166c6bafb757",
+    "formatVersion": 1,
+    "steps": 2,
+    "assertions": 2
+  },
+  "harness": {
+    "name": "standalone-webcontainer fixture runner",
+    "version": "0.0.0"
+  },
+  "runtime": {
+    "name": "node",
+    "version": "v20.20.2"
+  },
+  "commit": "bac05f6b3c8ee69a956f71b4dffda48138b73a4e",
+  "tree": {
+    "dirty": true,
+    "changedFiles": 24
+  },
+  "command": {
+    "argv": [
+      "--id",
+      "12",
+      "--registry=network",
+      "--replace-unattributed"
+    ],
+    "steps": [
+      "npm install",
+      "npx tsc -p tsconfig.json"
+    ]
+  },
+  "registry": {
+    "lane": "network",
+    "label": "registry.npmjs.org"
+  },
+  "startedAt": "2026-11-13T08:38:46.346Z",
+  "endedAt": "2026-11-13T08:38:49.479Z",
+  "durationMs": 3133,
+  "budgets": {
+    "install": 180000,
+    "build": 240000,
+    "run": 60000
+  },
+  "verdict": {
+    "classification": "PASS",
+    "reason": "all 2 assertion(s) passed"
+  }
+}

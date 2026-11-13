@@ -91,3 +91,52 @@ W-27 and W-28 are closed, so the order the owner authorised is at step 4: reprod
 baseline (this file), and stop for architectural review before choosing the next compatibility build. The open decision that
 remains is not mine to take: the refusal model for `fixture-15` (`UNSUPPORTED_BY_DESIGN` versus an ordinary program failure),
 and whether the next substantial work is the eight empty front-end fixtures or the product's real-registry path.
+
+---
+
+## 6. Second round, 2026-11-13: the registry lane is real, and two more fixtures measure it
+
+Sections 1-5 above were about measuring honestly. This one is about what the measurement then found: the container could not run a
+package manager's own two jobs, compiling and shelling out, and the gate could not see it because those fixtures had no project files.
+`fixture-09`, `fixture-12` and `fixture-14` now do, and they run in the **network** lane against `registry.npmjs.org`.
+
+| Fixture | Lane | Verdict | What it proves |
+|---|---|---|---|
+| 09 npm install → require | network | **PASS 2/2** | a real tarball installs, then a `require` of a package with an `exports` map and its own dependency answers correctly |
+| 12 TypeScript compile | network | **PASS 2/2** | `npx tsc -p tsconfig.json` compiles a project and emits `dist/index.js` |
+| 14 cowsay via npx | network | **PASS 2/2** | an installed package's binary runs through `npx --no-install` |
+| 03 shadcn add | network | **RUNTIME_INCOMPATIBILITY** | `npx --yes shadcn@latest` needs an on-the-fly fetch, refused by name with the command that would work |
+
+Four defects stood between "installs" and "compiles", and each was a lie of the same shape as W-26 and W-29: a surface that said
+something untrue about itself.
+
+- **W-30 — the exit status was read from stderr text.** A command refused by policy writes its reason to the *system* stream, so a
+  stderr-only reader matched nothing and recorded **exit 0**. `fixture-12` passed its `exit-code equals 0` assertion on a command that
+  never ran. `Container.lastExitCode` now exists, installs report honestly, and the harness reads it instead of guessing. 6 tests,
+  mutation-checked; my first version of the step-level test was vacuous because it went through a layer that blocks `npx` separately,
+  so it was retargeted at the executor the CLI actually runs.
+- **W-31 — `process.browser` was `true`.** TypeScript 5.9 asks `isNodeLikeSystem()`, which is `typeof process !== "undefined" &&
+  !!process.nextTick && !process.browser && typeof require !== "undefined"`. Our own shim answered "this is a browser", so `sys` came
+  out `undefined` and `tsc` died with `Cannot read properties of undefined (reading 'tryEnableSourceMapsForHost')`, naming nothing that
+  led here. `browser` is now `false`, with the measurement written in the shim.
+- **W-32 — `fs.writeSync(fd)` was refused.** So a compiler that compiled perfectly could not emit: `TS5033` on every output file. The
+  shim now implements both of Node's overloads as a read-modify-write of the whole file, honouring the descriptor cursor and `a`.
+- **W-33 — `npx` collected flags by pattern instead of by position.** `tsc -p tsconfig.json` lost its `-p`, leaving the compiler a bare
+  path it read as a source file: `error TS6054: File 'tsconfig.json' has an unsupported extension`. Only the flags before the package
+  name belong to `npx` now; everything after it is the program's argv, verbatim.
+
+One observation filed but not chased: a declared range that matches no published version (`^1.0.0` against a fake registry serving only
+`2.0.0`) installs **nothing** and reports success. The npx tests found it; it is not on the path to any fixture.
+
+### The gate number, again
+
+- Front-end fixtures with project files: **9** (01, 04, 07, 08, 09, 11, 12, 13, 18).
+- Of those, PASS in evidence: **9**. **9/15 = 60%.** Reference: 17 is boundary and does not count.
+- The gap to 90% is now **five** fixtures with no project files (02, 10, 19, 20 and the open refusal-model fixture 15), not eight.
+- Still **all 20 `proposed`**, so nothing is scoreable and the gate is unearnable regardless of the percentage.
+
+### Not claimed
+
+- None of this was verified on `main`; the runs describe a dirty tree, and each `provenance.json` says so.
+- `npx` is not a package installer. `--yes <spec>` stays refused until a fetch-into-the-VFS path exists, which is why `fixture-03`
+  is an incompatibility rather than a pass.

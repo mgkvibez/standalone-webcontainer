@@ -38,5 +38,11 @@
   ],
   "knownLimits": [
     "Type errors are a fixture defect, not a runtime finding; the fixture ships compiling sources."
-  ]
+  ],
+  "files": {
+    "package.json": "{\n  \"name\": \"fixture-12-typescript\",\n  \"private\": true,\n  \"version\": \"0.0.0\",\n  \"scripts\": {\n    \"build\": \"tsc -p tsconfig.json\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"^5.4.0\"\n  }\n}\n",
+    "tsconfig.json": "{\n  \"compilerOptions\": {\n    \"target\": \"ES2022\",\n    \"module\": \"ES2022\",\n    \"moduleResolution\": \"bundler\",\n    \"outDir\": \"dist\",\n    \"rootDir\": \"src\",\n    \"strict\": true,\n    \"declaration\": true,\n    \"skipLibCheck\": true\n  },\n  \"include\": [\n    \"src\"\n  ]\n}\n",
+    "src/index.ts": "// The compiler has to resolve a relative import, check types, and emit both products. Written so that a compiler which emits\n// without checking would still satisfy the file assertion, but a compiler that refuses to run at all would not.\nimport { double } from \"./math.js\";\n\nexport interface Answer {\n  readonly value: number;\n  readonly label: string;\n}\n\nexport const answer: Answer = { value: double(21), label: \"the answer\" };\n",
+    "src/math.ts": "export function double(value: number): number {\n  return value * 2;\n}\n"
+  }
 }

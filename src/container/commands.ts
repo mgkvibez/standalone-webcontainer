@@ -23,6 +23,7 @@ export const BUILTIN_COMMANDS = [
   "help",
   "ps",
   "kill",
+  "npx",
 ] as const;
 
 /** Commands that start a runtime process. */
@@ -30,7 +31,6 @@ export const PROCESS_COMMANDS = ["node"] as const;
 
 /** Recognised, deliberately refused, with the reason a user needs. */
 export const REFUSED_COMMANDS: Readonly<Record<string, string>> = {
-  npx: "npx is not available in the terminal yet (P1b).",
   pnpm: "pnpm is not available in the terminal yet (P1b).",
   yarn: "yarn is not available in the terminal yet (P1b).",
   sh: "there is no shell to spawn: this terminal interprets a fixed command set itself.",

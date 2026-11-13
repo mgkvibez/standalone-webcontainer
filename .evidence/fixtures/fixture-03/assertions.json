@@ -2,10 +2,10 @@
   {
     "index": 0,
     "kind": "exit-code",
-    "state": "passed",
-    "passed": true,
+    "state": "failed",
+    "passed": false,
     "stepAvailable": true,
-    "detail": "expected exit code 0, observed 0"
+    "detail": "expected exit code 0, observed 1"
   },
   {
     "index": 1,

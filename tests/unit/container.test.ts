@@ -750,3 +750,67 @@ describe("saving into a live project (W-26)", () => {
     expect(runtime.writes.map((write) => write.contents)).toEqual(["v2", "v3"]);
   });
 });
+
+/**
+ * The status of the last line, exposed because something other than a human reads it.
+ *
+ * The fixture harness inferred a command's exit status from the text on stderr. A refused command writes its reason to the SYSTEM
+ * stream, matched no pattern, and was recorded as exiting 0 — so `npx tsc -p tsconfig.json` PASSED an exit-code assertion in
+ * `fixture-12` while never running. These tests pin the status at the source so no caller has to infer it again.
+ */
+describe("the last exit status", () => {
+  it("is 1 for a command refused by policy, which is the case that was being read as success", async () => {
+    const { container } = containerWith();
+    const session = container.createSession();
+    // `npx` itself is implemented now, so the case is a command this container still refuses BY POLICY, which is the shape that
+    // writes to the system stream. That stream is the whole defect: a stderr-only reader saw nothing and called it success.
+    await container.execute(session.id, "pnpm install");
+    expect(container.lastExitCode).toBe(1);
+    expect(output(container, session.id)).toContain("system:pnpm: pnpm is not available in the terminal yet (P1b).");
+  });
+
+  it("is 1 for a command this terminal does not implement at all", async () => {
+    const { container } = containerWith();
+    const session = container.createSession();
+    await container.execute(session.id, "frobnicate --now");
+    expect(container.lastExitCode).toBe(1);
+  });
+
+  it("is 0 for a command that succeeded, and reads the process's own code when one ran", async () => {
+    const done = containerWith();
+    const first = done.container.createSession();
+    await done.container.execute(first.id, "cd /lib");
+    expect(done.container.lastExitCode).toBe(0);
+    await done.container.execute(first.id, "node index.js");
+    expect(done.container.lastExitCode).toBe(0);
+
+    const refused = containerWith({ runtime: { outcome: { exitCode: 2 } } });
+    const second = refused.container.createSession();
+    await refused.container.execute(second.id, "node index.js");
+    expect(refused.container.lastExitCode).toBe(2);
+  });
+
+  it("is 0 for an install that wrote packages and 1 for one that failed", async () => {
+    const project = new FakeProject({
+      "/package.json": JSON.stringify({ dependencies: { "@corpus/hello": "^1.0.0" } }),
+    });
+    const registry = await createFakeRegistry({
+      packages: { "@corpus/hello": [{ version: "1.0.0", files: { "index.js": 'module.exports = "installed";' } }] },
+    });
+    const container = new Container({ runtime: new FakeRuntime(), files: project, registry, now: () => 1_000 });
+    const session = container.createSession();
+
+    await container.execute(session.id, "npm install");
+    expect(container.lastExitCode).toBe(0);
+    // The double raises a plain error for an unpublished name, and the install reports it rather than throwing.
+    await container.execute(session.id, "npm install left-pad");
+    expect(container.lastExitCode).toBe(1);
+  });
+
+  it("is 1 when an install is asked for with no registry at all", async () => {
+    const { container } = containerWith();
+    const session = container.createSession();
+    await container.execute(session.id, "npm install");
+    expect(container.lastExitCode).toBe(1);
+  });
+});

@@ -5,13 +5,13 @@
     "command": "npm install",
     "state": "ran",
     "termination": "ok",
-    "detail": "builtin command reported a failure: npm error: MISSING_PACKAGE_JSON: no package.json at /package.json",
-    "elapsedMs": 1,
+    "detail": "builtin command completed: added 1 package(s) from registry.npmjs.org",
+    "elapsedMs": 663,
     "record": {
       "index": 0,
-      "exitCode": 1,
-      "stdout": "",
-      "stderr": "npm error: MISSING_PACKAGE_JSON: no package.json at /package.json"
+      "exitCode": 0,
+      "stdout": "added 1 package(s) from registry.npmjs.org",
+      "stderr": ""
     }
   },
   {
@@ -20,8 +20,8 @@
     "command": "npx tsc -p tsconfig.json",
     "state": "ran",
     "termination": "ok",
-    "detail": "builtin command completed",
-    "elapsedMs": 0,
+    "detail": "process 1 exited with exit 0",
+    "elapsedMs": 2470,
     "record": {
       "index": 1,
       "exitCode": 0,

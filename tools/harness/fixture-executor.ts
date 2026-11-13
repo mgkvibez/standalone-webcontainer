@@ -151,7 +151,10 @@ export const runDefinition = async (
       // writes `npm error: …`, so that prefix is the failure signal rather than a guess at success.
       const stdout = session.scrollback.filter((line) => line.stream === "stdout").map((line) => line.text).join("\n");
       const stderr = session.scrollback.filter((line) => line.stream === "stderr").map((line) => line.text).join("\n");
-      const failed = /^(npm error|npm: )/m.test(stderr);
+      // The container's own status, not a guess at its text. A refused command (`npx`, `sh`) writes its reason to the SYSTEM stream and
+      // matches neither prefix here, so the old inference scored a refusal as success: `fixture-12`'s `npx tsc` was recorded as exit 0
+      // with no output and the exit-code assertion passed on a command that never ran.
+      const failed = container.lastExitCode !== 0;
       const said = `${stdout}\n${stderr}`.trim();
       return {
         termination: "ok",
