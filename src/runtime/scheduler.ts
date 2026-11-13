@@ -24,6 +24,14 @@ export const DEFAULT_MAX_CALLBACKS = 10_000;
 export const DEFAULT_MAX_REAL_MS = 5_000;
 /** How often a drain with outstanding handles checks whether anything happened. Real milliseconds. */
 export const DEFAULT_KEEP_ALIVE_POLL_MS = 10;
+/**
+ * How long a live process's queue may stay empty before the resident pump stops waiting on it. Real milliseconds.
+ *
+ * The pump exists for work a running program schedules for itself, and a program that has queued nothing for this long is waiting on an event -
+ * a request, a socket, a watcher - rather than on a timer it set. Stopping then is what keeps an idle server from being polled for its whole life;
+ * the next request or run starts a pump again.
+ */
+export const DEFAULT_RESIDENT_IDLE_MS = 400;
 
 /**
  * The allowance for ONE served request, which is a different thing from one execution.
@@ -248,6 +256,16 @@ export class Scheduler {
     return this.#baselineEpoch;
   }
 
+  /**
+   * How many live handles the program still holds, which is the runtime's answer to "is this process still alive?".
+   *
+   * A caller that outlives a run needs it. The count was private while the only consumer was this file's own loop; a pump that has to decide whether
+   * a program still deserves one is a second consumer, and duplicating the sense of "alive" would let the two disagree.
+   */
+  liveHandles(): number {
+    return this.#keepAlive === undefined ? 0 : this.#keepAlive();
+  }
+
   get budgetMs(): number {
     return this.#budgetMs;
   }
@@ -408,6 +426,82 @@ export class Scheduler {
    * ONE PUMP AT A TIME. Two loops over one queue would interleave callbacks in an order nobody wrote, so a nested call refuses
    * instead of pretending to share. The runtime serialises requests before reaching here.
    */
+  /**
+   * Keep a live process's own work running while nothing is in flight, and stop once it has queued nothing for `idleMs`.
+   *
+   * THE DEFECT THIS EXISTS FOR, MEASURED. `pumpWhile` is bound to a request: it runs while an answer is owed, then stops. Everything a server
+   * schedules for itself between requests therefore had no moment in which to run. Vite's dependency optimizer is the case that exposed it - the
+   * dev server starts pre-bundling from its own queue, so with the server idle nothing was written and the page waited forever on
+   * `504 Outdated Optimize Dep`. Measured on the previous commit: `optimizer wrote picocolors.js: never within 60s` with the server idle, then
+   * `200` in 54 ms the instant a request arrived. A live process in Node has no such gap; its loop turns whether or not anyone is talking to it.
+   *
+   * The same budget question as a request, answered the same way: a window gets the pump's ceilings rather than the execution's, because the
+   * execution's were spent on the program body. A window that ends on its own ceiling is not the process ending - the next window starts - but
+   * several guarded windows in a row is a program spinning on its own queue, and that stops the pump instead of burning the host.
+   */
+  async pumpResident(options: {
+    stillAlive: () => boolean;
+    /**
+     * Whether something is in flight that this pump is responsible for, such as a request whose answer is owed.
+     *
+     * The idle rule must not fire then. A request whose handler is waiting on the outside world leaves the queue empty, so an idle timeout would
+     * end the pump in the middle of serving it, and the caller that declined to start a second pump - correctly, one pump at a time - would wait
+     * for an answer nobody was going to produce. Measured: three request tests hung for their full 15 s timeout with this rule missing.
+     */
+    busy?: () => boolean;
+    idleMs?: number;
+    pollMs?: number;
+  }): Promise<SchedulerStop> {
+    if (this.#pump !== null) return "aborted";
+    const idleMs = options.idleMs ?? DEFAULT_RESIDENT_IDLE_MS;
+    const pollMs = options.pollMs ?? DEFAULT_KEEP_ALIVE_POLL_MS;
+    let idleSince = Date.now();
+    let guardedWindows = 0;
+    let stop: SchedulerStop = "queue-empty";
+
+    for (;;) {
+      if (this.#aborted) return "aborted";
+      if (!options.stillAlive()) return "queue-empty";
+
+      const scope: PumpScope = {
+        virtualStart: this.#virtual,
+        callbacksStart: this.#callbacks,
+        realStart: Date.now(),
+        limits: {
+          maxVirtualMs: DEFAULT_PUMP_VIRTUAL_MS,
+          maxCallbacks: DEFAULT_PUMP_CALLBACKS,
+          maxRealMs: DEFAULT_PUMP_REAL_MS,
+        },
+        settled: () => false,
+      };
+      this.#pump = scope;
+      let pass: SchedulerStop | "settled";
+      try {
+        pass = await this.#drainPass();
+      } finally {
+        this.#pump = null;
+      }
+      await drainContinuations();
+
+      if (pass === "aborted") return "aborted";
+      // A pass cannot report `settled` here: this pump has no request, and the predicate above always says no. Narrowed for the type, not the run.
+      if (pass === "settled") pass = "queue-empty";
+      // A window that stopped on a ceiling did its share; three in a row with an empty queue between them is a spin, not a program.
+      guardedWindows = pass === "queue-empty" ? 0 : guardedWindows + 1;
+      if (guardedWindows >= 3) return pass;
+
+      if (this.#queue.length > 0) {
+        idleSince = Date.now();
+        continue;
+      }
+      if (Date.now() - idleSince >= idleMs && !(options.busy?.() ?? false)) return stop;
+      stop = "queue-empty";
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, pollMs);
+      });
+    }
+  }
+
   async pumpWhile(pending: Promise<unknown>, limits: PumpLimits = {}): Promise<SchedulerStop> {
     if (this.#pump !== null) return "aborted";
 

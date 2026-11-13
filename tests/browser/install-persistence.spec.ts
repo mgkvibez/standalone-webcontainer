@@ -21,7 +21,9 @@ test.setTimeout(420_000);
 
 interface Handles {
   __store: { active: () => { files: Record<string, string> } };
-  __registry: { lane: string; stats?: () => { tarballRequests: number; tarballCacheHits: number; bytesDownloaded: number } };
+  // The whole `RegistryStats`, not a hand-written subset: the subset went stale the moment the installer started reporting metadata requests, and
+  // the assertion below could not see the counter it needed to prove "zero network" with.
+  __registry: { lane: string; stats?: () => import("../../src/registry/network.js").RegistryStats };
 }
 
 const readFile = async (page: Page, path: string): Promise<string | undefined> =>
