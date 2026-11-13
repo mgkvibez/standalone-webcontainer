@@ -7,7 +7,43 @@ with the number written down.
 
 This is that number, and the method behind it, so it can be re-run rather than believed.
 
-- **Command:** `npx playwright test tests/browser/bench-scaling.spec.ts`
+> **Status, 2026-11-13: quarantined from the gate (W-22).** The two specs in `tests/browser/bench-scaling.spec.ts` skip unless
+> `SWC_BENCH=1`. The reason is a **liveness** observation, not a performance one: in a full single-worker lane one process waited
+> 60 s for a syscall its own kernel never answered, while the same spec passes alone in about 13 s. **The numbers below are
+> historical** (recorded 2026-11-09, the same day the serve-loop shape changed in `226ad16`, with idle accounting changed again in
+> `6f6880e` on 2026-11-10). Re-take them before quoting any figure here.
+
+## How to run it, and what a failure means
+
+The quarantine is not a reason to stop measuring. It is a reason to measure deliberately:
+
+```bash
+# The whole benchmark. Opt-in, so nothing else runs it by accident.
+SWC_BENCH=1 npx playwright test tests/browser/bench-scaling.spec.ts --reporter=line
+
+# One spec at a time, which is what localises a liveness failure.
+SWC_BENCH=1 npx playwright test tests/browser/bench-scaling.spec.ts --reporter=line -g "parking versus spinning"
+```
+
+**Run it alone, on a clean tree.** Not directly after `npm run verify` or the full browser lane. The known failure mode is a
+loaded single-worker lane: the benchmark competes with itself for the machine, a caller's `Atomics.wait` outlives its deadline,
+and the run reports `SyscallTimeoutError` rather than a slow number. It passes 2/2 in about 13 s when it has the machine, and it
+has failed on a load spike with nothing else changed. That difference is the instrument, not the product.
+
+**What a pass means.** The tables are usable for the machine they were taken on, and the shape (per-op cost flat as processes
+are added) is the finding. A pass does **not** clear W-22: the hazard needs load to appear, so a green run is evidence that the
+channel worked under that load, not that it always will.
+
+**What a failure means.** Treat `SyscallTimeoutError` (5,000 ms per call, or the 60,000 ms the benchmark sets deliberately) as a
+**liveness finding**: a parked caller whose kernel did not answer. Record which spec, which stage and the sequence number, and
+add it to W-22 in `docs/audit/remaining-work.md`. Do not record it as a performance regression, and do not raise the deadline
+again to make it pass: the deadline is how the defect becomes visible.
+
+Both specs assert nothing about speed on purpose. A red row here says the channel starved; a green row says it did not on this
+machine, today.
+
+- **Command:** `SWC_BENCH=1 npx playwright test tests/browser/bench-scaling.spec.ts --reporter=line` (the specs skip
+  without `SWC_BENCH=1` since the 2026-11-12 quarantine)
 - **Date:** 2026-11-09
 - **Environment:** Chromium (Playwright), this development sandbox, headless, everything on one machine, kernel and all
   processes competing for the same cores. Absolute numbers will differ on other hardware; the **shape** is the finding.

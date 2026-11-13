@@ -21,7 +21,7 @@ re-litigated below; this table exists so that no later reader mistakes it for st
 | P0-3 | Accept ADR-0013's supersession (real timers)? | **Accepted** | Phase 1, with the event loop |
 | P0-4 | Accept ADR-0012's supersession (native ESM)? | **Accepted** | Phase 5 |
 | P0-5 | Amend ADR-0004 D-3 to `process.platform = "linux"`? | **Accepted** | With the process lane |
-| P0-6 | `src/shims/presets.ts`: wire or delete? | **Accepted** | Decided when PR #6 lands |
+| P0-6 | `src/shims/presets.ts`: wire or delete? | **Accepted** | **Inventory delivered 2026-11-13** (`docs/audit/p0-6-shim-inventory.md`); the ruling itself is still pending |
 | P0-7 | Accept ADR-0016's supersession (real install)? | **Accepted** | Phase 7 |
 | P0-8 | Accept ADR-0019 (cross-origin runtime)? | **Accepted** | When the runtime origin exists |
 | P0-9 | Freeze the 20 fixtures? | **Accepted** | Before the next gate reading |
@@ -88,6 +88,12 @@ honesty about what we are not.
 **P0-6. `src/shims/presets.ts`: wire or delete?** Recommendation: do not delete yet — open PR #6 wires it into the shim
 layer. Rule when that PR is resolved: either it lands and the file is live, or it closes and the file and the `unenv`
 dependency are removed together. Leaving it dead is the worst of the three.
+
+> **Inventory, 2026-11-13.** The question is now answerable, because PR #7 is closed. `docs/audit/p0-6-shim-inventory.md` assesses
+> the three orphaned artefacts file by file, with what each one costs and what breaks if it goes: `src/shims/presets.ts`,
+> `src/runtime/envelope.ts` and the `unenv` dependency. Its recommendation is **removal of all three, as one change**, on measured
+> evidence rather than preference (zero production callers, zero bytes in `dist/`, 18 tests that assert nothing about the product,
+> and five installed packages plus a duplicate `pathe`). Nothing has been deleted or migrated: the ruling is yours.
 
 > **Provenance note (2026-11-08).** `src/shims/presets.ts` does **not** exist on this branch's engine base
 > (`feat/p1d-worker-supervisor` at `5c15fe2`) or on `docs/audit-response-2` (`af8bf97`); `src/shims/` there holds
