@@ -21,6 +21,9 @@ interface Pending {
   readonly stderr: { text: string };
 }
 
+/** How many ended-but-live process output routes to keep. A session starts a handful; the cap only bounds a forgotten one. */
+const MAX_LIVE_OUTPUT_ROUTES = 16;
+
 const createWorker = (): Worker =>
   new Worker(new URL("./runtime.worker.ts", import.meta.url), { type: "module", name: "runtime-host" });
 
@@ -28,6 +31,15 @@ export class WorkerRuntimeClient implements RuntimeClient {
   #worker: Worker | null = null;
   #nextId = 1;
   readonly #pending = new Map<number, Pending>();
+  /**
+   * Output from a process that OUTLIVED the run that started it.
+   *
+   * A dev server's run resolves as soon as its body settles (the process is held open by its listening port), and everything it prints after
+   * that - vite's ready banner, its `hmr update` line, an error from a request handler - arrives with the same id after the run was forgotten.
+   * Dropping it as "late output from a killed run" made a live process silent in the terminal while it answered requests perfectly, which is
+   * indistinguishable from a watcher that never saw the save. Bounded so a long session cannot accumulate routes for stopped servers.
+   */
+  readonly #live = new Map<number, Pending["onOutput"]>();
   /** Listeners for live port reports: a set, because a container may be rebuilt and a removed listener must stop receiving. */
   readonly #portListeners = new Set<(processId: number, ports: readonly number[]) => void>();
   #lastError: string | null = null;
@@ -116,6 +128,8 @@ export class WorkerRuntimeClient implements RuntimeClient {
   reset(): void {
     const worker = this.#worker;
     this.#worker = null;
+    // Nothing survives a Worker kill, so no route may outlive it.
+    this.#live.clear();
     if (worker !== null) {
       worker.terminate();
     }
@@ -164,7 +178,15 @@ export class WorkerRuntimeClient implements RuntimeClient {
       return;
     }
     const pending = this.#pending.get(message.id);
-    if (pending === undefined) return; // Late output from a killed run: dropped, never rendered.
+    if (pending === undefined) {
+      // Not an in-flight run: it may still be a LIVE process, which prints for as long as it runs.
+      const live = this.#live.get(message.id);
+      if (live !== undefined && message.type === "chunk") {
+        live(message.stream, message.text);
+        return;
+      }
+      return; // Late output from a killed run: dropped, never rendered.
+    }
 
     switch (message.type) {
       case "chunk":
@@ -174,6 +196,13 @@ export class WorkerRuntimeClient implements RuntimeClient {
         return;
       case "result":
         this.#pending.delete(message.id);
+        // The run is over; the process may not be. Keep the route so its later output still reaches the terminal, evicting the oldest route
+        // once a session has started more servers than anyone will watch.
+        this.#live.set(message.id, pending.onOutput);
+        if (this.#live.size > MAX_LIVE_OUTPUT_ROUTES) {
+          const oldest = this.#live.keys().next();
+          if (oldest.done !== true) this.#live.delete(oldest.value);
+        }
         pending.resolve({
           stdout: message.stdout,
           stderr: message.stderr,

@@ -116,8 +116,10 @@ async function handleRun(request: RunRequest): Promise<void> {
   const startedAt = Date.now();
   capture.set(request.id, { stdout: "", stderr: "" });
   let pid = 0;
+  // Hoisted for the `finally`: whether the process outlived this run is a question about the kernel, answered where the run is retired.
+  let target: ProcessKernel | null = null;
   try {
-    const target = activeKernel(request.projectId, request.files);
+    target = activeKernel(request.projectId, request.files);
     pid = target.start({
       argv: [...request.argv],
       cwd: request.cwd,
@@ -157,9 +159,13 @@ async function handleRun(request: RunRequest): Promise<void> {
   } finally {
     capture.delete(request.id);
     processByRun.delete(request.processId);
-    // Only this run's entry: a process held open by a server outlives the run, and its late output must not be attributed to whichever run
-    // happens to be next.
-    if (pid !== 0 && runByPid.get(pid) === request.id) runByPid.delete(pid);
+    // A process HELD OPEN by a listening port outlives its run, so the output route has to outlive it too: a dev server prints its ready banner,
+    // its `hmr update` lines and its request errors after the body settled, and dropping the route here made all of that vanish while the server
+    // answered requests perfectly. Measured as zero chunk messages reaching the page for a running vite. The run id is unique per run, so keeping
+    // it cannot attribute a live process's output to a later command.
+    const heldOpen = pid !== 0 && (target?.ports().some((binding) => binding.pid === pid) ?? false);
+    // Only this run's entry: a late route must not be reused by whichever run happens to be next.
+    if (!heldOpen && pid !== 0 && runByPid.get(pid) === request.id) runByPid.delete(pid);
   }
 }
 

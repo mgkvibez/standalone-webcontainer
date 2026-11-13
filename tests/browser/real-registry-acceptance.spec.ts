@@ -251,7 +251,10 @@ test("runs the installed Vite, serves the app through the preview, hot-updates i
   });
   await preview.click();
   await page.waitForTimeout(25_000);
-  const app = page.frameLocator("#preview-frame");
+  // TWO levels, as every other preview spec already did: `#preview-frame` holds the preview SHELL (its own origin's bootstrap document), and the
+  // shell creates the frame the app actually renders in. A one-level locator finds the shell, which has no app in it, so this asserted on a frame
+  // that could never contain the heading - a test defect that looked exactly like a product one.
+  const app = page.frameLocator("#preview-frame").frameLocator("iframe[title='Project preview on port 3000']");
   console.log("CONSOLE>>>", consoleLines.join("\n"));
   for (const frame of page.frames()) {
     if (!frame.url().includes("/preview/3000/")) continue;
@@ -298,5 +301,8 @@ test("runs the installed Vite, serves the app through the preview, hot-updates i
   await runLine(page, "npm run dev -- --port 3001 --host 127.0.0.1");
   await expect(page.locator(previewButton(3001))).toBeVisible({ timeout: 120_000 });
   await page.locator(previewButton(3001)).click();
-  await expect(page.frameLocator("#preview-frame").locator("#root h1#greeting")).toHaveText("hello-v2", { timeout: 180_000 });
+  await expect(page.frameLocator("#preview-frame").frameLocator("iframe[title='Project preview on port 3001']").locator("#root h1#greeting")).toHaveText(
+    "hello-v2",
+    { timeout: 180_000 },
+  );
 });

@@ -28,6 +28,48 @@ setTimeout(() => {
 }, 1200);
 `;
 
+/**
+ * The shape vite's file watcher has: a server, plus repeating work of its own that no request ever asks for.
+ *
+ * A single deferred timer only proves the pump turns once; this proves it keeps turning, which is the difference between a pre-bundler that
+ * finishes and a watcher that keeps seeing saves.
+ */
+const tickingProgram = `const http = require("node:http");
+const fs = require("node:fs");
+let count = 0;
+http.createServer((_request, response) => response.end("ok")).listen(3411, "127.0.0.1", () => console.log("listening"));
+setInterval(() => {
+  count += 1;
+  fs.writeFileSync("/app/ticks.txt", String(count));
+}, 100);
+console.log("armed");
+`;
+
+const runPeriodic = async (periodMs: number): Promise<InProcessRuntime> => {
+  const vfs = new FileSystem();
+  vfs.writeFileSync("/app/s.mjs", `const http = require("node:http");
+const fs = require("node:fs");
+let count = 0;
+http.createServer((_request, response) => response.end("ok")).listen(3412, "127.0.0.1", () => console.log("listening"));
+setInterval(() => {
+  count += 1;
+  fs.writeFileSync("/app/periodic.txt", String(count));
+}, ${String(periodMs)});
+console.log("armed");
+`);
+  const runtime = new InProcessRuntime(vfs);
+  await runtime.run("/app/s.mjs", { cwd: "/app" });
+  return runtime;
+};
+
+const runTicking = async (): Promise<InProcessRuntime> => {
+  const vfs = new FileSystem();
+  vfs.writeFileSync("/app/s.mjs", tickingProgram);
+  const runtime = new InProcessRuntime(vfs);
+  await runtime.run("/app/s.mjs", { cwd: "/app" });
+  return runtime;
+};
+
 const runProgram = async (withServer: boolean): Promise<InProcessRuntime> => {
   const vfs = new FileSystem();
   vfs.writeFileSync("/app/s.mjs", program(withServer));
@@ -52,6 +94,36 @@ describe("a live process keeps its own queue", () => {
     await expect(waitForFile(runtime, 3_000)).resolves.toBe("late");
   });
 
+  it("keeps a repeating timer running, not just one deferred one", async () => {
+    const runtime = await runTicking();
+    const deadline = Date.now() + 3_000;
+    let seen = 0;
+    while (Date.now() < deadline) {
+      seen = Number(runtime.readFileText("/app/ticks.txt") ?? "0");
+      if (seen >= 3) break;
+      await sleep(25);
+    }
+    expect(seen).toBeGreaterThanOrEqual(3);
+  });
+
+  /**
+   * A live program's interval must survive its own budget.
+   *
+   * The fire cap is `ceil(execution budget / delay)`, so a one-second interval under the one-second body budget is capped at ONE fire. That is
+   * exactly real vite's watcher interval, and it is why the browser product printed one tick and then went silent while the pump kept turning.
+   */
+  it("keeps a one-second interval firing past the execution budget", async () => {
+    const runtime = await runPeriodic(1_000);
+    const deadline = Date.now() + 8_000;
+    let seen = 0;
+    while (Date.now() < deadline) {
+      seen = Number(runtime.readFileText("/app/periodic.txt") ?? "0");
+      if (seen >= 3) break;
+      await sleep(25);
+    }
+    expect(seen).toBeGreaterThanOrEqual(3);
+  });
+
   it("does not run it for a program that holds nothing", async () => {
     // The control. Same program, no port: nothing is alive, so no pump is started and the deferred timer stays deferred, exactly as before.
     const runtime = await runProgram(false);
@@ -71,6 +143,32 @@ describe("Scheduler.pumpResident", () => {
     expect(stop).toBe("queue-empty");
     // It stopped by itself instead of waiting out a budget: the idle rule is the whole reason an idle server is not polled for its life.
     expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  /**
+   * A live timer is the program's own wake-up, so the pump must not fall idle while it owns one.
+   *
+   * This is the exact shape of the browser product's hot-reload failure: real vite schedules its watcher polls on its own timers, so an idle rule
+   * that ignored handles stopped the pump 400 ms after boot and every later tick stayed pending forever - a `setInterval` printed one tick and
+   * then silence, with no error anywhere.
+   */
+  it("keeps pumping for a program that owns a live interval", async () => {
+    const scheduler = new Scheduler();
+    const ticks: number[] = [];
+    const interval = scheduler.setInterval(() => ticks.push(Date.now()), 30);
+
+    const pump = scheduler.pumpResident({
+      stillAlive: () => true,
+      idleMs: 20,
+      pollMs: 5,
+      liveHandles: () => scheduler.liveHandles(),
+    });
+    await sleep(300);
+    const whileRunning = ticks.length;
+    scheduler.clear(interval);
+    await expect(pump).resolves.toBe("queue-empty");
+    // Well past one tick: the point is that the pump was still turning long after the idle window would have closed it.
+    expect(whileRunning).toBeGreaterThan(3);
   });
 
   it("stops when the caller says the program is gone", async () => {

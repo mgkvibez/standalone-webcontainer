@@ -37,6 +37,17 @@ export interface RemoteFileSystemOptions {
  */
 const READ_RANGE_BYTES = 64 * 1024;
 
+/**
+ * The largest piece of a write that one request frame can carry.
+ *
+ * A quarter of the 512 KiB request region, not at its edge: the frame carries a JSON header plus the bytes themselves, and the frame size is a
+ * deployment detail, so a chunk sized to today's region would overflow the moment one were configured smaller. Chosen against a quarter rather than a
+ * half because the first attempt at half failed by 141 bytes - the header and path - which is exactly the margin a "fits" that was never measured
+ * leaves. `tests/unit/fs-bridge.test.ts` measures every chunk with the channel's own encoder against a 256 KiB budget, deliberately smaller than the
+ * 512 KiB production region so a smaller frame fails in the test and not in a browser.
+ */
+const WRITE_CHUNK_BYTES = 128 * 1024;
+
 /** Whether a failed call failed because the answer did not fit one frame. */
 function isTooLargeResponse(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
@@ -127,18 +138,36 @@ export function createRemoteFileSystem(
         return readInRanges(send, path, encoding);
       }
     },
+    /**
+     * Write a file, in pieces when it does not fit one request frame.
+     *
+     * A request region is fixed, and a frame larger than it has no legal encoding: it throws `SyscallCapacityError` rather than truncating. Anything
+     * bigger therefore had no way to be written at all - which is how the browser product lost vite's dependency
+     * optimizer: it writes a 1.7 MB pre-bundled `react-dom_client.js`, the write threw, the optimizer aborted with `error while updating
+     * dependencies`, and every page load then asked for a dependency file that had never been created and got `504 Outdated Optimize Dep`.
+     *
+     * The first piece replaces the file and the rest append, so a half-written file is never visible as a whole one, and the small path stays a single
+     * call with the caller's own encoding. A string too large for one frame is encoded to UTF-8 bytes and travels as binary: the bytes are what the
+     * file would have held either way, and a chunk boundary inside a multi-byte character is then not a thing that can happen.
+     */
     writeFileSync(path: string, data: string | Uint8Array, writeOptions?: WriteOptionsPort): void {
-      const request: FsRequest =
-        typeof data === "string"
-          ? { op: "write", path, data, dataEncoding: "utf8", ...(writeOptions?.evictable === undefined ? {} : { evictable: writeOptions.evictable }) }
-          : {
-              op: "write",
-              path,
-              data,
-              dataEncoding: "binary",
-              ...(writeOptions?.evictable === undefined ? {} : { evictable: writeOptions.evictable }),
-            };
-      expectEmpty(send(request), "write");
+      const evictable = writeOptions?.evictable === undefined ? {} : { evictable: writeOptions.evictable };
+      const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+      if (bytes.byteLength <= WRITE_CHUNK_BYTES) {
+        const request: FsRequest =
+          typeof data === "string"
+            ? { op: "write", path, data, dataEncoding: "utf8", ...evictable }
+            : { op: "write", path, data, dataEncoding: "binary", ...evictable };
+        expectEmpty(send(request), "write");
+        return;
+      }
+      for (let at = 0; at < bytes.byteLength; at += WRITE_CHUNK_BYTES) {
+        const piece = bytes.slice(at, Math.min(at + WRITE_CHUNK_BYTES, bytes.byteLength));
+        expectEmpty(
+          send({ op: "write", path, data: piece, dataEncoding: "binary", ...(at === 0 ? {} : { append: true }), ...evictable }),
+          "write",
+        );
+      }
     },
     mkdirSync(path: string, mkdirOptions?: MkdirOptionsPort): void {
       expectEmpty(

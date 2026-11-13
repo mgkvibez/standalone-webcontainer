@@ -324,6 +324,7 @@ export class InProcessRuntime implements Runtime {
           // The pump serves this program, requests included, so a pending request is not a reason to stop: it is the reason to keep going.
           stillAlive: () => this.#running === 0 && (this.#registry.list().length > 0 || scheduler.liveHandles() > 0),
           busy: () => this.#pendingRequests.size > 0,
+          liveHandles: () => scheduler.liveHandles(),
         });
       } catch {
         // The pump is not the caller's answer and has no caller: a fault here must not become a runtime state nobody can leave. The next window,

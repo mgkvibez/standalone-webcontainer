@@ -25,7 +25,7 @@ const DEFAULT_OBJECT_HIGH_WATER_MARK = 16;
 export interface StreamOptions {
   readonly highWaterMark?: number;
   readonly objectMode?: boolean;
-  readonly read?: () => void;
+  readonly read?: (size: number) => void;
   readonly write?: (chunk: unknown, encoding: string, callback: (error?: Error) => void) => void;
   readonly transform?: (chunk: unknown, encoding: string, callback: (error?: Error | null, output?: unknown) => void) => void;
   readonly flush?: (callback: (error?: Error | null) => void) => void;
@@ -88,11 +88,29 @@ export class Readable extends EventEmitter {
     super();
     this.#objectMode = options.objectMode ?? false;
     this.#highWaterMark = options.highWaterMark ?? (this.#objectMode ? DEFAULT_OBJECT_HIGH_WATER_MARK : DEFAULT_HIGH_WATER_MARK);
-    if (options.read !== undefined) this._read = options.read;
+    // Per-instance only when given, so a subclass's method is never shadowed by the base.
+    if (options.read !== undefined) Object.defineProperty(this, "_read", { value: options.read, writable: true, configurable: true });
   }
 
-  /** Overridable demand signal. The default does nothing: this shim is push-driven, as most fixture sources are. */
-  _read: (() => void) | undefined;
+  /**
+   * Overridable demand signal, called with the room the source may fill.
+   *
+   * The argument is not decoration. Node hands `_read` the high water mark, and real packages loop on it: readdirp - the scanner
+   * chokidar's directory watcher is built on, and so the thing vite watches a project with - opens with `while (batch > 0)` in
+   * `_read(batch)`. Called with no argument that loop body never runs, so the stream emits nothing, never ends and never errors.
+   */
+  /**
+   * Overridable demand signal, called with the room the source may fill.
+   *
+   * The argument is not decoration. Node hands `_read` the high water mark, and real packages loop on it: readdirp - the scanner chokidar's
+   * directory watcher is built on, and so the thing vite watches a project with - opens with `while (batch > 0)` in `_read(batch)`. Called with
+   * no argument that loop body never runs, so the stream emits nothing, never ends and never errors.
+   *
+   * It is a PROTOTYPE method, not a class field. As a field it became an own `_read = undefined` on every instance, shadowing the method a
+   * subclass defines - `this._read?.(size)` called nothing, and a real package's stream was silently dead. Node's base does nothing either;
+   * a source that never overrides this produces no data.
+   */
+  _read(_size: number): void {}
 
   get readableEnded(): boolean {
     return this.#ended && this.#buffer.length === 0;
@@ -266,14 +284,18 @@ export class Readable extends EventEmitter {
         this.#pump();
         return;
       }
-      // Demand signal: a source that produces on request gets told the buffer is dry, exactly as Node does.
+      this.#maybeEnd();
+      // A source that has already signalled EOF is asked for nothing more. Node never calls `_read` again after `push(null)`, and a source
+      // that produces on every call - readdirp's batch loop, any `while (n > 0) push()` - would otherwise be asked forever: the pump takes
+      // each chunk and immediately asks for another, so the buffer never stays empty and `end` never fires.
+      if (this.#ended) return;
+      // Demand signal: the buffer is dry, and the source is told how much room it may fill, exactly as Node tells it.
       try {
-        this._read?.();
+        this._read?.(this.#highWaterMark);
       } catch (error) {
         this.failRead(error);
         return;
       }
-      this.#maybeEnd();
     });
   }
 
@@ -295,17 +317,20 @@ export class Writable extends EventEmitter {
   #destroyed = false;
   readonly #highWaterMark: number;
   readonly #objectMode: boolean;
-  _write: (chunk: unknown, encoding: string, callback: (error?: Error) => void) => void;
+  /**
+   * A PROTOTYPE method, for the same reason as `Readable._read`: as a field it would be an own property assigned in this constructor, and a
+   * subclass writing `_write(chunk, encoding, callback) {}` - how every real Writable is written - would never be called. Only an explicit
+   * `options.write` replaces this per instance.
+   */
+  _write(_chunk: unknown, _encoding: string, callback: (error?: Error) => void): void {
+    callback();
+  }
 
   constructor(options: StreamOptions = {}) {
     super();
     this.#objectMode = options.objectMode ?? false;
     this.#highWaterMark = options.highWaterMark ?? (this.#objectMode ? DEFAULT_OBJECT_HIGH_WATER_MARK : DEFAULT_HIGH_WATER_MARK);
-    this._write =
-      options.write ??
-      ((_chunk, _encoding, callback) => {
-        callback();
-      });
+    if (options.write !== undefined) this._write = options.write;
   }
 
   get writableFinished(): boolean {

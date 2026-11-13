@@ -31,7 +31,39 @@ const PACKAGE_JSON = `${JSON.stringify({ name: "probe-app", private: true, versi
 const INDEX_HTML = '<!doctype html>\n<html><head><meta charset="utf-8" /><title>probe</title></head>\n<body><div id="root"></div><script type="module" src="/src/main.js"></script></body></html>\n';
 const MAIN_JS = 'import { createElement } from "react";\nimport { createRoot } from "react-dom/client";\ncreateRoot(document.getElementById("root")).render(createElement("h1", null, "probe"));\n';
 
-const PROBE_JS = "const t0 = Date.now();\nconst fs = require(\"fs\");\nconst log = (...a) => console.log(\"[\" + (Date.now() - t0) + \"ms]\", ...a);\nprocess.on?.(\"unhandledRejection\", (e) => log(\"UNHANDLED REJECTION\", String(e && (e.stack || e.message)).slice(0, 800)));\nimport(\"/node_modules/vite/dist/node/index.js\")\n  .then(async (vite) => {\n    const server = await vite.createServer({ root: \"/\", configFile: false, logLevel: \"info\", server: { port: 3100, host: \"127.0.0.1\" } });\n    log(\"created\");\n    await server.listen();\n    log(\"listening on\", JSON.stringify(server.resolvedUrls));\n    const result = await server.transformRequest(\"/src/main.js\");\n    log(\"transformRequest code head:\", String(result && result.code).slice(0, 400));\n    const opt = server.depsOptimizer;\n    if (!opt) { log(\"NO server.depsOptimizer\"); } else {\n      log(\"optimizer own keys:\", JSON.stringify(Object.keys(opt)));\n      log(\"optimizer state:\", String(opt.state), \"discovered:\", JSON.stringify(opt.discovered));\n      log(\"optimizer metadata:\", JSON.stringify(opt.metadata));\n    }\n    log(\"server._optimizeDepsMetadata:\", JSON.stringify(server._optimizeDepsMetadata));\n    try { log(\"deps dir:\", JSON.stringify(fs.readdirSync(\"/node_modules/.vite/deps\"))); } catch (e) { log(\"deps dir failed\", e.code); }\n    await server.close();\n    log(\"closed\");\n  })\n  .catch((e) => log(\"FAILED:\", String(e && (e.stack || e.message)).slice(0, 2500)));\n";
+/**
+ * The question this run answers: in the BROWSER product, does the optimizer's write ever land?
+ *
+ * The offline lanes (InProcessRuntime, and the real registry in-process) both complete and serve the pre-bundled files, so the remaining `504 Outdated
+ * Optimize Dep` has to come from something only the browser lane has. That lane's difference is a REMOTE filesystem: every write is a message to the
+ * kernel and every completion arrives as an event. So the probe starts the same server, asks for the same transform, and then watches the directory for
+ * twenty seconds from inside the same program, printing what it sees. A directory that never appears is a write that never completed; a directory that
+ * appears late is a write that started but was never pumped to completion.
+ */
+const PROBE_JS = `const t0 = Date.now();
+const fs = require("fs");
+const log = (...a) => console.log("[" + (Date.now() - t0) + "ms]", ...a);
+process.on?.("unhandledRejection", (e) => log("UNHANDLED REJECTION", String(e && (e.stack || e.message)).slice(0, 600)));
+import("/node_modules/vite/dist/node/index.js")
+  .then(async (vite) => {
+    const server = await vite.createServer({ root: "/", configFile: false, logLevel: "info", server: { port: 3100, host: "127.0.0.1" } });
+    await server.listen();
+    log("listening");
+    const result = await server.transformRequest("/src/main.js");
+    log("specifiers:", (String(result && result.code).match(/deps\\/[A-Za-z0-9_-]+\\.js\\?v=[0-9a-f]+/g) || []).join(" "));
+    log("optimizer-ish keys on server:", Object.keys(server).filter((k) => /optim/i.test(k)).join(",") || "none");
+    for (let tick = 1; tick <= 20; tick++) {
+      let listing = "ENOENT";
+      try { listing = fs.readdirSync("/node_modules/.vite/deps").join(","); } catch (e) { listing = "ENOENT"; }
+      let meta = "-";
+      try { meta = JSON.stringify(JSON.parse(String(fs.readFileSync("/node_modules/.vite/deps/_metadata.json"))).browserHash); } catch (e) { meta = "none"; }
+      log("tick " + tick + "s deps=" + (listing === "ENOENT" ? "ENOENT" : listing.slice(0, 120)) + " browserHash=" + meta);
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    log("done watching");
+  })
+  .catch((e) => log("FAILED:", String(e && (e.stack || e.message)).slice(0, 2000)));
+`;
 
 test("probe: which vite optimizer stage never returns", async ({ page }) => {
   await page.goto("/?registry=network");

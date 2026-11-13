@@ -56,6 +56,53 @@ describe("Readable lifecycle", () => {
     expect(seen).toEqual(["x", "y"]);
   });
 
+  /**
+   * The demand signal. Node calls a source's `_read(size)` with the room it may fill, and a whole family of real packages loop on that
+   * number: readdirp opens with `while (batch > 0)` in `_read(batch)`. Called with no argument the loop body never runs, so the stream
+   * emits nothing, never ends and never errors - a silent hang with no stack anywhere.
+   *
+   * This is not hypothetical. readdirp is the scanner chokidar's directory watcher is built on, chokidar is what vite watches a project
+   * with, so an unsized `_read` is why real vite never noticed a file save in the browser product: no `hmr update`, no error, no events.
+   * Both halves are pinned: the size arrives, and a size-driven source therefore completes.
+   */
+  it("calls _read with the buffer size, as Node does", async () => {
+    const sizes: number[] = [];
+    class Sized extends Readable {
+      constructor() {
+        super({ objectMode: true });
+      }
+      // eslint-disable-next-line @typescript-eslint/naming-convention -- Node's own overridable hook name.
+      override _read = (size: number): void => {
+        sizes.push(size);
+        this.push("only");
+        this.push(null);
+      };
+    }
+    expect(await collect(new Sized())).toEqual(["only"]);
+    expect(sizes).toEqual([16]);
+  });
+
+  it("completes a source that produces until the size it was given runs out", async () => {
+    // readdirp's exact shape: a batch of entries per read, then null when the work is done.
+    const entries = ["a", "b", "c", "d", "e"];
+    class Batch extends Readable {
+      #remaining = [...entries];
+      constructor() {
+        super({ objectMode: true });
+      }
+      // eslint-disable-next-line @typescript-eslint/naming-convention -- Node's own overridable hook name.
+      override _read = (size: number): void => {
+        let budget = size;
+        while (budget > 0 && this.#remaining.length > 0) {
+          this.push(this.#remaining.shift());
+          budget -= 1;
+        }
+        if (this.#remaining.length === 0) this.push(null);
+      };
+    }
+    expect(await collect(new Batch())).toEqual(entries);
+  });
+
   it("reports readableEnded only after the last chunk has been read", async () => {
     const stream = Readable.from(["only"]);
     expect(stream.readableEnded).toBe(false);
@@ -330,5 +377,47 @@ describe("Duplex", () => {
     pair.write("ab");
     pair.push(null);
     expect(await collected).toEqual(["AB"]);
+  });
+});
+
+/**
+ * A subclass that writes the Node-documented way must be heard.
+ *
+ * Both hooks were class FIELDS, so every instance carried an own `_read = undefined` / `_write = default` that shadowed the method a subclass
+ * defines on its prototype. `this._read?.(size)` then called nothing and the stream sat silent: no data, no end, no error, which is exactly what
+ * readdirp did - and so what chokidar did, and so what vite's file watcher did. The suite never caught it because a `read` option and a `write`
+ * option are the same shape as a method from the outside.
+ */
+describe("subclass hooks", () => {
+  it("drives a Readable whose _read is a method on the subclass", async () => {
+    class Counting extends Readable {
+      #sent = 0;
+      override _read(size: number): void {
+        // The batch loop real scanners use: keep pushing while the caller offers room.
+        while (this.#sent < size && this.#sent < 3) this.push(`chunk-${this.#sent++}`);
+        if (this.#sent >= 3) this.push(null);
+      }
+    }
+    const received: unknown[] = [];
+    await new Promise<void>((resolve) => {
+      const stream = new Counting();
+      stream.on("data", (chunk: unknown) => received.push(chunk));
+      stream.on("end", () => resolve());
+    });
+    expect(received).toEqual(["chunk-0", "chunk-1", "chunk-2"]);
+  });
+
+  it("writes through a Writable whose _write is a method on the subclass", async () => {
+    class Collecting extends Writable {
+      readonly written: unknown[] = [];
+      override _write(chunk: unknown, _encoding: string, callback: (error?: Error) => void): void {
+        this.written.push(chunk);
+        callback();
+      }
+    }
+    const sink = new Collecting();
+    sink.write("first");
+    await sink.end();
+    expect(sink.written).toEqual(["first"]);
   });
 });
