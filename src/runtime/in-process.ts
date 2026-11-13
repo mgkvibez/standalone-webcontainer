@@ -8,7 +8,9 @@
  * the runtime in a dedicated worker precisely so `terminate()` exists. The
  * `timeoutMs` option below bounds async gaps only, and says so in its result.
  */
-import { Buffer } from "buffer";
+// Through the shim, not the package: the shim is where `base64url` is added, and importing the class from here applies that patch before any
+// program runs. A direct import would hand programs the bare polyfill, which is the class that refused vite.
+import { Buffer } from "../shims/buffer.js";
 
 import { eventsModule } from "../shims/events.js";
 import {

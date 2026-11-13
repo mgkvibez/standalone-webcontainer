@@ -41,6 +41,37 @@ const bridge = (): { fs: FileSystem; remote: ReturnType<typeof createRemoteFileS
   return { fs, remote: createRemoteFileSystem(transportOver(fs)) };
 };
 
+/**
+ * A transport whose response region is smaller than the file, which is what the real channel is.
+ *
+ * The channel refuses an answer that does not fit its fixed region with `ERESPTOOLARGE`; this double does the same for any single `read` of a
+ * whole file over the limit, so the ranged-read fallback is exercised against the failure that produced it (a 2.1 MB vite chunk).
+ */
+const crampedTransport = (fs: FileSystem, limitBytes: number): SyscallTransport => {
+  const handler = createFsSyscallHandler(fs);
+  return {
+    call(request: unknown): FsResponse {
+      const read = request as { op?: unknown; offset?: unknown };
+      if (read.op === "read" && read.offset === undefined) {
+        const target = (request as { path?: string }).path ?? "";
+        const size = (fs.readFileSync(target) as Uint8Array).byteLength;
+        if (size > limitBytes) {
+          throw Object.assign(new Error(`response payload is ${String(size)} bytes`), {
+            code: "ERESPTOOLARGE",
+            name: "SyscallRejectedError",
+          });
+        }
+      }
+      try {
+        return handler(request);
+      } catch (error) {
+        const rejection = error as FileSystemSyscallError;
+        throw Object.assign(new Error(rejection.message), { code: rejection.code, name: "SyscallRejectedError" });
+      }
+    },
+  };
+};
+
 describe("filesystem bridge", () => {
   it("reads text back through the wire", () => {
     const { fs, remote } = bridge();
@@ -54,6 +85,32 @@ describe("filesystem bridge", () => {
     remote.writeFileSync("/blob.bin", original);
     expect([...fs.readFileSync("/blob.bin")]).toEqual([...original]);
     expect([...remote.readFileSync("/blob.bin")]).toEqual([...original]);
+  });
+
+  it("reads a file too large for one response frame by falling back to ranged reads", () => {
+    const fs = new FileSystem();
+    // Larger than the double's frame, and not a multiple of the 64 KiB slice, so the last slice is short and the boundary is exercised.
+    const original = Uint8Array.from({ length: 300_000 }, (_unused, index) => index % 251);
+    fs.writeFileSync("/big.bin", original);
+    const remote = createRemoteFileSystem(crampedTransport(fs, 100_000));
+
+    const read = remote.readFileSync("/big.bin") as Uint8Array;
+    expect(read.byteLength).toBe(original.byteLength);
+    expect([...read.subarray(0, 4)]).toEqual([...original.subarray(0, 4)]);
+    expect([...read.subarray(-4)]).toEqual([...original.subarray(-4)]);
+    expect(read.every((byte, index) => byte === original[index])).toBe(true);
+  });
+
+  it("joins ranged slices before decoding, so a multi-byte character across a boundary survives", () => {
+    const fs = new FileSystem();
+    // 4-byte emoji repeated: a 64 KiB slice boundary lands inside one, which per-slice decoding would turn into replacement characters.
+    const text = "\u{1F600}".repeat(50_000);
+    fs.writeFileSync("/emoji.txt", text);
+    const remote = createRemoteFileSystem(crampedTransport(fs, 100_000));
+
+    const read = remote.readFileSync("/emoji.txt", "utf8") as string;
+    expect(read).toBe(text);
+    expect(read.includes("\uFFFD")).toBe(false);
   });
 
   it("survives a payload larger than one base64 chunk", () => {

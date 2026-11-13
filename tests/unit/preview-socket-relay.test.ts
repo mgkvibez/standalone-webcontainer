@@ -15,6 +15,14 @@ describe("resolving a previewed page's socket URL", () => {
     expect(resolveSocketTarget("ws://app.example:5173/", options)).toEqual({ port: 5173, path: "/" });
   });
 
+  test("the page's own port is read as the gateway, because that is never a port inside the container", () => {
+    // What Vite's HMR client actually asks for: it builds the socket URL from the page location, so the port it names is the gateway's.
+    const behindGateway = { origin: "https://app.example:5199", port: 3000 };
+    expect(resolveSocketTarget("wss://app.example:5199/?token=abc", behindGateway)).toEqual({ port: 3000, path: "/?token=abc" });
+    // A DIFFERENT explicit port still names a container port: that is how a page reaches a second server it started.
+    expect(resolveSocketTarget("wss://app.example:5173/hmr", behindGateway)).toEqual({ port: 5173, path: "/hmr" });
+  });
+
   test("a bare path falls back to the preview's own port", () => {
     expect(resolveSocketTarget("ws://app.example/hmr", options)).toEqual({ port: 5173, path: "/hmr" });
   });

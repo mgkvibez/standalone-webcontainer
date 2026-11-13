@@ -10,8 +10,15 @@
 
 import { expect, test, type Page } from "@playwright/test";
 
+/**
+ * Boot on the corpus lane.
+ *
+ * The product's default lane is the real npm registry; these specs are about the assembled environment (projects, editor, terminal, processes)
+ * and use the committed corpus so they stay hermetic and fast. The real-registry journey has its own spec, which is the one that claims the
+ * package installation works.
+ */
 const boot = async (page: Page): Promise<void> => {
-  await page.goto("/");
+  await page.goto("/?registry=corpus");
   await expect(page.locator("#tree li[data-path='/index.js']")).toBeVisible();
 };
 
@@ -107,7 +114,7 @@ test("runs a file through the runtime from the terminal and shows its output", a
   await expect(page.locator(".process-chip[data-pid='1']")).toHaveAttribute("data-state", "exited");
 });
 
-test("installs only bundled corpus packages and rebuilds the volatile overlay from the lockfile", async ({ page }) => {
+test("installs from the corpus lane and rebuilds the volatile overlay from the lockfile", async ({ page }) => {
   await boot(page);
   await openFile(page, "/package.json");
   await setEditorText(page, JSON.stringify({ name: "playground", version: "1.0.0", dependencies: { "@corpus/leaf": "^1.0.0" } }, null, 2));

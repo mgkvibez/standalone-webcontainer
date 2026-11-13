@@ -294,7 +294,11 @@ export function createWebSocketClass(connect: WebSocketConnector, options: WebSo
       }
 
       if (status !== 101) {
-        this.#fail(`handshake failed: the server answered ${String(status)}, not 101`);
+        // The server's own sentence is quoted when it sent one. `ws` answers a refused handshake with a short body naming the header it
+        // rejected, and replacing that with "the server answered 400" threw away the only diagnosis the page's developer would ever get.
+        const phrase = statusLine.slice(statusLine.indexOf(" ") + 1).trim();
+        const detail = TEXT_DECODER.decode(rest).replace(/<[^>]*>/gu, " ").replace(/\s+/gu, " ").trim();
+        this.#fail(`handshake failed: the server answered ${phrase === "" ? String(status) : phrase}${detail === "" ? "" : `: ${detail}`}, not 101`);
         return false;
       }
       const expected = base64(sha1(this.#key + HANDSHAKE_GUID));

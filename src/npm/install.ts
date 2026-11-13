@@ -447,6 +447,34 @@ function isPlatformUsable(entry: { readonly os?: readonly string[]; readonly cpu
 }
 
 /**
+ * An npm alias spec: `npm:<target>@<range>`.
+ *
+ * Real trees contain these. `wrap-ansi-cjs` declares `"wrap-ansi": "npm:wrap-ansi@^7.0.0"`, and a Vite install resolves it, so refusing aliases
+ * meant refusing a published tree for a reason the user can neither see nor act on. npm's meaning is precise: the TARGET is resolved and its bytes
+ * are installed under the ALIAS name, which is the dependency key - so a dependent asking for `wrap-ansi` gets 7.x while the root may hold 10.x.
+ *
+ * The alias name is the request's own name and never changes; only the packument lookup and the range do. That is why the resolver treats this as a
+ * lookup indirection rather than as a new edge kind.
+ */
+function parseAliasSpec(spec: string): { readonly target: string; readonly range: string } | null {
+  const trimmed = spec.trim();
+  if (!trimmed.startsWith("npm:")) return null;
+  const rest = trimmed.slice("npm:".length);
+  // `@scope/name@range` has two `@`s and the first is not a separator; a bare `name` has none and means `latest`.
+  const separator = rest.startsWith("@") ? rest.indexOf("@", 1) : rest.indexOf("@");
+  if (separator === -1) return rest === "" ? null : { target: rest, range: "latest" };
+  const target = rest.slice(0, separator);
+  const range = rest.slice(separator + 1);
+  if (target === "") return null;
+  return { target, range: range === "" ? "latest" : range };
+}
+
+/** The range a placement is matched against: an alias resolves the target's range, and an alias string never compares equal to a version. */
+function rangeForMatching(spec: string): string {
+  return parseAliasSpec(spec)?.range ?? spec;
+}
+
+/**
  * Dependency specs that are not registry ranges.
  *
  * npm accepts local paths, git URLs, `workspace:` protocol references and `npm:` aliases. This installer resolves
@@ -458,6 +486,8 @@ function isPlatformUsable(entry: { readonly os?: readonly string[]; readonly cpu
  */
 function unsupportedSpecReason(range: string): string | null {
   const spec = range.trim();
+  // An alias is a registry spec: it is resolved below, against the target's packument.
+  if (parseAliasSpec(spec) !== null) return null;
   if (/(^|\/)(file|link|workspace|git|git\+https|github|gitlab|bitbucket|npm):/.test(spec)) {
     return `${spec} uses a protocol this installer does not resolve`;
   }
@@ -503,22 +533,28 @@ export async function installDependencies(
    */
   const hostsFor = (fromDir: string): readonly string[] => {
     const hosts: string[] = [];
-    let current: string | null = fromDir;
-    while (current !== null && current !== "" && current !== "/") {
+    let current = fromDir;
+    for (;;) {
       if (!current.endsWith("/node_modules") && current !== "node_modules") {
         hosts.push(joinPath(current, "node_modules"));
       }
+      if (current === "/" || current === "") break;
       const separator = current.lastIndexOf("/");
-      current = separator <= 0 ? null : current.slice(0, separator);
+      // `separator <= 0` means the parent is the filesystem root, and the walk must CONTINUE one step to include it. Stopping here dropped
+      // `/node_modules` from the search list of every package installed directly at the root - so a hoisted copy was invisible to its own
+      // dependents. Transitive dedupe hid it (the root-slot check caught the repeat), but a peer check has no such fallback: `react-dom` could not
+      // see the `react` sitting beside it and the install failed for a tree npm builds without complaint.
+      current = separator <= 0 ? "/" : current.slice(0, separator);
     }
     return hosts;
   };
 
   /** Look for a copy already installed anywhere Node would search from this dependent. */
   const findExisting = (fromDir: string, name: string, range: string): Placement | undefined => {
+    const effective = rangeForMatching(range);
     for (const host of hostsFor(fromDir)) {
       const placement = placementFor(host, name);
-      if (placement !== undefined && maxSatisfying([placement.version], range) !== null) return placement;
+      if (placement !== undefined && maxSatisfying([placement.version], effective) !== null) return placement;
     }
     return undefined;
   };
@@ -550,7 +586,7 @@ export async function installDependencies(
     if (entry.version === undefined || entry.resolved === undefined) return null;
     // A parseable range the locked version fails means the manifest moved on, so re-resolve. A dist-tag such as
     // `latest` cannot be checked offline, and the lockfile is precisely the record of what it meant.
-    if (isRangeExpression(range) && maxSatisfying([entry.version], range) === null) return null;
+    if (isRangeExpression(rangeForMatching(range)) && maxSatisfying([entry.version], rangeForMatching(range)) === null) return null;
     return {
       name,
       version: entry.version,
@@ -618,11 +654,14 @@ export async function installDependencies(
           );
         }
         const substitution = substitutionFor(request.name);
-        // Only the substitute's packument is fetched. Asking for the requested package's versions first would be a wasted round trip,
-        // and on the offline lanes it would be a guaranteed miss for a package whose bytes are never served anyway.
-        const lookupName = substitution?.substitute ?? request.name;
+        const alias = parseAliasSpec(request.range);
+        // Only the substitute's (or the alias target's) packument is fetched. Asking for the requested package's versions first would be a
+        // wasted round trip, and on the offline lanes it would be a guaranteed miss for a package whose bytes are never served anyway.
+        const lookupName = substitution?.substitute ?? alias?.target ?? request.name;
         const packument = await fetchPackument(lookupName);
-        const range = substitution === undefined ? request.range : resolvedRange(substitution, request.range);
+        const range = substitution !== undefined
+          ? resolvedRange(substitution, request.range)
+          : (alias?.range ?? request.range);
         try {
           chosen = chooseVersion(packument, range, lookupName);
         } catch (error) {
@@ -657,6 +696,10 @@ export async function installDependencies(
         }
       }
 
+      // An alias keeps its own name too, for the same directory reason: `"wrap-ansi": "npm:wrap-ansi@^7"` has to land in node_modules/wrap-ansi,
+      // because that is the path the dependent's `require("wrap-ansi")` searches. What differs is the bytes and the version, not the directory.
+      if (parseAliasSpec(request.range) !== null && chosen.name !== request.name) chosen = { ...chosen, name: request.name };
+
       // Applied to the chosen version regardless of where it came from, because a lockfile written by a local
       // install carries the same platform packages a fresh resolution would produce.
       //
@@ -671,7 +714,7 @@ export async function installDependencies(
         }
         throw new InstallError(
           "PLATFORM_UNSUPPORTED",
-          `${chosen.name}@${chosen.version} supports ${describePlatform(chosen)}, which cannot run in a browser`,
+          `${chosen.name}@${chosen.version} supports ${describePlatform(chosen)}, which cannot run in a browser (required by ${request.requiredBy})`,
         );
       }
 
@@ -703,22 +746,43 @@ export async function installDependencies(
         // An entry with no `dependencies` means a package with none: that is npm's meaning, and it is what makes a
         // reinstall offline. An earlier version fell back to fetching the packument "just for the edges", which
         // then fired for every leaf package and defeated the point of having a lockfile at all.
+        //
+        // Two npm rules apply here, both learned from real metadata rather than from the spec:
+        //
+        // 1. **`optionalDependencies` wins over `dependencies`.** typescript 7 lists every platform binary in BOTH maps. Reading the hard map
+        //    first made `@typescript/typescript-aix-ppc64` a required dependency of a package that never needed it, and the install died on a
+        //    binary that is skipped by design.
+        // 2. **Optionality is inherited.** npm does not fail an install because a dependency *of an optional package* could not be met. Without
+        //    this, a skipped platform variant's own edges fail the tree, turning "this variant does not apply to you" into "the install broke".
+        const declaredOptional = chosen.optionalDependencies ?? {};
         for (const [name, range] of Object.entries(chosen.dependencies ?? {})) {
-          queue.push({ name, range, fromDir: targetDir, requiredBy: identifier, optional: false });
+          if (Object.hasOwn(declaredOptional, name)) continue;
+          queue.push({ name, range, fromDir: targetDir, requiredBy: identifier, optional: request.optional });
         }
 
         // Peers are walked on every install, lockfile or not, and they are walked from the dependent's own directory: a peer is resolved where
         // the dependent stands (npm's rule), and a copy installed at the root that the dependent cannot see would be a peer that looks present
         // in the tree and is absent at run time.
         for (const [name, range] of Object.entries(chosen.peerDependencies ?? {})) {
-          const optionalPeer = chosen.peerDependenciesMeta?.[name]?.optional === true;
-          queue.push({ name, range, fromDir: targetDir, requiredBy: `${identifier} (peer)`, optional: optionalPeer, peer: true });
+          // npm installs REQUIRED peers only. An optional peer is a capability the package will use if the project happens to have it - installing
+          // every one of them is a different installer. Measured before this guard existed: vite alone declares twelve optional peers (`less`,
+          // `sass`, `terser`, `@types/node`, `@vitejs/devtools`, ...), and honouring them pulled 500 packages and 29,067 files into a project that
+          // asked for React. The final peer check still reports each one it could not satisfy, as a warning.
+          if (chosen.peerDependenciesMeta?.[name]?.optional === true) continue;
+          queue.push({
+            name,
+            range,
+            fromDir: targetDir,
+            requiredBy: `${identifier} (peer)`,
+            optional: request.optional,
+            peer: true,
+          });
         }
 
         // Optional edges are only discovered from the registry. With a lockfile the tree is already fixed, so
         // re-walking optional edges would install packages the lockfile deliberately does not contain.
         if (!fromLock) {
-          for (const [name, range] of Object.entries(chosen.optionalDependencies ?? {})) {
+          for (const [name, range] of Object.entries(declaredOptional)) {
             queue.push({ name, range, fromDir: targetDir, requiredBy: identifier, optional: true });
           }
         }
@@ -796,9 +860,15 @@ export async function installDependencies(
           warnings.push(`${placement.name}@${placement.version}: optional peer ${peerName}@"${peerRange}" is not installed`);
           continue;
         }
+        // Name what IS visible: "nothing satisfies ^19" and "19.2.0 is installed two directories up" are the same refusal to the resolver and
+        // two different problems to the person reading it.
+        const visible = hostsFor(directory)
+          .map((host) => placementFor(host, peerName))
+          .filter((candidate): candidate is Placement => candidate !== undefined)
+          .map((candidate) => `${candidate.version} in ${candidate.hostDir}`);
         throw new InstallError(
           "PEER_DEPENDENCY_CONFLICT",
-          `${placement.name}@${placement.version} requires peer ${peerName}@"${peerRange}", and nothing it can see satisfies it`,
+          `${placement.name}@${placement.version} requires peer ${peerName}@"${peerRange}", and nothing it can see satisfies it (visible: ${visible.length === 0 ? "nothing" : visible.join(", ")})`,
         );
       }
       peers.push({

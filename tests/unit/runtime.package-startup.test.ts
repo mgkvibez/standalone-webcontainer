@@ -71,6 +71,22 @@ describe("the global object", () => {
     expect(result.stdout).toBe("function function function object\ntrue\n");
   });
 
+  it("binds `global` as Node does, to the same object `self` names", async () => {
+    // Measured need: `vite/bin/vite.js` reads `global` at module scope, and the acceptance journey's dev server died on it with
+    // `ReferenceError: global is not defined`. Both names point at ONE object in Node, so a package that extends either must see the other.
+    const result = await run(
+      {
+        "/app/main.js": [
+          "global.viaGlobal = 1;",
+          'console.log(typeof global, global === self, self.viaGlobal);',
+        ].join("\n"),
+      },
+      "main.js",
+    );
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("object true 1\n");
+  });
+
   it("survives a package copying it into a scope of its own, which is what a wasm host does", async () => {
     // The same loop `esbuild-wasm`'s in-thread service runs before handing its scope to the Go runtime. Measured need: without the realm's
     // constructors on `self`, that runtime panicked at its first allocation.

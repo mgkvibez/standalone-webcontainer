@@ -29,6 +29,57 @@ export interface RemoteFileSystemOptions {
 }
 
 /**
+ * The largest slice a ranged read asks for.
+ *
+ * Deliberately far below the frame size: the payload is JSON with binary carried as a byte array, so one byte on disk costs several bytes on the
+ * wire, and a slice sized to the frame would overflow it again. 64 KiB is small enough to fit any configured region and large enough that a
+ * multi-megabyte file costs tens of round trips rather than thousands.
+ */
+const READ_RANGE_BYTES = 64 * 1024;
+
+/** Whether a failed call failed because the answer did not fit one frame. */
+function isTooLargeResponse(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const coded = error as { readonly code?: unknown; readonly message?: unknown };
+  if (coded.code === "ERESPTOOLARGE") return true;
+  return typeof coded.message === "string" && coded.message.includes("ERESPTOOLARGE");
+}
+
+/**
+ * Read a file that does not fit one frame, in slices, and join them.
+ *
+ * The text form is decoded ONCE at the end rather than per slice: a slice boundary falls inside a multi-byte character often enough to matter, and
+ * decoding each piece would corrupt exactly the files this path exists to load.
+ */
+function readInRanges(
+  send: (request: FsRequest) => FsResponse,
+  path: string,
+  encoding: "utf8" | undefined,
+): Uint8Array | string {
+  const pieces: Uint8Array[] = [];
+  let offset = 0;
+  for (;;) {
+    const answer = send({ op: "read", path, offset, length: READ_RANGE_BYTES });
+    if (answer.kind !== "bytes") {
+      throw new Error(`filesystem range read of "${path}" returned "${answer.kind}" where bytes were expected`);
+    }
+    const piece = answer.bytes;
+    if (piece.byteLength === 0) break;
+    pieces.push(piece);
+    offset += piece.byteLength;
+    if (piece.byteLength < READ_RANGE_BYTES) break;
+  }
+  const total = pieces.reduce((sum, piece) => sum + piece.byteLength, 0);
+  const joined = new Uint8Array(total);
+  let at = 0;
+  for (const piece of pieces) {
+    joined.set(piece, at);
+    at += piece.byteLength;
+  }
+  return encoding === "utf8" ? new TextDecoder().decode(joined) : joined;
+}
+
+/**
  * Deadline for a syscall when the caller does not choose one.
  *
  * Every call must carry a deadline — an un-deadlined wait on a kernel that died is a hang, which is the failure mode this
@@ -57,13 +108,24 @@ export function createRemoteFileSystem(
 
   return {
     readFileSync(path: string, encoding?: "utf8"): Uint8Array | string {
-      const answer = send(encoding === "utf8" ? { op: "read", path, encoding } : { op: "read", path });
-      if (encoding === "utf8") {
-        if (answer.kind !== "text") throw new Error(`filesystem read of "${path}" returned "${answer.kind}" where text was expected`);
-        return answer.text;
+      const whole = (): Uint8Array | string => {
+        const answer = send(encoding === "utf8" ? { op: "read", path, encoding } : { op: "read", path });
+        if (encoding === "utf8") {
+          if (answer.kind !== "text") throw new Error(`filesystem read of "${path}" returned "${answer.kind}" where text was expected`);
+          return answer.text;
+        }
+        if (answer.kind !== "bytes") throw new Error(`filesystem read of "${path}" returned "${answer.kind}" where bytes were expected`);
+        return answer.bytes;
+      };
+      try {
+        return whole();
+      } catch (error) {
+        // A response travels in one fixed-size shared region, so a file larger than that region cannot come back in one frame. Measured need:
+        // `vite` ships a 2.1 MB node chunk, and the dev server died on `ERESPTOOLARGE` while the loader read it. Falling back to ranged reads
+        // keeps the fast path (one call for every ordinary file) and makes the large one work instead of being a hard ceiling nobody can see.
+        if (!isTooLargeResponse(error)) throw error;
+        return readInRanges(send, path, encoding);
       }
-      if (answer.kind !== "bytes") throw new Error(`filesystem read of "${path}" returned "${answer.kind}" where bytes were expected`);
-      return answer.bytes;
     },
     writeFileSync(path: string, data: string | Uint8Array, writeOptions?: WriteOptionsPort): void {
       const request: FsRequest =

@@ -15,7 +15,14 @@ import type { FileSystemPort } from "../vfs/port.js";
 import type { WatchRegistry } from "./watch-registry.js";
 
 export type FsRequest =
-  | { readonly op: "read"; readonly path: string; readonly encoding?: "utf8" }
+  | {
+      readonly op: "read";
+      readonly path: string;
+      readonly encoding?: "utf8";
+      /** Byte range for a file too large for one response frame. Absent means the whole file. */
+      readonly offset?: number;
+      readonly length?: number;
+    }
   | {
       readonly op: "write";
       readonly path: string;
@@ -91,6 +98,18 @@ function requireString(value: unknown, field: string): string {
   return value;
 }
 
+/** A validated byte range, or null when the request asked for the whole file. */
+function readRange(offset: unknown, length: unknown): { readonly offset: number; readonly length?: number } | null {
+  if (offset === undefined && length === undefined) return null;
+  if (offset !== undefined && (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0)) {
+    refuse("filesystem read offset must be a non-negative integer");
+  }
+  if (length !== undefined && (typeof length !== "number" || !Number.isInteger(length) || length <= 0)) {
+    refuse("filesystem read length must be a positive integer");
+  }
+  return { offset: offset === undefined ? 0 : offset, ...(length === undefined ? {} : { length }) };
+}
+
 export interface FsHandlerOptions {
   /**
    * Watches live in the kernel, so the handler needs the registry to register and drain them.
@@ -130,8 +149,24 @@ export function createFsSyscallHandler(
     try {
       switch (op) {
         case "read": {
-          const { path, encoding } = request as { path?: unknown; encoding?: unknown };
+          const { path, encoding, offset, length } = request as {
+            path?: unknown;
+            encoding?: unknown;
+            offset?: unknown;
+            length?: unknown;
+          };
           const target = requireString(path, "path");
+          // A range read exists because one response frame is a fixed-size shared region: vite's node chunk is 2.1 MB and the frame refused
+          // it with ERESPTOOLARGE, which no amount of retrying fixes. The slice is resolved HERE, where the bytes are, so the client never
+          // has to know the frame size and a small file still costs one round trip.
+          const range = readRange(offset, length);
+          if (range !== null) {
+            if (encoding !== undefined) refuse('filesystem range read does not take an encoding; decode the joined bytes at the caller');
+            const whole = fs.readFileSync(target) as Uint8Array;
+            const start = Math.min(range.offset, whole.byteLength);
+            const end = range.length === undefined ? whole.byteLength : Math.min(start + range.length, whole.byteLength);
+            return { kind: "bytes", bytes: whole.subarray(start, end) };
+          }
           if (encoding === "utf8") {
             return { kind: "text", text: fs.readFileSync(target, "utf8") as string };
           }

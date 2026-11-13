@@ -297,3 +297,90 @@ describe("the lockfile round trip", () => {
     expect(serialised).toMatch(/"hasInstallScript": true/);
   });
 });
+
+describe("npm alias specs", () => {
+  /**
+   * A real Vite tree contains `"wrap-ansi": "npm:wrap-ansi@^7.0.0"` inside wrap-ansi-cjs. Before this, the resolver refused the whole install for
+   * a spec the registry publishes, which is how the first acceptance run of the milestone failed.
+   */
+  it("installs the alias target under the alias name, nested where the dependent can see it", async () => {
+    const registry = await fakeRegistry({
+      packages: {
+        cjs: [{ version: "1.0.0", dependencies: { "wrap-ansi": "npm:wrap-ansi@^7.0.0" } }],
+        "wrap-ansi": [{ version: "7.2.0", files: { "index.js": "module.exports = 'seven';" } }, { version: "10.0.0" }],
+      },
+    });
+    const { vfs, root } = bootVfs();
+
+    await installDependencies(
+      { dependencies: { cjs: "^1.0.0", "wrap-ansi": "^10.0.0" } },
+      { registry, vfs, root },
+    );
+
+    // The project's own request keeps the root copy at 10, and the dependent's alias gets its own copy at 7.
+    expect(text(vfs, `${root}/node_modules/wrap-ansi/package.json`)).toMatch(/"version": "10\.0\.0"/);
+    expect(text(vfs, `${root}/node_modules/cjs/node_modules/wrap-ansi/package.json`)).toMatch(/"version": "7\.2\.0"/);
+    expect(text(vfs, `${root}/node_modules/cjs/node_modules/wrap-ansi/index.js`)).toBe("module.exports = 'seven';");
+    // The directory is the alias name, the bytes are the target's: that is npm's meaning, and it is why `require("wrap-ansi")` inside `cjs` works.
+    const lockfile = parseLockfile(text(vfs, `${root}/package-lock.json`));
+    expect(lockfile.packages["node_modules/cjs/node_modules/wrap-ansi"]?.resolved).toBe(
+      "https://registry.test/wrap-ansi/-/wrap-ansi-7.2.0.tgz",
+    );
+  });
+
+  it("installs a differently named package under the alias name", async () => {
+    const registry = await fakeRegistry({
+      packages: {
+        other: [{ version: "2.1.0", files: { "index.js": "module.exports = 'other';" } }],
+      },
+    });
+    const { vfs, root } = bootVfs();
+
+    await installDependencies({ dependencies: { "my-lib": "npm:other@^2.0.0" } }, { registry, vfs, root });
+
+    expect(text(vfs, `${root}/node_modules/my-lib/index.js`)).toBe("module.exports = 'other';");
+    // The package's own manifest still says what it is, which is what a debugger and a licence scanner need.
+    expect(text(vfs, `${root}/node_modules/my-lib/package.json`)).toMatch(/"name": "other"/);
+    expect(exists(vfs, `${root}/node_modules/other`)).toBe(false);
+  });
+
+  it("reports a missing alias target as the target's absence, not as a bad alias name", async () => {
+    const registry = await fakeRegistry({ packages: { present: [{ version: "1.0.0" }] } });
+    const { vfs, root } = bootVfs();
+    // The registry's own error reaches the user unchanged, and it names the TARGET: `absent` is what could not be found, so telling the user their
+    // alias name `my-lib` is invalid would send them looking in the wrong place. Against the real registry this surfaces as PACKAGE_NOT_FOUND,
+    // which is pinned in tests/unit/registry.network.test.ts.
+    await expect(
+      installDependencies({ dependencies: { "my-lib": "npm:absent@^2.0.0" } }, { registry, vfs, root }),
+    ).rejects.toThrow(/absent/);
+    expect(exists(vfs, `${root}/node_modules/my-lib`)).toBe(false);
+  });
+
+  it("resolves an alias from a lockfile without re-fetching, and keeps the nested path", async () => {
+    const registry = await fakeRegistry({
+      packages: {
+        cjs: [{ version: "1.0.0", dependencies: { "wrap-ansi": "npm:wrap-ansi@^7.0.0" } }],
+        "wrap-ansi": [{ version: "7.2.0" }, { version: "10.0.0" }],
+      },
+    });
+    const { vfs, root } = bootVfs();
+    const first = await installDependencies(
+      { dependencies: { cjs: "^1.0.0", "wrap-ansi": "^10.0.0" } },
+      { registry, vfs, root },
+    );
+
+    const offline = await fakeRegistry({
+      packages: {
+        cjs: [{ version: "1.0.0", dependencies: { "wrap-ansi": "npm:wrap-ansi@^7.0.0" } }],
+        "wrap-ansi": [{ version: "7.2.0" }, { version: "10.0.0" }],
+      },
+    });
+    const second = await installDependencies(
+      { dependencies: { cjs: "^1.0.0", "wrap-ansi": "^10.0.0" } },
+      { registry: offline, vfs, root, lockfile: first.lockfile },
+    );
+    expect(offline.fetched).toEqual([]);
+    expect(second.usedLockfile).toBe(true);
+    expect(text(vfs, `${root}/node_modules/cjs/node_modules/wrap-ansi/package.json`)).toMatch(/"version": "7\.2\.0"/);
+  });
+});

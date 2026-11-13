@@ -603,6 +603,10 @@ export class CommonJsLoader {
       // in-thread service inside `esbuild-wasm` copies `self`'s properties into the scope its Go runtime runs in, and that runtime then reaches
       // for `Object` through it.
       ["self", runtimeGlobals.self],
+      // Node's name for its global object. Not decoration either: `vite/bin/vite.js` reads it at module scope, and the acceptance journey's dev
+      // server died on line 19 with `ReferenceError: global is not defined`. Node binds both names to ONE object, so they are bound to the same
+      // object here rather than to two facades that would drift apart the first time either was extended.
+      ["global", runtimeGlobals.self],
       // The container's own client for a protocol switch, bound only when a runtime supplied one. A loader used on its own (a module probe,
       // a transform test) has no transport to bind it to, and binding `undefined` would SHADOW whatever the host realm provides — turning
       // "this runtime has no websocket support" into "websocket is not defined" in code that never asked this runtime for one.

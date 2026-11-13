@@ -6,8 +6,9 @@
  * reaches the program that owns the port. The edit is made the way a person makes one, through the editor, and the program learns about it the
  * way a dev server learns about it, through `fs.watch` on the kernel's filesystem.
  *
- * What replaces Vite: the protocol SHAPE, not the package. There is no registry in the container, so a real `vite` cannot be installed, and the
- * claim worth testing is the shape (open, subprotocol, push after a file change, apply without a reload). One difference is real and recorded in
+ * What replaces Vite: the protocol SHAPE, not the package. The container can now install a real `vite` (the real-registry journey does exactly
+ * that), but this spec is about the transport, so a hundred-line dev server keeps it hermetic and makes the failure land on the socket rather than
+ * on a package. Guiding wrong-guess cost: the shape is what would break, so the shape is what is pinned here. One difference is real and recorded in
  * ADR-0034 rather than hidden: inside a previewed page `location.port` is the HOST app's port, not the previewed server's, so the client builds
  * `ws://<hostname>` with no port and the `/preview/<port>/` prefix supplies it.
  */
