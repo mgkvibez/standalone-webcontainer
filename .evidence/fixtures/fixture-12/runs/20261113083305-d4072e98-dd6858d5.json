@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "runId": "20261113083305-d4072e98-dd6858d5",
+  "fixture": {
+    "id": 12,
+    "slug": "fixture-12",
+    "lane": "front-end-only"
+  },
+  "definition": {
+    "sha256": "d4072e9824ae23d610e56a9a722de56f80fdd91787fb5d1004f2166c6bafb757",
+    "formatVersion": 1,
+    "steps": 2,
+    "assertions": 2
+  },
+  "harness": {
+    "name": "standalone-webcontainer fixture runner",
+    "version": "0.0.0"
+  },
+  "runtime": {
+    "name": "node",
+    "version": "v20.20.2"
+  },
+  "commit": "bac05f6b3c8ee69a956f71b4dffda48138b73a4e",
+  "tree": {
+    "dirty": true,
+    "changedFiles": 20
+  },
+  "command": {
+    "argv": [
+      "--id",
+      "12",
+      "--registry=network",
+      "--replace-unattributed"
+    ],
+    "steps": [
+      "npm install",
+      "npx tsc -p tsconfig.json"
+    ]
+  },
+  "registry": {
+    "lane": "network",
+    "label": "registry.npmjs.org"
+  },
+  "startedAt": "2026-11-13T08:33:05.909Z",
+  "endedAt": "2026-11-13T08:33:06.593Z",
+  "durationMs": 684,
+  "budgets": {
+    "install": 180000,
+    "build": 240000,
+    "run": 60000
+  },
+  "verdict": {
+    "classification": "RUNTIME_INCOMPATIBILITY",
+    "reason": "assertion failed: exit-code: expected exit code 0, observed 1 (and 1 more)"
+  }
+}

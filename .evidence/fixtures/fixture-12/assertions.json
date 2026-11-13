@@ -10,9 +10,9 @@
   {
     "index": 1,
     "kind": "file-exists",
-    "state": "failed",
-    "passed": false,
+    "state": "passed",
+    "passed": true,
     "stepAvailable": true,
-    "detail": "dist/index.js does not exist"
+    "detail": "dist/index.js exists"
   }
 ]

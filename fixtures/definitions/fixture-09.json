@@ -39,5 +39,9 @@
   ],
   "knownLimits": [
     "A registry failure is NETWORK, never RUNTIME_INCOMPATIBILITY. Conflating the two would blame the runtime for the weather."
-  ]
+  ],
+  "files": {
+    "package.json": "{\n  \"name\": \"fixture-09-npm-install\",\n  \"private\": true,\n  \"version\": \"0.0.0\",\n  \"type\": \"module\",\n  \"dependencies\": {}\n}\n",
+    "check.mjs": "// Runs inside the runtime after `npm install is-odd@3.0.1` has written node_modules.\n//\n// `is-odd` is small on purpose: it is pure JavaScript, has a dependency (is-number), and is published with an `exports` map, so\n// requiring it exercises resolution rather than a bundler. Both facts the fixture asserts come from the package itself, not from\n// our own arithmetic: 3 is odd and 4 is not, and a wrong answer from the dependency would be a real failure rather than a typo.\nimport isOdd from \"is-odd\";\n\nconst three = isOdd(3);\nconst four = isOdd(4);\nconsole.log(`is-odd(3)=${three} is-odd(4)=${four}`);\n\nif (three !== true || four !== false) {\n  console.error(\"is-odd gave the wrong answer, so resolution found something other than the published package\");\n  process.exit(1);\n}\n\n// The assertion looks for \"true\" in stdout, and this line is where it comes from: a boolean the package computed.\nconsole.log(\"resolved-and-correct: true\");\n"
+  }
 }

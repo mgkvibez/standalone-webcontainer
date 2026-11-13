@@ -5,13 +5,13 @@
     "command": "npm install cowsay@1.6.0",
     "state": "ran",
     "termination": "ok",
-    "detail": "builtin command reported a failure: npm: only npm install/npm ci and --omit=dev are supported; package arguments and other flags are refused",
-    "elapsedMs": 0,
+    "detail": "builtin command completed: added 37 package(s) from registry.npmjs.org",
+    "elapsedMs": 1016,
     "record": {
       "index": 0,
-      "exitCode": 1,
-      "stdout": "",
-      "stderr": "npm: only npm install/npm ci and --omit=dev are supported; package arguments and other flags are refused"
+      "exitCode": 0,
+      "stdout": "added 37 package(s) from registry.npmjs.org",
+      "stderr": ""
     }
   },
   {
@@ -20,12 +20,12 @@
     "command": "npx --no-install cowsay hello",
     "state": "ran",
     "termination": "ok",
-    "detail": "builtin command completed",
-    "elapsedMs": 0,
+    "detail": "process 1 exited with exit 0",
+    "elapsedMs": 91,
     "record": {
       "index": 1,
       "exitCode": 0,
-      "stdout": "",
+      "stdout": " _______\n< hello >\n -------\n        \\   ^__^\n         \\  (oo)\\_______\n            (__)\\       )\\/\\\n                ||----w |\n                ||     ||\n",
       "stderr": ""
     }
   }

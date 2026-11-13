@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "runId": "20261113083900-8d39c57a-9bc37ab1",
+  "fixture": {
+    "id": 14,
+    "slug": "fixture-14",
+    "lane": "front-end-only"
+  },
+  "definition": {
+    "sha256": "8d39c57ac1daa0920c0a6c70ce75b99e083f56dca253b6acc97fb250fa7b6ac8",
+    "formatVersion": 1,
+    "steps": 2,
+    "assertions": 2
+  },
+  "harness": {
+    "name": "standalone-webcontainer fixture runner",
+    "version": "0.0.0"
+  },
+  "runtime": {
+    "name": "node",
+    "version": "v20.20.2"
+  },
+  "commit": "bac05f6b3c8ee69a956f71b4dffda48138b73a4e",
+  "tree": {
+    "dirty": true,
+    "changedFiles": 24
+  },
+  "command": {
+    "argv": [
+      "--id",
+      "14",
+      "--registry=network",
+      "--replace-unattributed"
+    ],
+    "steps": [
+      "npm install cowsay@1.6.0",
+      "npx --no-install cowsay hello"
+    ]
+  },
+  "registry": {
+    "lane": "network",
+    "label": "registry.npmjs.org"
+  },
+  "startedAt": "2026-11-13T08:39:00.899Z",
+  "endedAt": "2026-11-13T08:39:02.006Z",
+  "durationMs": 1107,
+  "budgets": {
+    "install": 180000,
+    "build": 240000,
+    "run": 60000
+  },
+  "verdict": {
+    "classification": "PASS",
+    "reason": "all 2 assertion(s) passed"
+  }
+}

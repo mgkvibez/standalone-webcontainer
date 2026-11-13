@@ -227,14 +227,47 @@ describe("open descriptors", () => {
     const fs = createFsShim(vfs);
     const fd = fs.openSync("/project/a.txt", "r");
 
-    for (const operation of ["readSync", "writeSync"] as const) {
-      const error = caughtBy(() => fs[operation](fd));
-      expect(error).toMatchObject({ code: "ERR_NOT_IMPLEMENTED_IN_THIS_RUNTIME" });
-      // This VFS reads and writes whole files, so there is no faithful positional answer; saying so is the whole implementation.
-      expect((error as Error).message).toContain(`fs.${operation} on a file descriptor is not implemented`);
-      expect((error as Error).message).toContain("fd 3 for '/project/a.txt'");
-      expect((error as Error).message).toContain("readFile/writeFile");
-    }
+    const error = caughtBy(() => fs.readSync(fd));
+    expect(error).toMatchObject({ code: "ERR_NOT_IMPLEMENTED_IN_THIS_RUNTIME" });
+    // This VFS reads and writes whole files, so there is no faithful positional READ; saying so is the whole implementation. Writing is
+    // implemented now (a read-modify-write of the whole file), because a compiler that cannot emit is a compiler that cannot pass.
+    expect((error as Error).message).toContain("fs.readSync on a file descriptor is not implemented");
+    expect((error as Error).message).toContain("fd 3 for '/project/a.txt'");
+    expect((error as Error).message).toContain("readFile/writeFile");
+  });
+
+  it("writes through a descriptor, in both of Node's shapes, at the position it is given", () => {
+    const vfs = new FileSystem();
+    const fs = createFsShim(vfs);
+    const fd = fs.openSync("/project/out.js", "w");
+
+    // The buffer form a compiler uses for emit: offsets and a length select a slice of the caller's buffer.
+    const buffer = new Uint8Array([0, 0, 104, 105, 0]);
+    expect(fs.writeSync(fd, buffer, 2, 2, 0)).toBe(2);
+    // The string form it uses for a source map. A positional write does not move the descriptor's own cursor, which is POSIX's pwrite
+    // rule and Node's: the position here is explicit for that reason.
+    expect(fs.writeSync(fd, " there", 2)).toBe(6);
+    fs.closeSync(fd);
+
+    expect(vfs.readFileSync("/project/out.js", "utf8")).toBe("hi there");
+  });
+
+  it("honours the append flag over a passed position, because that is what the flag promises", () => {
+    const vfs = new FileSystem();
+    vfs.writeFileSync("/project/log.txt", "first");
+    const fs = createFsShim(vfs);
+    const fd = fs.openSync("/project/log.txt", "a");
+    fs.writeSync(fd, " second", 0);
+    fs.closeSync(fd);
+    expect(vfs.readFileSync("/project/log.txt", "utf8")).toBe("first second");
+  });
+
+  it("refuses a write through a descriptor opened read-only", () => {
+    const vfs = new FileSystem();
+    vfs.writeFileSync("/project/a.txt", "hello");
+    const fs = createFsShim(vfs);
+    const fd = fs.openSync("/project/a.txt", "r");
+    expect(caughtBy(() => fs.writeSync(fd, "no"))).toMatchObject({ code: "EBADF" });
   });
 
   it("calls back rather than throwing, in Node's (error, fd) shape", async () => {

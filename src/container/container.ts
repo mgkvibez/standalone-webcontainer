@@ -230,7 +230,8 @@ export class Container {
       `  ${BUILTIN_COMMANDS.join("  ")}`,
       "",
       "Supported package commands: npm install, npm ci, npm run <script> [-- args].",
-      "Not supported: npx, pnpm, yarn, sh, bash, zsh.",
+      "  npx <binary> [args...]   run an INSTALLED package binary (never fetches on the fly)",
+      "Not supported: pnpm, yarn, sh, bash, zsh.",
       "No pipes, globbing, redirection, environment assignment or job control.",
     ].join("\n");
   }
@@ -242,9 +243,17 @@ export class Container {
 
     const command = parseCommand(line);
     if (command.kind === "empty") return;
+    // `npx` is parsed as a builtin because it names no process, but it resolves a binary and runs one, so it goes through the process
+    // path rather than the synchronous builtin switch.
+    const isNpx = command.kind === "builtin" && command.name === "npx";
 
     session.history.push(line);
     this.#line(session, "input", `${session.cwd} $ ${line}`);
+
+    if (isNpx) {
+      await this.#npx(session, command.kind === "builtin" ? command.args : []);
+      return;
+    }
 
     switch (command.kind) {
       case "refused":
@@ -259,10 +268,9 @@ export class Container {
         this.#notify();
         return;
       case "install":
+        // `#install` sets the status itself: it is the only place that knows whether a package was actually written, and an install
+        // that failed used to leave this at 0 because the branch assumed success.
         await this.#install(session, command.args, scriptDepth);
-        // `npm install` reports through the scrollback rather than an exit code, and it is a top-level command rather than a script
-        // segment, so it neither reads nor sets the sequencing status. Saying so here is cheaper than a reader wondering.
-        this.#lastExitCode = 0;
         return;
       case "builtin":
         this.#lastExitCode = 0;
@@ -417,6 +425,46 @@ export class Container {
     return typeof found === "string" || found === null ? found : new TextDecoder().decode(found);
   }
 
+  /**
+   * The installed entry file for a BINARY name, which is not the same thing as a package name.
+   *
+   * `npx tsc` names the binary `typescript` publishes, and there is no `/node_modules/tsc` to look in. npm resolves this through
+   * `node_modules/.bin`, which is a directory of symlinks this container does not have, so the link is followed by reading every
+   * installed package's `bin` field instead: a string bin is a single binary named after the package, and an object maps names to
+   * entry files. Getting this wrong is what made `npx tsc` refuse a package that had just been installed.
+   */
+  #findInstalledBinary(name: string): string | null {
+    const seen = new Set<string>();
+    for (const path of this.#dependencies.keys()) {
+      const match = /^\/node_modules\/((?:@[^/]+\/)?[^/]+)\/package\.json$/.exec(path);
+      if (match === null) continue;
+      const packageName = match[1];
+      if (packageName === undefined || seen.has(packageName)) continue;
+      seen.add(packageName);
+      const manifestText = this.#readInstalled(path);
+      if (manifestText === null) continue;
+      let manifest: { bin?: unknown };
+      try {
+        manifest = JSON.parse(manifestText) as { bin?: unknown };
+      } catch {
+        continue;
+      }
+      const bin = manifest.bin;
+      let relative: string | undefined;
+      if (typeof bin === "string") {
+        // A single-bin package names its binary after itself, so only a request for that name matches.
+        relative = name === packageName.split("/").pop() ? bin : undefined;
+      } else if (typeof bin === "object" && bin !== null) {
+        const entry = (bin as Record<string, unknown>)[name];
+        if (typeof entry === "string") relative = entry;
+      }
+      if (relative === undefined) continue;
+      const entryPath = `/node_modules/${packageName}/${relative.replace(/^\.\//, "")}`;
+      if (this.#readInstalled(entryPath) !== null) return entryPath;
+    }
+    return null;
+  }
+
   /** The entry file a package's `bin` field declares for `name`, or null when nothing provides it. */
   #findPackageBinary(name: string): string | null {
     const manifestText = this.#readInstalled(`/node_modules/${name}/package.json`);
@@ -449,11 +497,13 @@ export class Container {
     }
     if (this.#registry === undefined) {
       this.#line(session, "stderr", "npm: offline package corpus is unavailable");
+      this.#lastExitCode = 1;
       this.#notify();
       return;
     }
     if (subcommand !== "install" && subcommand !== "i" && subcommand !== "ci") {
       this.#line(session, "stderr", `npm: unsupported command${subcommand === undefined ? "" : ` ${subcommand}`}`);
+      this.#lastExitCode = 1;
       this.#notify();
       return;
     }
@@ -464,17 +514,20 @@ export class Container {
         requested.push(parseInstallSpec(token));
       } catch (error) {
         this.#line(session, "stderr", `npm error: ${error instanceof Error ? error.message : String(error)}`);
+        this.#lastExitCode = 1;
         this.#notify();
         return;
       }
     }
     if (flags.some((flag) => flag.startsWith("-") && !["--omit=dev", "--production"].includes(flag))) {
       this.#line(session, "stderr", "npm: only --omit=dev and --production are supported; other flags are refused");
+      this.#lastExitCode = 1;
       this.#notify();
       return;
     }
     if (subcommand === "ci" && requested.length > 0) {
       this.#line(session, "stderr", "npm error: npm ci installs exactly the lockfile and takes no package arguments");
+      this.#lastExitCode = 1;
       this.#notify();
       return;
     }
@@ -548,11 +601,25 @@ export class Container {
       for (const [path, contents] of staged) if (path.includes("/node_modules/")) this.#dependencies.set(path, contents);
       this.#line(session, "stdout", `added ${report.packages.length} package(s) from ${this.#registry.origin ?? "the registry"}`);
       for (const warning of report.warnings) this.#line(session, "stderr", `npm warning: ${warning}`);
+      this.#lastExitCode = 0;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.#line(session, "stderr", `npm error: ${message}`);
+      this.#lastExitCode = 1;
     }
     this.#notify();
+  }
+
+  /**
+   * The status of the last line this session ran, exposed because something other than a human reads it.
+   *
+   * The fixture harness needs a command's exit status, and it used to infer one from the text on stderr (`/^(npm error|npm: )/m`).
+   * That inference was wrong in the way that matters most: a command the container REFUSES by policy (`npx`, `sh`) writes its reason to
+   * the system stream, sets the status to 1, and matched no pattern, so `npx tsc` was recorded as exiting 0 and `fixture-12`'s
+   * exit-code assertion PASSED on a command that never ran. The container knows the status; the caller should ask rather than guess.
+   */
+  get lastExitCode(): number {
+    return this.#lastExitCode;
   }
 
   /** Hard-stop a process. Returns false when the pid is unknown or already finished. */
@@ -724,6 +791,80 @@ export class Container {
   }
 
   // ---------------------------------------------------------------- builtins
+
+  /**
+   * `npx <binary> [args...]`, or a refusal that says which half of npx is missing.
+   *
+   * npm's npx does two things and this container can do one of them: run a binary that is already installed, and fetch a package in
+   * order to run it. The first is the same resolution `npm run` already performs (the package's `bin` field, then that file through
+   * `node`), so `npx tsc -p tsconfig.json` and `npx --no-install cowsay hello` work as soon as the package is installed.
+   *
+   * The second is NOT silently attempted: without a network fetch there is nothing to resolve, and guessing would produce a verdict
+   * about a download this container never made. It is refused by name, with the command that would work instead.
+   */
+  async #npx(session: Session, args: readonly string[]): Promise<void> {
+    // Only the flags BEFORE the package name belong to npx. Everything after it is the program's own argv, and collecting flags by
+    // pattern instead of by position swallowed `tsc -p tsconfig.json`'s `-p`, leaving the compiler a bare path it read as a source file.
+    const ownFlag = new Set(["--no-install", "--no", "--yes", "-y", "--ignore-existing", "--quiet", "-q"]);
+    const valueFlag = new Set(["--package", "-p", "--call", "-c", "--shell"]);
+    const flags: string[] = [];
+    let index = 0;
+    while (index < args.length) {
+      const arg = args[index];
+      if (arg === undefined) break;
+      if (valueFlag.has(arg)) {
+        flags.push(arg);
+        index += 2;
+        continue;
+      }
+      if (ownFlag.has(arg) || (arg.startsWith("--") && arg.includes("="))) {
+        flags.push(arg);
+        index += 1;
+        continue;
+      }
+      break;
+    }
+    const [spec, ...rest] = args.slice(index);
+    if (spec === undefined) {
+      this.#line(session, "stderr", "npx: which binary? usage: npx <binary> [args...]");
+      this.#lastExitCode = 1;
+      this.#notify();
+      return;
+    }
+
+    // `pkg@1.2.3` names a version; a scoped name keeps its leading `@`, so only a version after the first character is split off.
+    const at = spec.indexOf("@", 1);
+    const name = at === -1 ? spec : spec.slice(0, at);
+    const version = at === -1 ? null : spec.slice(at + 1);
+
+    const entry = this.#findInstalledBinary(name);
+    if (entry !== null) {
+      // The binary's own arguments, with npm's flags removed: they describe npx, not the program.
+      void flags;
+      await this.#startProcess(session, `npx ${[spec, ...rest].join(" ")}`.trim(), [entry, ...rest]);
+      return;
+    }
+
+    const installed = this.#readInstalled(`/node_modules/${name}/package.json`) !== null;
+    if (installed) {
+      // Installed but ships no bin: saying "not installed" here would send a reader chasing the wrong problem.
+      this.#line(session, "stderr", `npx: ${name} is installed but its package.json declares no "${name}" binary`);
+      this.#lastExitCode = 1;
+      this.#notify();
+      return;
+    }
+
+    const wantsInstall = flags.includes("--no-install") || flags.includes("--no");
+    this.#line(
+      session,
+      "stderr",
+      wantsInstall
+        ? `npx: no installed package provides a "${name}" binary, and --no-install forbids fetching one`
+        : `npx: "${name}" is not installed, and fetching a package in order to run it is not implemented; install it first (npm install ${name}${version === null ? "" : `@${version}`})`,
+    );
+    this.#lastExitCode = 1;
+    this.#notify();
+  }
 
   #builtin(session: Session, name: string, args: readonly string[]): void {
     switch (name) {

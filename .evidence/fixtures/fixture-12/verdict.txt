@@ -1,4 +1,7 @@
 fixture: fixture-12
-evidence schema: 2
-classification: RUNTIME_INCOMPATIBILITY
-reason: assertion failed: file-exists: dist/index.js does not exist
+evidence schema: 4
+run: 20261113083846-d4072e98-97da731b
+lane: registry.npmjs.org
+commit: bac05f6b3c8ee69a956f71b4dffda48138b73a4e
+classification: PASS
+reason: all 2 assertion(s) passed

@@ -1,4 +1,7 @@
 fixture: fixture-09
-evidence schema: 2
-classification: RUNTIME_INCOMPATIBILITY
-reason: assertion failed: stdout-contains: stdout did not contain "true"; observed ""
+evidence schema: 4
+run: 20261113082753-392cf9f5-ed6fbf5b
+lane: registry.npmjs.org
+commit: bac05f6b3c8ee69a956f71b4dffda48138b73a4e
+classification: PASS
+reason: all 2 assertion(s) passed

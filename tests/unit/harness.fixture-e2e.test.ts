@@ -13,6 +13,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { parseDefinition, type FixtureDefinition } from "../../src/harness/definition.js";
 import { createStepExecutor } from "../../src/harness/execute.js";
+import { runDefinition } from "../../tools/harness/fixture-executor.js";
 import { runFixture } from "../../src/harness/runner.js";
 import type { AssertionEnvironment } from "../../src/harness/assertions.js";
 import { InProcessRuntime } from "../../src/runtime/in-process.js";
@@ -396,5 +397,40 @@ describe("what a pnpm install actually leaves on disk", () => {
     expect(exists(vfs, `${root}/package-lock.json`)).toBe(true);
     expect(exists(vfs, `${root}/pnpm-lock.yaml`)).toBe(false);
     expect(report.steps[0]?.record?.stdout ?? "").toContain(DEVIATION);
+  });
+});
+
+/**
+ * A command the container refuses must not be scorable as a success.
+ *
+ * This is the defect that made `fixture-12` (TypeScript compile) look like it passed: `npx tsc -p tsconfig.json` is refused by
+ * policy, the container set its own status to 1, and the harness inferred success from stderr text a refusal never writes there.
+ *
+ * It goes through `runDefinition`, the executor the CLI actually runs, and not `createStepExecutor`: that one gates `npx` earlier
+ * with its own offline-registry policy and returns exit 1 whatever the container said, so a test against it passes even with the
+ * defect in place. (Checked by mutation: reverting the fix leaves this test red and that one green.)
+ */
+describe("a refused command in a step", () => {
+  it("records the container's status, so an exit-code-0 assertion fails instead of passing on nothing", async () => {
+    const definition = parseDefinition({
+      formatVersion: 1,
+      id: 12,
+      slug: "fixture-12",
+      lane: "front-end-only",
+      title: "npx is refused, and the report says so",
+      intent: "A refusal is a failure, not a silent success.",
+      source: "harness integration test",
+      status: "frozen",
+      files: { "package.json": JSON.stringify({ name: "refused", version: "0.0.0" }) },
+      steps: [{ kind: "run", command: "npx tsc -p tsconfig.json", timeoutClass: "run", purpose: "Run the compiler through npx" }],
+      assertions: [{ kind: "exit-code", step: 0, equals: 0 }],
+      expected: ["PASS"],
+    });
+
+    const report = await runDefinition(definition, undefined as never, null as never, testProvenance());
+
+    expect(report.steps[0]?.record?.exitCode).toBe(1);
+    expect(report.assertions[0]?.passed).toBe(false);
+    expect(report.classification).not.toBe("PASS");
   });
 });
