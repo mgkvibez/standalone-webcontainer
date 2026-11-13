@@ -10,9 +10,9 @@
   {
     "index": 1,
     "kind": "stdout-contains",
-    "state": "failed",
-    "passed": false,
+    "state": "passed",
+    "passed": true,
     "stepAvailable": true,
-    "detail": "stdout did not contain \"true\"; observed \"\""
+    "detail": "stdout contained the expected text"
   }
 ]

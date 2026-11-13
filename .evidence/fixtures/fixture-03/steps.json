@@ -5,13 +5,13 @@
     "command": "npm install",
     "state": "ran",
     "termination": "ok",
-    "detail": "builtin command reported a failure: npm error: MISSING_PACKAGE_JSON: no package.json at /package.json",
-    "elapsedMs": 0,
+    "detail": "builtin command completed: added 0 package(s) from registry.npmjs.org",
+    "elapsedMs": 1,
     "record": {
       "index": 0,
-      "exitCode": 1,
-      "stdout": "",
-      "stderr": "npm error: MISSING_PACKAGE_JSON: no package.json at /package.json"
+      "exitCode": 0,
+      "stdout": "added 0 package(s) from registry.npmjs.org",
+      "stderr": ""
     }
   },
   {
@@ -20,13 +20,13 @@
     "command": "npx --yes shadcn@latest add button",
     "state": "ran",
     "termination": "ok",
-    "detail": "builtin command completed",
-    "elapsedMs": 0,
+    "detail": "builtin command reported a failure: npx: \"shadcn\" is not installed, and fetching a package in order to run it is not implemented; install it first (npm install shadcn@latest)",
+    "elapsedMs": 1,
     "record": {
       "index": 1,
-      "exitCode": 0,
+      "exitCode": 1,
       "stdout": "",
-      "stderr": ""
+      "stderr": "npx: \"shadcn\" is not installed, and fetching a package in order to run it is not implemented; install it first (npm install shadcn@latest)"
     }
   }
 ]

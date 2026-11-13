@@ -14,6 +14,12 @@
  *   field rather than deciding for itself). The cost is honesty about what we are
  *   not: a package that would have printed "unsupported in this environment" now
  *   takes the Linux path and fails where it fails, rather than being waved off.
+ * - `browser` is FALSE, and this one was measured. Node has no such property, browser bundlers set it, and packages treat `true` as
+ *   "there is no Node here, take the fallback path". TypeScript 5.9 decides exactly that: its `isNodeLikeSystem()` is
+ *   `typeof process !== "undefined" && !!process.nextTick && !process.browser && typeof require !== "undefined"`, so with `browser:
+ *   true` its `sys` came out undefined and `npx tsc` died with `Cannot read properties of undefined (reading
+ *   'tryEnableSourceMapsForHost')`, a failure with no trace of its own cause. False, not absent, because the field is declared here and
+ *   a package that reads `process.browser` gets the answer its Node path expects.
  * - `version` is a Node-20-shaped string because many packages gate features on
  *   `process.version`, and ADR-0002 #7 names Node 20 LTS as the API target. It is
  *   a compatibility claim, not a claim to be Node's runtime.
@@ -239,7 +245,7 @@ export const createProcessShim = (options: ProcessOptions = {}): ProcessShim => 
     platform: "linux",
     version: "v20.0.0",
     versions: { node: "20.0.0" },
-    browser: true,
+    browser: false,
     pid: 1,
     exitCode: undefined,
     /**

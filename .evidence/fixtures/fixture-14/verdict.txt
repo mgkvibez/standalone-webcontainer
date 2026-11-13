@@ -1,4 +1,7 @@
 fixture: fixture-14
-evidence schema: 2
-classification: RUNTIME_INCOMPATIBILITY
-reason: assertion failed: stdout-contains: stdout did not contain "hello"; observed ""
+evidence schema: 4
+run: 20261113083900-8d39c57a-9bc37ab1
+lane: registry.npmjs.org
+commit: bac05f6b3c8ee69a956f71b4dffda48138b73a4e
+classification: PASS
+reason: all 2 assertion(s) passed

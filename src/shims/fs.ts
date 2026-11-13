@@ -487,7 +487,7 @@ export interface FsShim {
   /** Present, and refusing by name: this VFS reads and writes whole files, so positional descriptor I/O has no faithful answer here. */
   readSync(fd: FileDescriptor): never;
   /** Present for the same reason as `readSync`. */
-  writeSync(fd: FileDescriptor): never;
+  writeSync(fd: FileDescriptor, data: string | Uint8Array, offsetOrPosition?: number | null, lengthOrEncoding?: number | string, position?: number | null): number;
   stat(path: FsPath, callback: StatCallback): void;
   /** No symlinks exist in this VFS, so `lstat` is `stat`. Documented rather than silently aliased. */
   lstat(path: FsPath, callback: StatCallback): void;
@@ -674,7 +674,7 @@ AbsoluteFsShim => {
    * are the standard streams) and a closed descriptor is REUSED never, so a program holding a stale fd gets EBADF with the number it asked
    * about rather than a different file.
    */
-  const openFiles = new Map<FileDescriptor, { path: string; flags: string }>();
+  const openFiles = new Map<FileDescriptor, { path: string; flags: string; position: number }>();
   let nextDescriptor = 3;
 
   /** Node's string flags, reduced to the facts this VFS can act on: does it read, does it write, does it create, does it truncate. */
@@ -725,7 +725,7 @@ AbsoluteFsShim => {
     if (flags.includes("w")) vfs.writeFileSync(path, new Uint8Array(0));
     const fd = nextDescriptor;
     nextDescriptor += 1;
-    openFiles.set(fd, { path, flags });
+    openFiles.set(fd, { path, flags, position: 0 });
     return fd;
   };
 
@@ -739,6 +739,18 @@ AbsoluteFsShim => {
       { code: "ERR_NOT_IMPLEMENTED_IN_THIS_RUNTIME" },
     );
   };
+  /** The file's bytes as they are now, for the read-modify-write a descriptor write performs. */
+  const readBytes = (path: string): Uint8Array => {
+    try {
+      const contents = vfs.readFileSync(path);
+      if (typeof contents === "string") return new TextEncoder().encode(contents);
+      return contents instanceof Uint8Array ? contents : new TextEncoder().encode(String(contents));
+    } catch {
+      return new Uint8Array(0);
+    }
+  };
+  const currentSize = (path: string): number => readBytes(path).byteLength;
+
   const vfs = pathAccepting(port);
 
   /**
@@ -964,9 +976,57 @@ AbsoluteFsShim => {
     return refuseDescriptorIo("readSync", fd);
   },
 
-  /** Present for the same reason as `readSync`. */
-  writeSync(fd: FileDescriptor): never {
-    return refuseDescriptorIo("writeSync", fd);
+  /**
+   * `fs.writeSync`, which is how a real compiler writes its output.
+   *
+   * There is no mutable buffer behind a descriptor here, so a write is read-modify-write of the whole file: the descriptor remembers a
+   * position, the bytes land there, and the file is written back. That is slower than Node and means the same thing, which is the trade
+   * this runtime makes everywhere it has only whole-file storage (ADR-0004).
+   *
+   * It exists because the refusal was a dead end for the case that matters: TypeScript compiles cleanly and then fails to emit, so
+   * `npx tsc -p tsconfig.json` could not pass a fixture that asserts `dist/index.js` exists. Both of Node's overloads are handled,
+   * because a compiler uses the string form for source maps and the buffer form for the emit itself.
+   */
+  writeSync(
+    fd: FileDescriptor,
+    data: string | Uint8Array,
+    offsetOrPosition?: number | null,
+    lengthOrEncoding?: number | string,
+    position?: number | null,
+  ): number {
+    const entry = openFiles.get(fd);
+    if (entry === undefined) throw Object.assign(new Error(`EBADF: bad file descriptor, write`), { code: "EBADF", errno: -9, syscall: "write" });
+    if (!entry.flags.includes("w") && !entry.flags.includes("a") && !entry.flags.includes("+")) {
+      throw Object.assign(new Error(`EBADF: bad file descriptor, write (fd ${fd} for '${entry.path}' was opened "${entry.flags}")`), {
+        code: "EBADF",
+        errno: -9,
+        syscall: "write",
+      });
+    }
+
+    // Node's two shapes: (fd, string[, position[, encoding]]) and (fd, buffer[, offset[, length[, position]]]).
+    let bytes: Uint8Array;
+    let start: number;
+    if (typeof data === "string") {
+      bytes = new TextEncoder().encode(data);
+      start = data.length === 0 ? entry.position : typeof offsetOrPosition === "number" ? offsetOrPosition : entry.position;
+    } else {
+      const offset = typeof offsetOrPosition === "number" ? offsetOrPosition : 0;
+      const length = typeof lengthOrEncoding === "number" ? lengthOrEncoding : data.byteLength - offset;
+      bytes = data.subarray(offset, offset + length);
+      start = typeof position === "number" ? position : entry.position;
+    }
+    // "a" means every write goes to the end, whatever position was passed: that is what the flag promises.
+    if (entry.flags.includes("a")) start = currentSize(entry.path);
+
+    const existing = readBytes(entry.path);
+    const end = start + bytes.byteLength;
+    const merged = new Uint8Array(Math.max(existing.byteLength, end));
+    merged.set(existing);
+    merged.set(bytes, start);
+    vfs.writeFileSync(entry.path, merged);
+    if (typeof position !== "number" || entry.flags.includes("a")) entry.position = end;
+    return bytes.byteLength;
   },
 
   /** Callback `readdir`. The error, when there is one, is the same mapped error the sync form throws: one source of truth for the code. */
@@ -1504,7 +1564,11 @@ export const createFsShim = (
     close: (fd, callback) => inner.close(fd, callback),
     closeSync: (fd) => inner.closeSync(fd),
     readSync: (fd) => inner.readSync(fd),
-    writeSync: (fd) => inner.writeSync(fd),
+    writeSync: (fd, data, offsetOrPosition, lengthOrEncoding, position) =>
+      inner.writeSync(fd, data, offsetOrPosition, lengthOrEncoding, position),
+    // W-35: an async member must deliver a filesystem CONDITION to its callback, never throw at its call site. Node's promise wrapper
+    // would turn such a throw into a rejection of the promisified call; a bare rethrow escapes it and abandons the caller, which is how
+    // vite's config parse died on a `/tsconfig.json` that does not exist. `deliver` invokes the callback outside the try and at most once.
     stat: (path, callback) =>
       deliver(callback, () => {
         inner.stat(at(path), callback);
