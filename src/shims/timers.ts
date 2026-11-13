@@ -2,12 +2,13 @@
  * `node:timers` and `node:timers/promises`, over THIS runtime's scheduler.
  *
  * The wiring hole this closes, measured by the audit and reproduced here: `require("timers")` threw MODULE_NOT_FOUND while the implementation
- * it would serve already existed in the tree (src/shims/presets.ts imports a timers preset and documents it as an approved substrate). A
+ * it would serve already existed in the tree (an unused preset module imported a timers preset and documented it as an approved
+ * substrate; that module was never wired and was removed as dead code under P0-6). A
  * missing feature and a missing line in a table look identical at the call site, and this was the second: `setTimeout` was available as a
  * GLOBAL the whole time, because the run installs scheduler-backed globals, and the module that is supposed to export the same function
  * could not be loaded at all.
  *
- * WHY THE SCHEDULER AND NOT THE PRESET: the preset in presets.ts delegates to the platform's `globalThis.setTimeout`. That is the wrong clock
+ * WHY THE SCHEDULER AND NOT A PRESET: such a preset delegates to the platform's `globalThis.setTimeout`. That is the wrong clock
  * for a program running under the virtual scheduler. A program that mixes the two would see `Date.now()` jump 900 ms for a timer that fired in
  * a microsecond, and unref'd timers would keep the host alive rather than the virtual loop. So the same source of truth as the globals is
  * used, and virtual time, ref/unref and the budget all behave as they do for `setTimeout` written bare.

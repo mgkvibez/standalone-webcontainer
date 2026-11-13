@@ -26,7 +26,7 @@ jobs:
       - name: Install and typecheck (three lanes)
         run: npm ci && npm run typecheck
       - name: Guards (forbidden identifiers, licences)
-        run: npm run guard:identifiers && npm run guard:licences
+        run: npm run guard:identifiers && npm run guard:modules && npm run guard:licences
       - name: Test
         run: npm run test:report
       - name: Test count matches the README

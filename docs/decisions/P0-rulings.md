@@ -21,7 +21,7 @@ re-litigated below; this table exists so that no later reader mistakes it for st
 | P0-3 | Accept ADR-0013's supersession (real timers)? | **Accepted** | Phase 1, with the event loop |
 | P0-4 | Accept ADR-0012's supersession (native ESM)? | **Accepted** | Phase 5 |
 | P0-5 | Amend ADR-0004 D-3 to `process.platform = "linux"`? | **Accepted** | With the process lane |
-| P0-6 | `src/shims/presets.ts`: wire or delete? | **Accepted** | **Inventory delivered 2026-11-13** (`docs/audit/p0-6-shim-inventory.md`); the ruling itself is still pending |
+| P0-6 | `src/shims/presets.ts`: wire or delete? | **Ruled 2026-11-13: delete** | Deleted with `src/runtime/envelope.ts` and the `unenv` dependency (PR #92); inventory in `docs/audit/p0-6-shim-inventory.md` |
 | P0-7 | Accept ADR-0016's supersession (real install)? | **Accepted** | Phase 7 |
 | P0-8 | Accept ADR-0019 (cross-origin runtime)? | **Accepted** | When the runtime origin exists |
 | P0-9 | Freeze the 20 fixtures? | **Accepted** | Before the next gate reading |
@@ -88,6 +88,14 @@ honesty about what we are not.
 **P0-6. `src/shims/presets.ts`: wire or delete?** Recommendation: do not delete yet — open PR #6 wires it into the shim
 layer. Rule when that PR is resolved: either it lands and the file is live, or it closes and the file and the `unenv`
 dependency are removed together. Leaving it dead is the worst of the three.
+
+> **RULED 2026-11-13: DELETE.** The owner authorised removal after the inventory above, and the condition this ruling set has
+> been met: PR #6 landed and nothing was wired to it, PR #7 is closed as superseded, so the file had no future consumer. Deleted
+> in one change (PR #92) with `src/runtime/envelope.ts`, the two test files that were the only importers, and the `unenv`
+> dependency: 6 lockfile entries removed, 0 added. The guard that would have caught the original state now exists
+> (`npm run guard:modules`, `tools/checks/module-reachability.ts`) and was mutation-checked against merged `main`, where it
+> reports exactly these two modules and fails. `W-11` is closed with the commit; the same guard found seven further stranded
+> modules that predate this ruling, recorded as `W-37` and deliberately left alone.
 
 > **Inventory, 2026-11-13.** The question is now answerable, because PR #7 is closed. `docs/audit/p0-6-shim-inventory.md` assesses
 > the three orphaned artefacts file by file, with what each one costs and what breaks if it goes: `src/shims/presets.ts`,

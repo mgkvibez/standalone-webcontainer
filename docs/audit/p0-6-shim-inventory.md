@@ -1,6 +1,12 @@
 # P0-6 inventory: the orphaned shim layer
 
-**Date:** 2026-11-13. **Status:** inventory and recommendation only. **Nothing has been deleted or migrated.**
+**Date:** 2026-11-13. **Status:** ruled and **executed** (PR #92). §5's recommendation was authorised by the owner and carried out
+in one change: `src/shims/presets.ts`, `src/runtime/envelope.ts`, the two test files that were their only importers, and the
+`unenv` dependency. Measured on the merged tree before deletion, and again after: 6 lockfile entries removed (`unenv`, `consola`,
+`defu`, `mime`, `node-fetch-native`, unenv's nested `pathe` 1.1.2), 0 added; the 18 tests were the only importers of either module;
+the browser bundle was unchanged (neither module was in it). The regression guard this inventory's §5 implied now exists:
+`npm run guard:modules` fails if a `src/` module is reachable only from tests, and it was verified against merged `main`, where it
+reports exactly these two modules. The original text below is unchanged; it records what was measured before the ruling.
 **Baseline:** `main` @ `ca26cc0`, clean tree. **Owner's question (P0-6):** "`src/shims/presets.ts`: wire or delete?"
 
 The ruling has been open since 2026-11-08 because it was waiting on PR #6 (which landed) and then on PR #7 (closed as

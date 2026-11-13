@@ -64,6 +64,11 @@ question about a currently-dead file; it is a question about what to do **when P
 `P0-rulings.md` against a branch without the file will conclude the transfer already happened and the ruling is moot.
 It is not. The ruling now carries this note inline.
 
+**Resolved 2026-11-13.** PR #6 landed without wiring anything to the file, PR #7 was closed as superseded, and the owner ruled
+P0-6 **delete**. `src/shims/presets.ts`, `src/runtime/envelope.ts` and the `unenv` dependency are gone (PR #92), so the file is
+now absent on `main` for the opposite reason: it was removed rather than never created. A reader who meets `P0-6` in an older
+document should read the ruled entry in `P0-rulings.md`, not this paragraph, as the current state.
+
 ## The same trap, generalised
 
 Every audit of this project so far reviewed a snapshot whose commit was unnamed, which is how three audits in a row
