@@ -86,21 +86,23 @@ test("a reload recovers the project, rebuilds the installed tree from the lockfi
   await expect(page.locator("#scrollback")).toContainText("restoring dependencies from /package-lock.json", { timeout: 300_000 });
   await expect(page.locator("#scrollback")).toContainText(/added \d+ package\(s\) from registry\.npmjs\.org/, { timeout: 300_000 });
 
-  // 3. the rebuild is real: the files are there, and react is the version the lockfile pinned
-  await page.fill("#command", "ls /node_modules/react");
-  await page.press("#command", "Enter");
-  await expect(page.locator("#scrollback")).toContainText("package.json", { timeout: 60_000 });
-
-  const secondInstall = await page.evaluate(() => (window as unknown as Handles).__registry.stats?.());
-  console.log(`after rebuild: ${JSON.stringify(secondInstall)}`);
-  // The counters are cumulative for the page's lifetime, so a rebuild that downloaded nothing is visible as no change in tarball requests.
-  if (firstInstall !== undefined && secondInstall !== undefined) {
-    expect(secondInstall.tarballRequests).toBeGreaterThanOrEqual(firstInstall.tarballRequests);
-  }
-
-  // 4. the application still runs, from a lockfile-restored tree
+  // 3. the rebuild is real. Proven by REQUIRING the package, not by `ls`: `ls` reads the project store, which is the page's truth and never holds
+  // `node_modules` - the installed tree is the kernel's overlay. Asserting on `ls` here failed with "no such directory" while the rebuild had in fact
+  // just added three packages, which is the difference between the two filesystems being visible in one place.
   await createFile(page, "/check.js", "const react = require('react');\nconsole.log('REACT_VERSION', react.version);\n");
   await page.fill("#command", "node /check.js");
   await page.press("#command", "Enter");
   await expect(page.locator("#scrollback")).toContainText(/REACT_VERSION 1[89]\./, { timeout: 120_000 });
+
+  const secondInstall = await page.evaluate(() => (window as unknown as Handles).__registry.stats?.());
+  console.log(`after rebuild: ${JSON.stringify(secondInstall)}`);
+  // The counters belong to the page, so they restart at the reload - and that is what makes them worth asserting on: the rebuilt tree has to be zero
+  // network requests and one cache hit per tarball the first install downloaded. A cache hit is not a trust granted: the installer re-verifies every
+  // tarball against `dist.integrity` on every install, hit or miss, so these three were checked again here.
+  expect(secondInstall).toBeDefined();
+  expect(secondInstall?.metadataRequests).toBe(0);
+  expect(secondInstall?.tarballRequests).toBe(0);
+  expect(secondInstall?.bytesDownloaded).toBe(0);
+  expect(secondInstall?.tarballCacheHits).toBe(firstInstall?.tarballRequests ?? 0);
+
 });
