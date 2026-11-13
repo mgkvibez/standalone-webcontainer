@@ -33,7 +33,7 @@ import {
 } from "./lockfile.js";
 import { compareVersions, isRangeExpression, maxSatisfying } from "./semver-range.js";
 import { DEFAULT_TAR_LIMITS, extractTarball, stripTopLevelDirectory, type TarLimits } from "./tarball.js";
-import { computeIntegrity, sha512Base64 } from "./digest.js";
+import { computeIntegrity, digestBase64, digestHex, type DigestAlgorithm } from "./digest.js";
 import { resolvedRange, substitutionFor, SubstitutionError, type SubstitutionUse } from "./substitutions.js";
 
 export interface PackumentVersion {
@@ -48,7 +48,24 @@ export interface PackumentVersion {
   /** npm's platform fields. A package that enumerates real operating systems cannot run in a browser. */
   readonly os?: readonly string[];
   readonly cpu?: readonly string[];
-  readonly dist: { readonly tarball: string; readonly integrity?: string };
+  /**
+   * npm's peer contract. Read and acted on rather than ignored: a package whose peer is absent at run time is a package that loads and then
+   * fails on a `require` the user never wrote, and reporting that as a successful install is the silent wrong tree the resolver refuses.
+   */
+  readonly peerDependencies?: Record<string, string>;
+  /** Per-peer metadata. `optional: true` is npm's way of saying "install it if you can, do not fail the install if you cannot". */
+  readonly peerDependenciesMeta?: Record<string, { readonly optional?: boolean }>;
+  /**
+   * npm's own summary flag for "this package declares an install script". Read so a skipped script is *reported*: the abbreviated document
+   * does not carry the script bodies, and a package that needed one and did not get it must not look like a clean install.
+   */
+  readonly hasInstallScript?: boolean;
+  readonly dist: {
+    readonly tarball: string;
+    readonly integrity?: string;
+    /** npm's older sha1 digest, used as a fallback when a package predates `dist.integrity`. */
+    readonly shasum?: string;
+  };
 }
 
 export interface Packument {
@@ -130,12 +147,42 @@ export interface InstallReport {
    */
   readonly usedLockfile: boolean;
   /**
+   * Every peer edge the tree satisfies, with the version that satisfies it.
+   *
+   * Reported rather than assumed: a peer arrangement that was checked and held is a different claim from one nobody looked at, and the reader of
+   * an install log is entitled to tell them apart.
+   */
+  readonly peers: readonly PeerReport[];
+  /**
+   * Packages that declare an install script, which this runtime deliberately never runs.
+   *
+   * A list rather than a count, because the next question a person asks is "which one?", and a package whose postinstall was skipped may well be
+   * the reason the app fails a minute later. Empty is the ordinary answer.
+   */
+  readonly lifecycle: readonly LifecycleReport[];
+  /**
    * Every substitution this install applied, in the order it applied them.
    *
    * Empty is the ordinary answer. A non-empty list means the tree does not contain the package someone asked for, and a reader is
    * entitled to know that without diffing tarballs: the reason travels with the record.
    */
   readonly substitutions: readonly SubstitutionUse[];
+}
+
+/** One peer requirement that the installed tree satisfies. */
+export interface PeerReport {
+  readonly name: string;
+  readonly range: string;
+  /** `<name>@<version>` of the package that declared the peer. */
+  readonly requiredBy: string;
+  /** The installed version that satisfies it. */
+  readonly version: string;
+}
+
+/** One package whose install script was not run, named so the omission is attributable. */
+export interface LifecycleReport {
+  readonly name: string;
+  readonly version: string;
 }
 
 export class InstallError extends Error {
@@ -164,6 +211,8 @@ interface Request {
   readonly requiredBy: string;
   /** An `optionalDependencies` edge: failure is a warning, and a platform mismatch is expected. */
   readonly optional: boolean;
+  /** Reached through `peerDependencies`. A failure here is reported as a peer conflict, not as a version that does not exist. */
+  readonly peer?: boolean;
 }
 
 function joinPath(...parts: readonly string[]): string {
@@ -177,25 +226,85 @@ function stripTrailingSlash(path: string): string {
 }
 
 /**
- * The classic npm `dist.integrity` format is `sha512-<base64>`, sometimes with several space-separated
- * entries. A missing value is tolerated with a warning (very old packages predate it); a *mismatch* is fatal.
+ * The SRI algorithms this runtime verifies, strongest first.
+ *
+ * An SRI string may list several digests of the same bytes (`sha512-... sha1-...`), and any one match is enough: they are alternatives, not a
+ * chain. Naming the list here is what makes "unsupported algorithm" a decision rather than an accident.
  */
-async function verifyIntegrity(bytes: Uint8Array, integrity: string | undefined): Promise<string | null> {
-  if (integrity === undefined || integrity.trim() === "") return "no integrity field published; bytes unverified";
-  const expected = integrity
-    .trim()
-    .split(/\s+/)
-    .map((entry) => entry.split("-"))
-    .filter((pair) => pair[0] === "sha512")
-    .map((pair) => pair[1] ?? "");
-  if (expected.length === 0) return `unsupported integrity algorithm in ${integrity}; bytes unverified`;
+const SRI_ALGORITHMS: readonly { readonly prefix: string; readonly algorithm: DigestAlgorithm }[] = [
+  { prefix: "sha512", algorithm: "SHA-512" },
+  { prefix: "sha384", algorithm: "SHA-384" },
+  { prefix: "sha256", algorithm: "SHA-256" },
+  { prefix: "sha1", algorithm: "SHA-1" },
+];
 
-  const digest = await sha512Base64(bytes);
-  if (digest === null) return "no crypto.subtle available; bytes unverified";
-  if (!expected.includes(digest)) {
-    throw new InstallError("INTEGRITY_MISMATCH", `sha512 does not match dist.integrity (${integrity})`);
+/**
+ * Verify a tarball against the integrity metadata the registry published for it.
+ *
+ * The policy, in the order it applies - every branch is explicit, because "we could not check, so we installed it anyway" is the failure this
+ * function exists to remove:
+ *
+ * 1. **Integrity present, supported algorithm**: every listed digest of a supported algorithm is computed and one must match. A mismatch throws.
+ * 2. **Integrity present, no supported algorithm**: refused (`UNSUPPORTED_INTEGRITY`). Silently installing bytes whose advert says only
+ *    `sha3-...` is the same as installing unverified bytes, with a worse paper trail.
+ * 3. **Integrity present, no `crypto.subtle`**: refused (`INTEGRITY_UNAVAILABLE`). The platform cannot check, so it must not claim it did.
+ * 4. **Integrity absent, `dist.shasum` present**: verified against sha1 and recorded as such. This is npm's own fallback for packages that
+ *    predate integrity metadata.
+ * 5. **Nothing published at all**: installed with an explicit warning, which is what npm does and what a very old package leaves us.
+ *
+ * Returns a warning string when the bytes were installed without a strong digest, and null when they were verified.
+ */
+async function verifyIntegrity(bytes: Uint8Array, dist: PackumentVersion["dist"]): Promise<string | null> {
+  const advertised = (dist.integrity ?? "").trim();
+  if (advertised === "") {
+    const shasum = (dist.shasum ?? "").trim();
+    if (shasum !== "") {
+      // Hex, not base64: `dist.shasum` is npm's older hex sha1, and comparing it against a base64 digest reports a mismatch on correct bytes.
+      const digest = await digestHex("SHA-1", bytes);
+      if (digest === null) {
+        throw new InstallError(
+          "INTEGRITY_UNAVAILABLE",
+          "this platform provides no crypto.subtle, so the published sha1 could not be checked",
+        );
+      }
+      if (digest !== shasum) {
+        throw new InstallError("INTEGRITY_MISMATCH", `sha1 does not match dist.shasum (${shasum})`);
+      }
+      return `verified against dist.shasum (sha1) only; no dist.integrity published`;
+    }
+    return "no integrity field published; bytes unverified";
   }
-  return null;
+
+  const entries = advertised
+    .split(/\s+/)
+    .map((token) => {
+      const separator = token.indexOf("-");
+      return separator === -1
+        ? { prefix: "", value: "" }
+        : { prefix: token.slice(0, separator), value: token.slice(separator + 1) };
+    })
+    .filter((entry) => entry.value !== "");
+  const supported = entries.filter((entry) => SRI_ALGORITHMS.some((known) => known.prefix === entry.prefix));
+  if (supported.length === 0) {
+    throw new InstallError(
+      "UNSUPPORTED_INTEGRITY",
+      `${advertised} names no algorithm this runtime can check (sha512, sha384, sha256, sha1)`,
+    );
+  }
+
+  for (const entry of supported) {
+    const known = SRI_ALGORITHMS.find((candidate) => candidate.prefix === entry.prefix);
+    if (known === undefined) continue;
+    const digest = await digestBase64(known.algorithm, bytes);
+    if (digest === null) {
+      throw new InstallError(
+        "INTEGRITY_UNAVAILABLE",
+        `this platform provides no crypto.subtle, so ${entry.prefix} could not be checked`,
+      );
+    }
+    if (digest === entry.value) return null;
+  }
+  throw new InstallError("INTEGRITY_MISMATCH", `${supported.map((entry) => entry.prefix).join("/")} does not match dist.integrity (${advertised})`);
 }
 
 /** Choose a version for a range, honouring a dist-tag if the range names one. */
@@ -447,6 +556,9 @@ export async function installDependencies(
       version: entry.version,
       dist: { tarball: entry.resolved, ...(entry.integrity === undefined ? {} : { integrity: entry.integrity }) },
       ...(entry.dependencies === undefined ? {} : { dependencies: entry.dependencies }),
+      ...(entry.peerDependencies === undefined ? {} : { peerDependencies: entry.peerDependencies }),
+      ...(entry.peerDependenciesMeta === undefined ? {} : { peerDependenciesMeta: entry.peerDependenciesMeta }),
+      ...(entry.hasInstallScript === true ? { hasInstallScript: true } : {}),
       // Carried so the platform filter runs on locked entries as well. A lockfile from a local install lists every
       // OS variant of a package like esbuild, and those must be skipped exactly as a fresh resolution would skip them.
       ...(entry.os === undefined ? {} : { os: entry.os }),
@@ -595,6 +707,14 @@ export async function installDependencies(
           queue.push({ name, range, fromDir: targetDir, requiredBy: identifier, optional: false });
         }
 
+        // Peers are walked on every install, lockfile or not, and they are walked from the dependent's own directory: a peer is resolved where
+        // the dependent stands (npm's rule), and a copy installed at the root that the dependent cannot see would be a peer that looks present
+        // in the tree and is absent at run time.
+        for (const [name, range] of Object.entries(chosen.peerDependencies ?? {})) {
+          const optionalPeer = chosen.peerDependenciesMeta?.[name]?.optional === true;
+          queue.push({ name, range, fromDir: targetDir, requiredBy: `${identifier} (peer)`, optional: optionalPeer, peer: true });
+        }
+
         // Optional edges are only discovered from the registry. With a lockfile the tree is already fixed, so
         // re-walking optional edges would install packages the lockfile deliberately does not contain.
         if (!fromLock) {
@@ -608,6 +728,15 @@ export async function installDependencies(
         const detail = error instanceof Error ? error.message : String(error);
         warnings.push(`${request.name} skipped (optional, required by ${request.requiredBy}): ${detail}`);
         continue;
+      }
+      // A peer that cannot be resolved is not "no version satisfies" in the user's own dependency list: it is a requirement some OTHER package
+      // imposed, so the message has to name that package or the reader will go looking for a dependency they never wrote.
+      if (request.peer === true) {
+        const detail = error instanceof Error ? error.message.replace(/^[A-Z_]+: /, "") : String(error);
+        throw new InstallError(
+          "PEER_DEPENDENCY_CONFLICT",
+          `${request.name}@"${request.range}" is required as a peer by ${request.requiredBy}, and it cannot be installed: ${detail}`,
+        );
       }
       throw error;
     }
@@ -624,7 +753,7 @@ export async function installDependencies(
     const compressed = await options.registry.tarball(placement.chosen.dist.tarball);
 
     if (verify) {
-      const problem = await verifyIntegrity(compressed, placement.chosen.dist.integrity);
+      const problem = await verifyIntegrity(compressed, placement.chosen.dist);
       if (problem !== null) warnings.push(`${placement.name}@${placement.version}: ${problem}`);
     }
     // Every lockfile entry gets an integrity value, including for packages that publish none: a lockfile without
@@ -646,6 +775,48 @@ export async function installDependencies(
 
     packages.push({ name: placement.name, version: placement.version, path: directory });
     written.push({ ...entry, integrity });
+  }
+
+  /**
+   * The peer contract, checked against the tree that was actually written rather than against the plan.
+   *
+   * Checked from each package's own directory with Node's search order, because that is what the program will do at run time: a peer satisfied
+   * only by a copy the dependent cannot see is exactly the silent wrong tree this check exists to refuse. A required peer that is missing throws
+   * rather than warns - the install did not produce a tree the package can run in.
+   */
+  const peers: PeerReport[] = [];
+  const lifecycle: LifecycleReport[] = [];
+  for (const entry of written) {
+    const { placement } = entry;
+    const directory = joinPath(placement.hostDir, placement.name);
+    for (const [peerName, peerRange] of Object.entries(placement.chosen.peerDependencies ?? {})) {
+      const satisfied = findExisting(directory, peerName, peerRange);
+      if (satisfied === undefined) {
+        if (placement.chosen.peerDependenciesMeta?.[peerName]?.optional === true) {
+          warnings.push(`${placement.name}@${placement.version}: optional peer ${peerName}@"${peerRange}" is not installed`);
+          continue;
+        }
+        throw new InstallError(
+          "PEER_DEPENDENCY_CONFLICT",
+          `${placement.name}@${placement.version} requires peer ${peerName}@"${peerRange}", and nothing it can see satisfies it`,
+        );
+      }
+      peers.push({
+        name: peerName,
+        range: peerRange,
+        requiredBy: `${placement.name}@${placement.version}`,
+        version: satisfied.version,
+      });
+    }
+    if (placement.chosen.hasInstallScript === true) lifecycle.push({ name: placement.name, version: placement.version });
+  }
+  if (lifecycle.length > 0) {
+    // Named in a warning as well as returned, so the terminal line exists even for a caller that only prints warnings.
+    warnings.push(
+      `${lifecycle.length} package(s) declare install scripts, which are not run in this runtime: ${lifecycle
+        .map((entry) => `${entry.name}@${entry.version}`)
+        .join(", ")}`,
+    );
   }
 
   const lockPackages: Record<string, LockfilePackage> = {};
@@ -674,11 +845,20 @@ export async function installDependencies(
       resolved?: string;
       integrity?: string;
       dependencies?: Record<string, string>;
+      peerDependencies?: Record<string, string>;
+      peerDependenciesMeta?: Record<string, { readonly optional?: boolean }>;
+      hasInstallScript?: boolean;
       optional?: boolean;
     } = { version: placement.version, resolved: placement.chosen.dist.tarball };
     if (entry.integrity !== null) lockedEntry.integrity = entry.integrity;
     const declared = placement.chosen.dependencies;
     if (declared !== undefined && Object.keys(declared).length > 0) lockedEntry.dependencies = declared;
+    // The peer contract is part of what the tree means, so a lockfile that dropped it would describe a different tree than the one on disk.
+    const declaredPeers = placement.chosen.peerDependencies;
+    if (declaredPeers !== undefined && Object.keys(declaredPeers).length > 0) lockedEntry.peerDependencies = declaredPeers;
+    const declaredPeerMeta = placement.chosen.peerDependenciesMeta;
+    if (declaredPeerMeta !== undefined && Object.keys(declaredPeerMeta).length > 0) lockedEntry.peerDependenciesMeta = declaredPeerMeta;
+    if (placement.chosen.hasInstallScript === true) lockedEntry.hasInstallScript = true;
     // Only recorded for packages actually reached through an optional edge, which is what npm means by it.
     if (entry.optional) lockedEntry.optional = true;
     lockPackages[key] = lockedEntry;
@@ -696,7 +876,7 @@ export async function installDependencies(
     options.vfs.writeFileSync(joinPath(root, "package-lock.json"), serializeLockfile(lockfile));
   }
 
-  return { packages, warnings, lockfile, usedLockfile: locked !== null, substitutions };
+  return { packages, warnings, lockfile, usedLockfile: locked !== null, substitutions, peers, lifecycle };
 }
 
 /** Human-readable platform description, used in the messages that refuse or skip a package. */

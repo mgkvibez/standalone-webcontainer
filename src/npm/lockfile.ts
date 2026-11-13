@@ -29,6 +29,17 @@ export interface LockfilePackage {
   /** Written when the package was reached through an optionalDependencies edge. */
   readonly optional?: boolean;
   /**
+   * The peer contract this package declares.
+   *
+   * Recorded because a lockfile that dropped it would describe a tree whose peers nobody checked, and because npm's own lockfiles carry it: the
+   * reader already had to tolerate the field, so writing it costs nothing and makes a repeat install check the same contract the first one did.
+   */
+  readonly peerDependencies?: Record<string, string>;
+  /** Per-peer metadata, so `optional: true` survives a round trip rather than turning a skippable peer into a fatal one. */
+  readonly peerDependenciesMeta?: Record<string, { readonly optional?: boolean }>;
+  /** npm's "this package declares an install script" flag, carried so a reinstall reports the same skipped scripts the first install did. */
+  readonly hasInstallScript?: boolean;
+  /**
    * npm records the platform fields of a published package. We never write them, because packages that cannot run
    * in a browser are filtered out before they reach the tree, but we must **read** them: a lockfile produced by a
    * local `npm install` contains every platform variant of esbuild, and without this the browser would download
@@ -77,6 +88,21 @@ function stringArray(value: unknown, where: string): readonly string[] | undefin
     throw new LockfileError("INVALID_LOCKFILE", `${where} is not an array of strings`);
   }
   return value as readonly string[];
+}
+
+function peerMeta(value: unknown, where: string): Record<string, { readonly optional?: boolean }> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new LockfileError("INVALID_LOCKFILE", `${where} is not an object`);
+  const result: Record<string, { readonly optional?: boolean }> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (!isRecord(entry)) throw new LockfileError("INVALID_LOCKFILE", `${where}.${key} is not an object`);
+    const optional = entry["optional"];
+    if (optional !== undefined && typeof optional !== "boolean") {
+      throw new LockfileError("INVALID_LOCKFILE", `${where}.${key}.optional is not a boolean`);
+    }
+    result[key] = optional === undefined ? {} : { optional };
+  }
+  return result;
 }
 
 function stringMap(value: unknown, where: string): Record<string, string> | undefined {
@@ -134,6 +160,9 @@ export function parseLockfile(text: string): Lockfile {
       devDependencies?: Record<string, string>;
       os?: readonly string[];
       cpu?: readonly string[];
+      peerDependencies?: Record<string, string>;
+      peerDependenciesMeta?: Record<string, { readonly optional?: boolean }>;
+      hasInstallScript?: boolean;
     } = {};
     const version_ = optionalString(value, "version", `packages["${key}"]`);
     const resolved = optionalString(value, "resolved", `packages["${key}"]`);
@@ -143,6 +172,12 @@ export function parseLockfile(text: string): Lockfile {
     const devDependencies = stringMap(value["devDependencies"], `packages["${key}"].devDependencies`);
     const os = stringArray(value["os"], `packages["${key}"].os`);
     const cpu = stringArray(value["cpu"], `packages["${key}"].cpu`);
+    const peerDependencies = stringMap(value["peerDependencies"], `packages["${key}"].peerDependencies`);
+    const peerDependenciesMeta = peerMeta(value["peerDependenciesMeta"], `packages["${key}"].peerDependenciesMeta`);
+    const hasInstallScript = value["hasInstallScript"];
+    if (hasInstallScript !== undefined && typeof hasInstallScript !== "boolean") {
+      throw new LockfileError("INVALID_LOCKFILE", `packages["${key}"].hasInstallScript is not a boolean`);
+    }
     const optional = value["optional"];
     if (optional !== undefined && typeof optional !== "boolean") {
       throw new LockfileError("INVALID_LOCKFILE", `packages["${key}"].optional is not a boolean`);
@@ -157,6 +192,9 @@ export function parseLockfile(text: string): Lockfile {
     if (optional !== undefined) entry.optional = optional;
     if (os !== undefined) entry.os = os;
     if (cpu !== undefined) entry.cpu = cpu;
+    if (peerDependencies !== undefined) entry.peerDependencies = peerDependencies;
+    if (peerDependenciesMeta !== undefined) entry.peerDependenciesMeta = peerDependenciesMeta;
+    if (hasInstallScript !== undefined) entry.hasInstallScript = hasInstallScript;
     packages[key] = entry;
   }
 
@@ -199,7 +237,10 @@ export function serializeLockfile(lockfile: Lockfile): string {
       resolved?: string;
       integrity?: string;
       optional?: boolean;
+      hasInstallScript?: boolean;
       dependencies?: Record<string, string>;
+      peerDependencies?: Record<string, string>;
+      peerDependenciesMeta?: Record<string, { readonly optional?: boolean }>;
       devDependencies?: Record<string, string>;
     } = {};
     if (entry.name !== undefined) ordered.name = entry.name;
@@ -207,7 +248,16 @@ export function serializeLockfile(lockfile: Lockfile): string {
     if (entry.resolved !== undefined) ordered.resolved = entry.resolved;
     if (entry.integrity !== undefined) ordered.integrity = entry.integrity;
     if (entry.optional !== undefined) ordered.optional = entry.optional;
+    if (entry.hasInstallScript !== undefined) ordered.hasInstallScript = entry.hasInstallScript;
     if (entry.dependencies !== undefined) ordered.dependencies = sortMap(entry.dependencies);
+    if (entry.peerDependencies !== undefined) ordered.peerDependencies = sortMap(entry.peerDependencies);
+    if (entry.peerDependenciesMeta !== undefined) {
+      ordered.peerDependenciesMeta = Object.fromEntries(
+        Object.keys(entry.peerDependenciesMeta)
+          .sort()
+          .map((peer) => [peer, entry.peerDependenciesMeta?.[peer] ?? {}]),
+      );
+    }
     if (entry.devDependencies !== undefined) ordered.devDependencies = sortMap(entry.devDependencies);
     packages[key] = ordered;
   }

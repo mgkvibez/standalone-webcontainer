@@ -129,6 +129,13 @@ export interface PackumentVersionInput {
   readonly cpu?: readonly string[];
   /** Published as dist.integrity, so a mismatch can be tested. */
   readonly integrity?: string;
+  /** Published as dist.shasum, npm's older sha1 digest, used for packages that predate integrity metadata. */
+  readonly shasum?: string;
+  /** npm's peer contract, which the resolver now walks and checks. */
+  readonly peerDependencies?: Record<string, string>;
+  readonly peerDependenciesMeta?: Record<string, { readonly optional?: boolean }>;
+  /** npm's summary flag for "this package declares an install script". */
+  readonly hasInstallScript?: boolean;
 }
 
 /** Build the packument shape the installer reads. */
@@ -146,11 +153,15 @@ export function packument(
       dist: {
         tarball: `https://registry.test/${name}/-/${name}-${entry.version}.tgz`,
         ...(entry.integrity === undefined ? {} : { integrity: entry.integrity }),
+        ...(entry.shasum === undefined ? {} : { shasum: entry.shasum }),
       },
       // Optional and platform fields pass through, because the browser-compatibility filter reads them.
       ...(entry.optionalDependencies === undefined ? {} : { optionalDependencies: entry.optionalDependencies }),
       ...(entry.os === undefined ? {} : { os: entry.os }),
       ...(entry.cpu === undefined ? {} : { cpu: entry.cpu }),
+      ...(entry.peerDependencies === undefined ? {} : { peerDependencies: entry.peerDependencies }),
+      ...(entry.peerDependenciesMeta === undefined ? {} : { peerDependenciesMeta: entry.peerDependenciesMeta }),
+      ...(entry.hasInstallScript === true ? { hasInstallScript: true } : {}),
     };
   }
   return { name, "dist-tags": { latest: latest ?? versions[versions.length - 1]?.version ?? "0.0.0" }, versions: map };
