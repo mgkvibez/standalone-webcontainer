@@ -14,6 +14,8 @@
  * how a pid gets reused while its old Worker is still alive and writing to a stdout nobody reads.
  */
 
+import type { Refusal } from "../runtime/refusal.js";
+
 export type ProcessState = "queued" | "running" | "exited" | "failed" | "killed";
 
 const TERMINAL: readonly ProcessState[] = ["exited", "failed", "killed"];
@@ -41,6 +43,13 @@ export interface ProcessEntry<Handle = unknown> {
   exitCode?: number;
   /** Why it failed or was killed, so `ps` can explain itself instead of showing a bare state. */
   reason?: string;
+  /**
+   * The refusal that ended the process, when the runtime made one on purpose (ADR-0014).
+   *
+   * It belongs on the ENTRY, not only on the settle notification: `ps`, a change listener and a command boundary all read the table, and a
+   * refusal that existed only in one transient callback would be visible to whichever caller happened to be listening at that moment.
+   */
+  refusal?: Refusal;
 }
 
 export class UnknownProcessError extends Error {
@@ -136,7 +145,7 @@ export class ProcessTable<Handle = unknown> {
   transition(
     pid: number,
     to: ProcessState,
-    detail: { readonly exitCode?: number; readonly reason?: string } = {},
+    detail: { readonly exitCode?: number; readonly reason?: string; readonly refusal?: Refusal } = {},
   ): ProcessEntry<Handle> {
     const entry = this.get(pid);
     if (!TRANSITIONS[entry.state].includes(to)) throw new InvalidTransitionError(pid, entry.state, to);
@@ -146,6 +155,7 @@ export class ProcessTable<Handle = unknown> {
       entry.endedAt = this.#now();
       if (detail.exitCode !== undefined) entry.exitCode = detail.exitCode;
       if (detail.reason !== undefined) entry.reason = detail.reason;
+      if (detail.refusal !== undefined) entry.refusal = detail.refusal;
     }
     this.#onChange?.(entry);
     return entry;

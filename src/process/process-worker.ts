@@ -30,6 +30,7 @@ import type {
 import { relaySocket } from "./process-transport.js";
 import { createRemoteWatcher, realTimerScheduler } from "./remote-watch.js";
 import { InProcessRuntime } from "../runtime/in-process.js";
+import type { Refusal } from "../runtime/refusal.js";
 import { createTerminal, type Terminal } from "../terminal/pty.js";
 
 interface ProcessScope {
@@ -75,7 +76,14 @@ interface ResizeMessage {
 
 export type ProcessMessage =
   | { readonly type: "output"; readonly channel: "stdout" | "stderr"; readonly text: string }
-  | { readonly type: "exit"; readonly code: number }
+  /**
+   * The process settled, with the status it left behind.
+   *
+   * `refusal` is present only when the runtime declined a capability on purpose and the program did not handle it (ADR-0014). It travels as
+   * the refusal's own fields - code, capability, message, subject - and never as a sentence folded into stderr: the receiving side has to be
+   * able to tell a by-design refusal from a crash, and a message it must parse cannot do that.
+   */
+  | { readonly type: "exit"; readonly code: number; readonly refusal?: Refusal }
   | { readonly type: "failed"; readonly reason: string }
   /**
    * The scheduler's evidence for this program's run, sent before the exit so a command boundary can report it.
@@ -193,7 +201,13 @@ async function run(start: StartMessage): Promise<void> {
     });
 
     if (result.scheduler !== undefined) scope.postMessage({ type: "scheduler", evidence: result.scheduler });
-    scope.postMessage({ type: "exit", code: result.exitCode });
+    // The refusal is copied into the message as plain data. Structured clone strips the freeze, so the far side re-freezes it through
+    // `createRefusal`; what must NOT happen is the far side reading stderr and deciding for itself, which is how this got lost.
+    scope.postMessage({
+      type: "exit",
+      code: result.exitCode,
+      ...(result.refusal === undefined ? {} : { refusal: { ...result.refusal } }),
+    });
   } catch (error) {
     scope.postMessage({ type: "failed", reason: (error as Error)?.message ?? String(error) });
   }

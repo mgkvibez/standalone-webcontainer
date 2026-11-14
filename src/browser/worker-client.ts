@@ -12,6 +12,7 @@
  */
 
 import type { RuntimeClient, RuntimeRunOutcome, RuntimeRunRequest } from "../container/types.js";
+import { refusalFromWire } from "../runtime/refusal.js";
 import type { ClientMessage, RunRequest, ServerMessage } from "./protocol.js";
 
 interface Pending {
@@ -203,6 +204,9 @@ export class WorkerRuntimeClient implements RuntimeClient {
           const oldest = this.#live.keys().next();
           if (oldest.done !== true) this.#live.delete(oldest.value);
         }
+        // Validated and re-frozen on arrival: a structured clone carries the refusal's fields but neither its prototype nor its freeze, and a
+        // value that does not describe a refusal this runtime can produce becomes "no refusal" rather than a classification nobody can trace.
+        const refusal = refusalFromWire(message.refusal);
         pending.resolve({
           stdout: message.stdout,
           stderr: message.stderr,
@@ -211,6 +215,7 @@ export class WorkerRuntimeClient implements RuntimeClient {
           timedOut: message.timedOut,
           killed: false,
           ...(message.previewPorts === undefined ? {} : { previewPorts: message.previewPorts }),
+          ...(refusal === undefined ? {} : { refusal }),
         });
         return;
       case "error":

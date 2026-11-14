@@ -145,6 +145,9 @@ async function handleRun(request: RunRequest): Promise<void> {
       // be terminated) has none, and the field is `unknown` precisely so "no evidence" stays distinguishable from "zero".
       scheduler: target.schedulerOf(pid),
       ...(ports.length === 0 ? {} : { previewPorts: ports }),
+      // The refusal travels as its own fields, never as a sentence appended to `stderr`: the client has to tell a by-design refusal from a
+      // crash, and the only thing that can say so is the record the runtime made when it declined. Copied so what crosses is plain data.
+      ...(settled.refusal === undefined ? {} : { refusal: { ...settled.refusal } }),
     });
     // Output arrived as `chunk` messages as it was written; the capture above is the same stream, collected, so a result can never
     // disagree with what the terminal showed.
