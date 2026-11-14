@@ -1,0 +1,25 @@
+# Cloudflare Pages response headers.
+#
+# GENERATED FILE. Do not edit by hand: it is rendered from the isolation headers in `vite.config.ts`
+# (`ISOLATION_HEADERS`), which the dev server and `vercel.json` also send.
+#
+#   npm run headers:write    regenerate after changing vite.config.ts
+#   npm run headers:check    fail on drift (runs inside `npm run verify`)
+#
+# Why it has to be a file here: Pages does not read `vercel.json`, so this is the only way the deployed document
+# gets COOP/COEP and stays cross-origin isolated. Without them `SharedArrayBuffer` does not exist and the runtime
+# cannot boot. Each header name appears exactly once in this file, because Pages joins repeated names with a
+# comma; see tools/deploy/pages-headers.ts.
+
+/preview-sw.js
+  Cache-Control: no-store, no-cache, must-revalidate
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Resource-Policy: cross-origin
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer

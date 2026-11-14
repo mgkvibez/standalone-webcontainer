@@ -15,10 +15,12 @@
   "scripts": {
     "typecheck": "tsc --noEmit && tsc -p tsconfig.runtime.json --noEmit && tsc -p tsconfig.browser.json --noEmit",
     "test": "vitest run",
-    "verify": "npm run typecheck && npm run guard:identifiers && npm run guard:modules && npm run guard:licences && npm run test:report && npm run tests:count:check && npm run fixtures:check && npm run corpus:check && npm run diff:modules:strict",
+    "verify": "npm run typecheck && npm run guard:identifiers && npm run guard:modules && npm run guard:licences && npm run test:report && npm run tests:count:check && npm run fixtures:check && npm run corpus:check && npm run headers:check && npm run diff:modules:strict",
     "fixtures:freeze": "vite-node tools/freeze-fixtures.ts",
     "fixtures:check": "vite-node tools/freeze-fixtures.ts --check",
     "corpus:build": "vite-node tools/build-corpus.ts --write",
+    "headers:write": "vite-node tools/deploy/pages-headers-cli.ts --write",
+    "headers:check": "vite-node tools/deploy/pages-headers-cli.ts --check",
     "corpus:check": "vite-node tools/build-corpus.ts --check",
     "dev:browser": "vite",
     "build:browser": "vite build",
