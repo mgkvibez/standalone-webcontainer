@@ -7,6 +7,11 @@ enforce between origins and sites, plus what ADR-0019 specifies and W-19 still o
 Scope: compare the two approved candidate topologies for the preview tier and recommend one. The Worker itself is H2's
 next step and is not written yet.
 
+**Revision, 2026-11-14 (owner review).** Topology B is accepted. Two corrections applied to this document, both of which
+tighter wording would have avoided the first time: the `*.localhost` Chromium lane is no longer described as evidence of
+third-party service-worker behaviour (§3 now separates what that lane proves from what it does not), and §2 now states
+exactly which attacks B removes and which it leaves in place.
+
 ## The two designs
 
 Both designs keep the shapes the code already requires: the editor is one origin, the runtime is another (ADR-0019), and
@@ -55,7 +60,7 @@ and the ACM-versus-flat-naming trade in A. Those are the owner's, listed under "
 Before comparing designs it is worth stating what is load-bearing, because both designs must keep all of it.
 
 - **One origin per project.** The preview id is validated as 32 hex characters and the resolved origin is rejected if it
-  equals the editor origin (`src/browser/preview-origin.ts:33`, and `src/browser/preview-handshake.ts:24` refuses the same case from the caller's side). HTTP is refused outside `localhost`.
+  equals the editor origin (`src/browser/preview-origin.ts:33`, and `src/browser/preview-handshake.ts:24` refuses the same case from the caller's side). HTTP is refused outside `localhost` (`src/browser/preview-origin.ts:28`, so production previews are `https` only).
 - **The editor embeds that origin in an iframe and speaks to it over a `MessageChannel`.** The handshake mints a fresh
   `crypto.randomUUID()` nonce per connection, sets it on the iframe URL along with the expected port and the editor's own
   origin, and accepts a reply only when `event.origin`, `event.source === frame.contentWindow` and the nonce all match
@@ -112,16 +117,36 @@ Consider a future editor session cookie on `app.example.com` and user code runni
 
 Under B the same request is cross-site. `SameSite=Lax` cookies are not attached to cross-site subresource requests, and
 `SameSite=Strict` cookies are not attached at all. Chrome's third-party cookie work and Firefox's Total Cookie Protection
-add a second wall. The attack above fails at the browser, without us having to enumerate every endpoint.
+add a second wall. The browser drops the ambient credential before the request leaves, so the familiar CSRF primitive
+above does not exist, and that holds without us having to enumerate every endpoint.
 
-Two honest qualifiers:
+**What B does, stated exactly:** it puts the editor on a different *site* from the engine (runtime and previews), so the
+editor's session cookie stops being an ambient credential that a same-site preview can borrow. That is the whole of the
+guarantee, and it is worth having because it is enforced by the browser rather than by our code.
 
-- **This is a future risk, not a present one.** There is no session cookie today. A is not currently exploitable through
-  this path. The cost of A is paid the day authentication is added, at which point the hostname is already public.
-- **B is not a sandbox.** Cross-site boundaries stop *cookie and storage* reach, not HTTP reach: preview code can still
-  `fetch` an endpoint that takes no credentials, and any endpoint that accepts an unauthenticated write is equally
-  exposed in both designs. CORS is a response-side control and does not prevent the request being sent. Endpoint
-  authorisation is required regardless of topology.
+**What B does not do:**
+
+- **It does not block cross-site requests.** Preview code can still send requests anywhere; the browser only refuses to
+  attach credentials the cookie policy does not allow. Every request still arrives at whatever it addresses.
+- **It does not defeat a deliberately cross-site cookie.** A cookie set with `SameSite=None; Secure` is sent on
+  cross-site subresource requests by design, so if the editor ever sets one (an embed-friendly analytics or SSO cookie,
+  say), it is exposed to preview code in B exactly as it is in A. The rule that keeps B's guarantee is "the editor sets
+  no `SameSite=None` cookie for any authenticated purpose", and it needs to be stated where cookies are introduced.
+- **It does not cover unauthenticated actions.** An endpoint that accepts a write without a credential is equally
+  writable from a preview in either design.
+- **It does not stop a request being sent to an authenticated endpoint either.** CORS is a response-side control: it
+  decides whether the caller may *read* the response, not whether the request is made. A credentialed request the browser
+  does attach in some future configuration has still happened.
+- **It is not a sandbox.** Nothing in this document should be read as one.
+
+So endpoint authorisation, server-side CSRF protection (a token bound to the session, and `Origin` / `Sec-Fetch-Site`
+checks on state-changing requests) and a review of every cookie's `SameSite` value are required in both designs, and are
+strictly more important than the topology. B removes one class of ambient-credential attack; it does not remove the
+need for the controls.
+
+One further qualifier on timing: **this is a future risk, not a present one.** There is no session cookie today, so A is
+not currently exploitable through this path. The cost of A is paid the day authentication is added, at which point the
+hostname is already public.
 
 ## 3. localStorage, IndexedDB and service-worker isolation
 
@@ -144,13 +169,31 @@ Consequences worth knowing:
   interaction with the site as a first party (WebKit's full third-party cookie blocking announcement). Again: previews are
   ephemeral.
 - **The service worker is the one place where B carries genuine technical risk, not just a nuance.** The preview shell
-  registers a worker *from inside a third-party frame*. In A that frame is same-site, so it is not third-party at all
-  and the registration is ordinary. In B it is, and each browser treats third-party registrations differently:
-  Chrome partitions them (documented, and the framework lists the Service Worker API among the partitioned APIs), while
-  Safari's handling is the strictest in the market and must be measured rather than assumed. Our own browser lane proves
-  this works **in Chromium today** — the preview chain runs with the editor on `localhost` and the preview on
-  `<id>.preview.localhost`, which are already different sites by the PSL definition — but the suite installs Chromium
-  only. There is no Firefox or WebKit evidence for the cross-site case either way.
+  registers a worker *from inside a third-party frame*. In A that frame is same-site, so it is not a third-party context
+  and the registration is ordinary. In B it is third-party, and browsers treat third-party registrations differently:
+  Chrome partitions them (documented, and the Service Worker API is listed among the partitioned APIs), while Safari's
+  handling is the strictest in the market. If a browser refuses the registration, the preview shell has no router at all
+  and previews do not work there.
+
+  The existing browser lane is often described as if it settled this. It does not, and the distinction matters:
+
+  - **What the lane proves.** In Chromium, over `http://` on `*.localhost`, against the Vite dev server: a preview shell
+    on a host that is a **distinct origin** from the editor registers `/preview-sw.js`, that worker takes control of its
+    scope, serves `/preview/<port>/…` through the runtime transport, and the resulting document renders in an iframe
+    embedded from the editor origin with `crossOriginIsolated === true` and `SharedArrayBuffer` present. It also proves
+    the nested-COEP lesson: a document served into a cross-origin-isolated embedder must carry COOP and COEP itself, or
+    the frame renders empty with `net::ERR_BLOCKED_BY_RESPONSE`.
+  - **What the lane does not prove.** That the registration is a **third-party** one. Whether Chromium classifies
+    `<id>.preview.localhost` as a different *site* from `localhost` was never established and cannot be read off the
+    suite: `localhost` appears nowhere in the Public Suffix List (checked against today's list), browsers special-case
+    loopback names in their cookie and storage code, and what the suite asserts is an **origin** check (`event.origin`,
+    `crossOriginIsolated`, the document that was served), not which site the browser believes the frame belongs to. Nor
+    does the lane prove anything in Firefox or WebKit, a Worker-served response rather than a Vite one, real TLS,
+    partitioning of the preview's storage, or wildcard routing.
+
+  So the lane is evidence that the **architecture** works in one browser in a development topology. It is not evidence
+  for the cross-site claim, and it must not be cited as if it were. The three-browser, two-registrable-domain matrix in
+  "Before B ships" is therefore a gate on B, not a formality.
 
 That makes the browser matrix a **gate on B**, not a formality. See "Before B ships".
 
@@ -307,11 +350,12 @@ document and record that the preview base sits on the engine domain.
 
 Each of these is a measurement, not a decision to be assumed:
 
-1. **Browser matrix for the cross-site service worker.** Run the preview chain in Chromium, Firefox and WebKit with the
-   editor and preview on different registrable domains (the browser lane currently installs Chromium only, and its
-   `*.localhost` topology does not exercise a real registrable-domain boundary). If a browser refuses a third-party
-   service-worker registration, B's architecture needs the Storage Access API or a redesign, and that finding must land
-   before the domain is bought.
+1. **Browser matrix for the cross-site service worker — mandatory, and before any purchase.** Run the preview chain in
+   Chromium, Firefox and WebKit with the editor and the preview on genuinely different registrable domains, under TLS.
+   The existing lane cannot be repurposed for this: it runs Chromium only, on `*.localhost`, over `http://`, against a
+   dev server, and it asserts origins rather than sites (§3). If a browser refuses a third-party service-worker
+   registration, B's architecture needs the Storage Access API or a redesign, and that finding has to land before the
+   domain is bought, not after.
 2. **Cookie proof.** On staging, set a `SameSite=Lax` cookie on the editor host, make a same-site request and a cross-site
    request from a preview document, and record which one carries it. This is the claim B rests on; it is cheap to measure
    once the hosts exist.
