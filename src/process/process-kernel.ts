@@ -66,6 +66,8 @@ export interface KernelStartOptions {
   readonly timeoutMs?: number;
 }
 
+import type { Refusal } from "../runtime/refusal.js";
+
 export interface SettledOutcome {
   /** The code the body settled with, or `null` when the process was killed or failed before settling. */
   readonly exitCode: number | null;
@@ -74,6 +76,13 @@ export interface SettledOutcome {
   readonly reason?: string;
   /** True when the process is still alive because it owns a listening server. */
   readonly alive: boolean;
+  /**
+   * The refusal that ended the program, when the runtime made one on purpose (ADR-0014).
+   *
+   * On the SETTLE rather than only on the `ps` row because the settle is what a command boundary reads: the container builds its process
+   * record from this outcome, and a field available only by polling the table would be lost by the time the run returned.
+   */
+  readonly refusal?: Refusal;
 }
 
 export interface KernelProcessSummary {
@@ -82,6 +91,7 @@ export interface KernelProcessSummary {
   readonly state: ProcessState;
   readonly exitCode?: number;
   readonly reason?: string;
+  readonly refusal?: Refusal;
   readonly ports: readonly number[];
 }
 
@@ -145,7 +155,14 @@ export class ProcessKernel {
       ...(options.onOutput === undefined ? {} : { onOutput: options.onOutput }),
       // `alive` means "held open by something it owns", not "still in a live state": at the moment the exit message arrives the process is
       // still running in the table, so asking the table would call every finished process alive.
-      onSettled: (pid, code) => this.#recordSettled(pid, { exitCode: code, timedOut: false, killed: false, alive: this.#broker.portsOf(pid).length > 0 }),
+      onSettled: (pid, code, refusal) =>
+        this.#recordSettled(pid, {
+          exitCode: code,
+          timedOut: false,
+          killed: false,
+          alive: this.#broker.portsOf(pid).length > 0,
+          ...(refusal === undefined ? {} : { refusal }),
+        }),
       onChange: (entry) => {
         // A terminal process has no channel to serve and no ports to route. Retiring it here rather than in `kill` covers the
         // ordinary path too, where the program exits by itself.
@@ -157,6 +174,7 @@ export class ProcessKernel {
             timedOut: false,
             killed: entry.state === "killed",
             ...(entry.reason === undefined ? {} : { reason: entry.reason }),
+            ...(entry.refusal === undefined ? {} : { refusal: entry.refusal }),
             alive: false,
           });
           this.#retire(entry.pid);
@@ -202,6 +220,7 @@ export class ProcessKernel {
       state: entry.state,
       ...(entry.exitCode === undefined ? {} : { exitCode: entry.exitCode }),
       ...(entry.reason === undefined ? {} : { reason: entry.reason }),
+      ...(entry.refusal === undefined ? {} : { refusal: entry.refusal }),
       ports: this.#broker.portsOf(entry.pid).map((binding) => binding.port),
     }));
   }

@@ -52,3 +52,41 @@ export class ProcessRefusal extends Error {
     this.refusal = createRefusal(refusal);
   }
 }
+
+/**
+ * The codes, as data, so a boundary can check a value it did not create.
+ *
+ * Derived from the type above at compile time by construction: the array is the type's own union spelled out, and `satisfies` makes a
+ * member added to `RefusalCode` without a matching entry here a compile error rather than a refusal silently dropped at a boundary.
+ */
+const REFUSAL_CODES = ["native-addon", "NATIVE_PROCESS_EXEC_REFUSED"] as const satisfies readonly RefusalCode[];
+
+/**
+ * Narrow a value that crossed a thread boundary into a `Refusal`, or `undefined`.
+ *
+ * A refusal is data here, never an object: `postMessage` structured-clones it, so the prototype and the freeze do not survive the trip and
+ * what arrives is an ordinary record a sender could have fabricated. Two things follow, and both are the reason this function exists rather
+ * than a cast:
+ *
+ * 1. **It validates.** The code must be one of the closed set and every field a non-empty string, so junk from a future or a foreign
+ *    thread becomes "no refusal" - an ordinary exit - instead of a by-design classification nobody can trace.
+ * 2. **It re-freezes through the one constructor.** The value that reaches the container is the same frozen shape the runtime created, so
+ *    `Object.isFrozen` is true on both sides of the boundary and the guarantee in the header of this file survives the trip.
+ *
+ * A refusal is NOT reconstructed from stderr or from an error message: the fields travel with the process's own exit, and a run with no
+ * refusal on the wire has none.
+ */
+export function refusalFromWire(value: unknown): Refusal | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const candidate = value as { readonly code?: unknown; readonly capability?: unknown; readonly message?: unknown; readonly subject?: unknown };
+  if (typeof candidate.code !== "string" || !REFUSAL_CODES.includes(candidate.code as RefusalCode)) return undefined;
+  if (typeof candidate.capability !== "string" || candidate.capability === "") return undefined;
+  if (typeof candidate.message !== "string" || candidate.message === "") return undefined;
+  if (typeof candidate.subject !== "string") return undefined;
+  return createRefusal({
+    code: candidate.code as RefusalCode,
+    capability: candidate.capability,
+    message: candidate.message,
+    subject: candidate.subject,
+  });
+}

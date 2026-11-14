@@ -17,6 +17,7 @@
 import { allocateChannel, type ChannelAllocation, type ChannelSizes } from "./syscall-channel.js";
 import type { MessagePortLike } from "./process-transport.js";
 import { ProcessTable, type ProcessEntry, type ProcessState } from "./process-table.js";
+import { refusalFromWire, type Refusal } from "../runtime/refusal.js";
 
 /** The slice of the Worker API this module needs. Narrow on purpose: it is also the seam tests replace. */
 export interface ProcessWorkerLike {
@@ -87,7 +88,7 @@ export interface ProcessHostOptions {
    * settled and will never exit on its own. A caller that waited for exit instead would block its terminal on `npm run dev` forever,
    * which is the shape the serialised supervisor already had.
    */
-  readonly onSettled?: (pid: number, code: number) => void;
+  readonly onSettled?: (pid: number, code: number, refusal?: Refusal) => void;
   /**
    * Output as it is written, before the process exits. Without this a long-running program is silent until it ends,
    * which is the difference between a terminal and a log dump.
@@ -230,7 +231,7 @@ export class ProcessHost {
   finish(
     pid: number,
     state: Extract<ProcessState, "exited" | "failed">,
-    detail: { readonly exitCode?: number; readonly reason?: string } = {},
+    detail: { readonly exitCode?: number; readonly reason?: string; readonly refusal?: Refusal } = {},
   ): void {
     const entry = this.#table.get(pid);
     if (!["exited", "failed"].includes(entry.state)) {
@@ -247,6 +248,7 @@ export class ProcessHost {
       readonly reason?: unknown;
       readonly channel?: unknown;
       readonly text?: unknown;
+      readonly refusal?: unknown;
     };
     if (message.type === "output") {
       const channel = message.channel === "stderr" ? "stderr" : "stdout";
@@ -254,13 +256,18 @@ export class ProcessHost {
       return;
     }
     if (message.type === "exit") {
-      this.#onSettled?.(pid, typeof message.code === "number" ? message.code : 0);
+      // Validated here, once, because this is the first place in a different thread from the sender. A value that does not describe a
+      // refusal this runtime can produce becomes "no refusal": the process still exits with the status it reported, and a malformed
+      // diagnostic can never be promoted to a by-design classification.
+      const refusal = refusalFromWire(message.refusal);
+      this.#onSettled?.(pid, typeof message.code === "number" ? message.code : 0, refusal);
       // Held open by something the process still owns (a listening server). Its state stays live, so it can still be killed and can
       // still be routed to; the exit is remembered rather than acted on.
       if (this.#holdOpen?.(pid) === true) return;
       this.finish(pid, "exited", {
         ...(typeof message.code === "number" ? { exitCode: message.code } : {}),
         ...(typeof message.reason === "string" ? { reason: message.reason } : {}),
+        ...(refusal === undefined ? {} : { refusal }),
       });
       return;
     }
