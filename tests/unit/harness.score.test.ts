@@ -61,6 +61,11 @@ describe("scoreGate", () => {
       passed: 12,
       scored: 15,
       rate: 12 / 15,
+      // `satisfied` answers a different question - did the fixture do what it declared - and for a front-end fixture whose only
+      // declared outcome is PASS it agrees with `passed`. It differs only for a boundary fixture that exists to be refused
+      // (`tests/unit/harness.fixture-15.test.ts` pins that case). The gate reads `rate`, which is untouched.
+      satisfied: 12,
+      satisfiedRate: 12 / 15,
     });
     expect(report.boundary.passed).toBe(5);
   });

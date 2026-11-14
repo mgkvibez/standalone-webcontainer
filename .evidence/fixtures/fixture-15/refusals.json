@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 3,
+  "stepIndex": 0,
+  "exitCode": 1,
+  "refusal": {
+    "code": "native-addon",
+    "capability": "native addon",
+    "message": "Cannot load native addon /native-binding/build/Release/addon.node: native addons are not supported in this runtime. A package that needs one must ship a WASM build or be replaced with a pure-JS alternative.",
+    "subject": "/native-binding/build/Release/addon.node"
+  }
+}

@@ -47,6 +47,15 @@ export interface FixtureOutcome {
   readonly fixture: FixtureSlot;
   readonly classification: Classification;
   readonly evidenceDir: string;
+  /**
+   * The classifications the fixture's own definition declares acceptable, carried with the outcome so a report can tell
+   * "passed" from "did what it said it would do".
+   *
+   * They differ only for a boundary fixture: `fixture-15` exists to be refused, so an `UNSUPPORTED_BY_DESIGN` against
+   * `expected: ["UNSUPPORTED_BY_DESIGN"]` is a satisfied fixture that is not a pass. Optional because an outcome replayed from
+   * evidence written before this field existed has nothing to carry; absent is not `["PASS"]`, it is "not recorded".
+   */
+  readonly expected?: readonly Classification[];
 }
 
 /**

@@ -1,18 +1,50 @@
 [
   {
     "index": 0,
-    "kind": "exit-code",
-    "state": "failed",
-    "passed": false,
+    "kind": "stdout-contains",
+    "state": "passed",
+    "passed": true,
     "stepAvailable": true,
-    "detail": "expected exit code 1, observed 0"
+    "detail": "stdout contained the expected text"
   },
   {
     "index": 1,
-    "kind": "stderr-contains",
-    "state": "failed",
-    "passed": false,
+    "kind": "exit-code",
+    "state": "passed",
+    "passed": true,
     "stepAvailable": true,
-    "detail": "stderr did not contain \"native addon\"; observed \"node: cannot find module '/require-native.mjs'\""
+    "detail": "expected exit code 1, observed 1"
+  },
+  {
+    "index": 2,
+    "kind": "stderr-contains",
+    "state": "passed",
+    "passed": true,
+    "stepAvailable": true,
+    "detail": "stderr contained the expected text"
+  },
+  {
+    "index": 3,
+    "kind": "stdout-contains",
+    "state": "not-evaluated",
+    "passed": false,
+    "stepAvailable": false,
+    "detail": "step 1 did not run (step 0 refused native addon (native-addon)), so stdout-contains cannot be checked"
+  },
+  {
+    "index": 4,
+    "kind": "exit-code",
+    "state": "not-evaluated",
+    "passed": false,
+    "stepAvailable": false,
+    "detail": "step 1 did not run (step 0 refused native addon (native-addon)), so exit-code cannot be checked"
+  },
+  {
+    "index": 5,
+    "kind": "file-exists",
+    "state": "not-evaluated",
+    "passed": false,
+    "stepAvailable": false,
+    "detail": "step 1 did not run (step 0 refused native addon (native-addon)), so file-exists cannot be checked"
   }
 ]

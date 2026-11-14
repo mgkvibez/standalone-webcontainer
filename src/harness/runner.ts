@@ -466,6 +466,8 @@ async function writeRunEvidence(
   return {
     fixture: { id: input.definition.id, slug: input.definition.slug, lane: input.definition.lane },
     classification: verdict.classification,
+    // From the definition that was run, so a report can separate "passed" from "did what it declared" without re-reading the file.
+    expected: [...input.definition.expected],
     evidenceDir: bundle.dir,
   };
 }

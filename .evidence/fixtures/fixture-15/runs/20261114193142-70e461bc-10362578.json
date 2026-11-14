@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "runId": "20261114193142-70e461bc-10362578",
+  "fixture": {
+    "id": 15,
+    "slug": "fixture-15",
+    "lane": "boundary"
+  },
+  "definition": {
+    "sha256": "70e461bc5b2ccc56abaa1b7a0d8b8dc54431a269a8d84b763148db7aa19545f0",
+    "formatVersion": 1,
+    "steps": 2,
+    "assertions": 6
+  },
+  "harness": {
+    "name": "standalone-webcontainer fixture runner",
+    "version": "0.0.0"
+  },
+  "runtime": {
+    "name": "node",
+    "version": "v20.20.2"
+  },
+  "commit": "37a56ea90e9ed40596d7c598ad10e32c869e34d2",
+  "tree": {
+    "dirty": true,
+    "changedFiles": 7
+  },
+  "command": {
+    "argv": [
+      "--id",
+      "15"
+    ],
+    "steps": [
+      "node load-addon.mjs",
+      "node after-refusal.mjs"
+    ]
+  },
+  "registry": {
+    "lane": "corpus",
+    "label": "offline corpus (fixtures/registry)"
+  },
+  "startedAt": "2026-11-14T19:31:42.605Z",
+  "endedAt": "2026-11-14T19:31:42.641Z",
+  "durationMs": 36,
+  "budgets": {
+    "install": 180000,
+    "build": 240000,
+    "run": 60000
+  },
+  "verdict": {
+    "classification": "UNSUPPORTED_BY_DESIGN",
+    "reason": "step 0 (node load-addon.mjs) was refused by design: native addon (native-addon) — Cannot load native addon /native-binding/build/Release/addon.node: native addons are not supported in this runtime. A package that needs one must ship a WASM build or be replaced with a pure-JS alternative. [1 later step skipped; 3 assertion(s) not evaluated]"
+  }
+}
