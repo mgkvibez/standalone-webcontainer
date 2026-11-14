@@ -283,69 +283,12 @@ describe("createStepExecutor", () => {
     expect(result.record?.stderr).toMatch(/command not found: vite/);
   });
 
-  it("reports a missing npx target as our limitation, and a missing bare binary as the project's", async () => {
-    const empty = fakeRuntime({
-      readDirNames: (path) => (path.endsWith("/node_modules") ? ["other"] : []),
-      readFileText: (path) =>
-        path.endsWith("/package.json") && path.includes("/node_modules/other")
-          ? JSON.stringify({ name: "other", bin: { other: "cli.js" } })
-          : null,
-    });
-
-    // `npx tsc` with nothing installed would have made npx fetch it. Fetching is disabled by policy, and a policy we chose
-    // is neither a defect to file nor a broken project to blame (ADR-0010 am. 2).
-    const viaNpx = await executor(empty)(step("npx tsc -p tsconfig.json"), 1);
-    expect(viaNpx.termination).toBe("restricted");
-    expect(viaNpx.termination).not.toBe("harness-fault");
-    expect(viaNpx.restriction?.policy).toBe("offline-registry");
-    expect(viaNpx.restriction?.operation).toBe("npx tsc");
-    expect(viaNpx.restriction?.alternative).toMatch(/package\.json/);
-    expect(viaNpx.detail).toMatch(/offline-registry policy/);
-
-    // The same binary written bare is a broken project: npm would say "command not found" in its own shell.
-    const bare = await executor(empty)(step("tsc -p tsconfig.json"), 1);
-    expect(bare.termination).toBe("ok");
-    expect(bare.record?.exitCode).toBe(1);
-    expect(bare.record?.stderr).toMatch(/command not found: tsc/);
-  });
-
-  it("presents an install-shaped npx as a policy restriction, and an unknown flag as our defect", async () => {
-    const empty = fakeRuntime({ readDirNames: () => [], readFileText: () => null });
-
-    const versioned = await executor(empty)(step("npx --yes shadcn@latest add button"), 1);
-    expect(versioned.termination).toBe("restricted");
-    expect(versioned.restriction?.policy).toBe("offline-registry");
-    expect(versioned.restriction?.operation).toContain("shadcn@latest");
-
-    // An unimplemented flag is our gap, not a policy: it stays a harness fault so it gets fixed.
-    const unknownFlag = await executor(empty)(step("npx --package=left-pad cowsay"), 1);
-    expect(unknownFlag.termination).toBe("harness-fault");
-    expect(unknownFlag.restriction).toBeUndefined();
-  });
-
-  it("runs an npx target that an installed package does provide", async () => {
-    const seen: string[][] = [];
-    const installed = fakeRuntime({
-      readDirNames: (path) => (path.endsWith("/node_modules") ? ["typescript"] : []),
-      readFileText: (path) => {
-        if (path.endsWith("/package.json") && path.includes("/node_modules/typescript")) {
-          return JSON.stringify({ name: "typescript", bin: { tsc: "bin/tsc" } });
-        }
-        if (path.endsWith("/package.json")) return JSON.stringify({ name: "app", version: "1.0.0" });
-        return null;
-      },
-      async run(entryPath, options) {
-        seen.push([entryPath, ...(options?.argv ?? [])]);
-        return { stdout: "tsc 5.0.0\n", stderr: "", exitCode: 0 };
-      },
-    });
-
-    const result = await executor(installed)(step("npx --no-install tsc -p tsconfig.json"), 1);
-
-    expect(result.termination).toBe("ok");
-    expect(result.record?.exitCode).toBe(0);
-    expect(seen).toEqual([["/app/node_modules/typescript/bin/tsc", "node", "/app/node_modules/typescript/bin/tsc", "-p", "tsconfig.json"]]);
-  });
+  // THREE TESTS REMOVED HERE (W-37, correctness phase). They drove `npx` through this interpreter, which gated a fetch with its own
+  // offline-registry policy and reported a restriction or a harness fault depending on the shape of the spec. The product does not
+  // work that way: `Container` resolves an installed binary by its BIN name and otherwise refuses by name, and every case those tests
+  // pinned is now asserted against the Container in `container.npx.test.ts` (resolution, both refusal messages, the
+  // installed-but-no-bin case, the missing binary). Keeping them would have kept a green assertion about a behaviour no user can
+  // reach, which is the hazard the W-37 report names.
 
   it("refuses a script that hides an install inside a run step", async () => {
     const runtime = fakeRuntime({
@@ -492,60 +435,9 @@ describe("the pnpm command vocabulary", () => {
   });
 });
 
-describe("the pnpm profile in the executor", () => {
-  const scripts = JSON.stringify({ scripts: { build: "node build.js", test: "node test.js" } });
-
-  const runtime = (): StepRuntime & { installs: number } => {
-    const calls = { installs: 0 };
-    return {
-      get installs() {
-        return calls.installs;
-      },
-      async install() {
-        calls.installs += 1;
-        return { packages: [{}], warnings: [], usedLockfile: true };
-      },
-      async run() {
-        return { stdout: "ok\n", stderr: "", exitCode: 0 };
-      },
-      readFileText(path: string) {
-        return path.endsWith("package.json") ? scripts : null;
-      },
-      readDirNames() {
-        return [];
-      },
-    };
-  };
-
-  const executor = (target: StepRuntime): ReturnType<typeof createStepExecutor> =>
-    createStepExecutor({ runtime: target, registry: { packument: async () => ({ versions: {} }) as never, tarball: async () => new Uint8Array() } });
-
-  it("carries the mandatory deviation record on a pnpm install", async () => {
-    const result = await executor(runtime())(step("pnpm install"), 0);
-    expect(result.termination).toBe("ok");
-    // The exact sentence from section 2.3, because it is the difference between a declared profile and a false claim.
-    expect(result.detail).toContain(
-      "pnpm-resolution profile: package.json install, npm-style hoisted node_modules, no pnpm-lock.yaml read or written",
-    );
-  });
-
-  it("does not claim the profile for an npm install", async () => {
-    const result = await executor(runtime())(step("npm install"), 0);
-    expect(result.detail).not.toContain("pnpm-resolution profile");
-  });
-
-  it("lists the scripts and exits 0, as pnpm does", async () => {
-    const result = await executor(runtime())(step("pnpm run"), 0);
-    expect(result.termination).toBe("ok");
-    expect(result.record?.exitCode).toBe(0);
-    expect(result.record?.stdout).toContain("build: node build.js");
-    expect(result.record?.stdout).toContain("test: node test.js");
-  });
-
-  it("reports a refused pnpm command as restricted, not as a bug of ours", async () => {
-    const result = await executor(runtime())(step("pnpm add left-pad"), 0);
-    expect(result.termination).toBe("restricted");
-    expect(result.detail).toContain("intentionally not supported");
-    expect(result.restriction?.policy).toBe("pnpm-resolution");
-  });
-});
+// The pnpm profile's EXECUTOR tests are removed here too, for the same reason and on the Phase 3 ruling: the profile was implemented
+// in this interpreter, the interpreter stopped being called five hours after it was written, and the product has never implemented
+// pnpm at all. A test that ran `pnpm install` here and expected a PASS was evidence about a dead file, not about the product. What the
+// product does instead is pinned where the product lives: `container.test.ts` (the decline and its wording) and
+// `harness.refusal-classification.test.ts` (that the decline is an ordinary failure, never UNSUPPORTED_BY_DESIGN). The parser-level
+// vocabulary above stays only because `parseStepCommand` is still a live import of the corpus check, and it goes when the module does.

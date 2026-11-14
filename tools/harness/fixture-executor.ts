@@ -23,9 +23,10 @@ import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Container } from "../../src/container/container.js";
-import type { ProjectFiles } from "../../src/container/types.js";
+import type { CommandOutcome, ProjectFiles } from "../../src/container/types.js";
 import type { RegistryClient } from "../../src/npm/install.js";
 import { ProbeFault, type AssertionEnvironment } from "../../src/harness/assertions.js";
+import { createRestriction } from "../../src/harness/restriction.js";
 import type { FixtureDefinition } from "../../src/harness/definition.js";
 import { NotPreviewable } from "../../src/harness/preview-target.js";
 import { InProcessClient } from "./in-process-client.js";
@@ -137,8 +138,12 @@ export const runDefinition = async (
   const executeStep: ExecuteStep = async (step, index) => {
     const before = new Set(container.processes().map((process) => process.pid));
     session.scrollback.length = 0;
+    // The container's own decision, not a reading of its scrollback. Everything below is built from this one value, so a step can
+    // never be classified from text a command did not write: a refusal prints to the SYSTEM stream, and the old text-prefix reading
+    // scored exactly that as a clean exit.
+    let outcome: CommandOutcome;
     try {
-      await container.execute(session.id, step.command);
+      outcome = await container.execute(session.id, step.command);
     } catch (error) {
       return { termination: "harness-fault", detail: `the container threw: ${describe(error)}`, record: null };
     }
@@ -154,12 +159,30 @@ export const runDefinition = async (
       // The container's own status, not a guess at its text. A refused command (`npx`, `sh`) writes its reason to the SYSTEM stream and
       // matches neither prefix here, so the old inference scored a refusal as success: `fixture-12`'s `npx tsc` was recorded as exit 0
       // with no output and the exit-code assertion passed on a command that never ran.
-      const failed = container.lastExitCode !== 0;
+      const failed = outcome.exitCode !== 0;
       const said = `${stdout}\n${stderr}`.trim();
+      // A declined line is recorded, then explained: `restricted` only when the container says the boundary is its own policy
+      // (ADR-0010 am. 2), never when the reason merely reads like one. The record stays authoritative for assertions, and the
+      // exit code is the container's own rather than a coerced 1.
+      const record = { index, exitCode: outcome.exitCode, stdout, stderr };
+      if (outcome.blocked !== undefined && outcome.blocked.boundary !== undefined) {
+        const boundary = outcome.blocked.boundary;
+        return {
+          termination: "restricted",
+          detail: `\`${step.command}\` did not run: ${outcome.blocked.reason} [${boundary.policy}]`,
+          record,
+          restriction: createRestriction({
+            policy: boundary.policy,
+            operation: outcome.blocked.name,
+            reason: boundary.reason,
+            alternative: boundary.alternative,
+          }),
+        };
+      }
       return {
         termination: "ok",
         detail: `builtin command ${failed ? "reported a failure" : "completed"}${said === "" ? "" : `: ${said.split("\n")[0]}`}`,
-        record: { index, exitCode: failed ? 1 : 0, stdout, stderr },
+        record,
       };
     }
 
@@ -169,17 +192,30 @@ export const runDefinition = async (
     // free pass for an exit-code assertion.
     const serving = process.state === "running" && (process.previewPorts?.length ?? 0) > 0;
     const ports = process.previewPorts ?? [];
+    const record = {
+      index,
+      exitCode: process.exitCode ?? (serving ? 0 : -1),
+      stdout: process.stdout ?? "",
+      stderr: process.stderr ?? "",
+    };
+    // A refusal the runtime made on purpose (ADR-0014): carried by reference from the runtime through the container, never rebuilt
+    // from stderr. Its own record still travels with it (D-2), so assertions about the refusing step are evaluated, not skipped.
+    if (outcome.refusal !== undefined) {
+      return {
+        termination: "unsupported",
+        detail:
+          `process ${process.pid} ended with a refusal: ` +
+          `${outcome.refusal.capability} (${outcome.refusal.code}) — ${outcome.refusal.message}`,
+        record,
+        refusal: outcome.refusal,
+      };
+    }
     return {
       termination: "ok",
       detail: serving
         ? `process ${process.pid} exited 0 and left a server listening on port(s) ${ports.join(", ")}`
         : `process ${process.pid} ${process.state}${process.exitCode === undefined ? " without an exit code" : ` with exit ${process.exitCode}`}`,
-      record: {
-        index,
-        exitCode: process.exitCode ?? (serving ? 0 : -1),
-        stdout: process.stdout ?? "",
-        stderr: process.stderr ?? "",
-      },
+      record,
     };
   };
 

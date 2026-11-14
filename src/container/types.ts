@@ -6,6 +6,8 @@
  * cannot be preempted. Everything in this file is shaped around that constraint rather than pretending otherwise.
  */
 
+import type { Refusal } from "../runtime/refusal.js";
+
 /** Where a process is in its life. `queued` exists because executions are serialised, not concurrent. */
 export type ProcessState = "queued" | "running" | "exited" | "failed" | "killed";
 
@@ -34,6 +36,14 @@ export interface ProcessRecord {
   stderr: string;
   /** Ports owned by a process that has started an in-memory server. */
   previewPorts?: readonly number[];
+  /**
+   * Present only when the runtime declined a capability ON PURPOSE and the program did not handle it (ADR-0014).
+   *
+   * Without this field the container read a refusal as an ordinary exit 1 with a stack on stderr, which is exactly how a
+   * fixture that exists to prove the refusal would have scored a PASS: the assertions pass, the verdict is PASS, and the
+   * by-design bucket the gate treats as legitimate stays empty. Carried by reference, never rebuilt from the text.
+   */
+  refusal?: Refusal;
 }
 
 export interface Session {
@@ -111,6 +121,14 @@ export interface RuntimeRunOutcome {
   readonly previewPorts?: readonly number[];
   /** Scheduler evidence, when the runtime has a virtual timer queue. */
   readonly scheduler?: unknown;
+  /**
+   * Present only when an unhandled refusal ended the program (ADR-0014).
+   *
+   * Optional because most hosts cannot see one: the harness's in-process client carries it, and the product's process Worker
+   * does not yet (the exit message it posts is `{type:"exit", code}`). An absent field therefore means "not reported", not
+   * "no refusal", and only the fixture lane may treat it as evidence.
+   */
+  readonly refusal?: Refusal;
 }
 
 /** The project files the container's file commands operate on. Implemented by the page's project store. */
@@ -125,4 +143,57 @@ export interface ProjectFiles {
   write(path: string, contents: string): void;
   mkdir(path: string): boolean;
   remove(path: string): boolean;
+}
+
+/**
+ * A boundary the terminal keeps on purpose, as opposed to a capability it has not built yet.
+ *
+ * The distinction is load-bearing for scoring. `restricted` is a legitimate by-design outcome (ADR-0010 amendment 2), and the
+ * gate is not allowed to fill that bucket with our own unfinished work, so a policy record exists only where the container
+ * means to decline the operation permanently. A named manager it has not implemented (pnpm, yarn) and a shell it has not built
+ * carry a reason and no boundary, and reach a verdict as the ordinary failures they are.
+ */
+export interface CommandBoundary {
+  /** Stable policy id, lowercase kebab-case, e.g. `closed-command-set`. */
+  readonly policy: string;
+  /**
+   * Why the boundary exists, in the container's own words.
+   *
+   * The terminal's message to a user and this sentence answer different questions ("cannot run that" versus "cannot run anything
+   * outside this set, because there is no PATH"), and a verdict that quotes only the first is a shrug.
+   */
+  readonly reason: string;
+  /** What to do instead, in the words the terminal would use. */
+  readonly alternative: string;
+}
+
+/** A line the container declined to run, with everything a verdict needs to explain why. */
+export interface CommandBlock {
+  /**
+   * `refused`: the name is recognised and declined. `unsupported`: the line is outside the closed command set, or is not a
+   * well-formed line at all.
+   */
+  readonly kind: "refused" | "unsupported";
+  /** The command name, or the syntax error when the line could not be tokenized. */
+  readonly name: string;
+  /** Why it did not run, verbatim as the terminal showed it. */
+  readonly reason: string;
+  /** Present iff the container declines this permanently. Absent means "not implemented yet", which is a failure, not a policy. */
+  readonly boundary?: CommandBoundary;
+}
+
+/**
+ * What one line did, as a value rather than as scrollback.
+ *
+ * `execute` returns this instead of nothing because the alternative is what the fixture harness used to do: read the terminal
+ * afterwards and infer meaning from text a refusal never writes. Sequencing inside the container still uses the exit code; this
+ * is the same decision, handed to callers that are not the container.
+ */
+export interface CommandOutcome {
+  /** The status this line left behind: what a `&&` or `||` in a script sequences on. */
+  readonly exitCode: number;
+  /** Present only when the line was declined rather than run, and the line's own status is a failure. */
+  readonly blocked?: CommandBlock;
+  /** Present only when a program the line started ended with an unhandled refusal (ADR-0014). */
+  readonly refusal?: Refusal;
 }

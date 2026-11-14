@@ -102,3 +102,43 @@ describe("npx", () => {
     expect(take()).toContain("usage: npx <binary> [args...]");
   });
 });
+
+/**
+ * The bin lookups the retired `src/harness/scripts.ts` used to perform, asserted where the product actually performs them.
+ *
+ * `scripts.ts` resolved a command name by scanning `node_modules` for a `bin` field, and its tests pinned three cases that mattered:
+ * a bin named unlike its package, a scoped package whose bin is a bare string, and a name nothing provides. The container does the
+ * same lookup (`#findInstalledBinary`) and is the surface fixtures reach, so the coverage belongs here before the module goes.
+ *
+ * One difference is recorded rather than smoothed over: `scripts.ts` sorted candidate packages by name, while the container scans its
+ * installed tree in install order. npm's own answer depends on link creation order, so neither is more correct; the product's answer is
+ * simply the one a fixture or a user gets, and it is the one worth testing.
+ */
+describe("a bin resolved from the installed tree", () => {
+  it("resolves a scoped package whose bin is a bare string, named after the package", async () => {
+    const scoped = {
+      version: "1.0.0",
+      files: {
+        "package.json": JSON.stringify({ name: "@acme/cli", version: "1.0.0", bin: "./index.js" }),
+        "index.js": 'console.log("scoped " + process.argv.slice(2).join(" "));',
+      },
+    };
+    const { container, session, take } = await build({ "@acme/cli": [scoped] });
+    await container.execute(session.id, "npm install");
+    session.scrollback.length = 0;
+
+    const outcome = await container.execute(session.id, "npx cli build --fast");
+    expect(outcome.exitCode).toBe(0);
+    expect(take()).toContain("scoped build --fast");
+  });
+
+  it("refuses a bare name nothing provides, instead of guessing at a package with that name", async () => {
+    const { container, session, take } = await build({ toolchain: [withBin("toolchain", "tsc")] });
+    await container.execute(session.id, "npm install");
+    session.scrollback.length = 0;
+
+    const outcome = await container.execute(session.id, "npx webpack --version");
+    expect(outcome.exitCode).toBe(1);
+    expect(take()).toContain('"webpack" is not installed');
+  });
+});

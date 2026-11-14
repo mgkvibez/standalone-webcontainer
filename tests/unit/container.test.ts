@@ -165,7 +165,14 @@ describe("command parsing", () => {
     expect(parseCommand("node index.js")).toEqual({ kind: "process", name: "node", args: ["index.js"] });
     expect(parseCommand("pwd")).toEqual({ kind: "builtin", name: "pwd", args: [] });
     expect(parseCommand("npm install")).toMatchObject({ kind: "install", args: ["install"] });
-    expect(parseCommand("cargo build")).toEqual({ kind: "unsupported", name: "cargo" });
+    // A name outside the closed set carries the boundary, because that refusal is a decision the product keeps (and can be
+    // scored as by-design); a malformed line carries none. Both are `unsupported`; only one is a policy.
+    expect(parseCommand("cargo build")).toMatchObject({
+      kind: "unsupported",
+      name: "cargo",
+      boundary: { policy: "closed-command-set" },
+    });
+    expect(parseCommand('echo "unbalanced')).toEqual({ kind: "unsupported", name: 'unbalanced " quote' });
     expect(parseCommand("   ")).toEqual({ kind: "empty" });
   });
 
@@ -791,14 +798,16 @@ describe("saving into a live project (W-26)", () => {
  * `fixture-12` while never running. These tests pin the status at the source so no caller has to infer it again.
  */
 describe("the last exit status", () => {
-  it("is 1 for a command refused by policy, which is the case that was being read as success", async () => {
+  it("is 1 for a command the terminal declines, which is the case that was being read as success", async () => {
     const { container } = containerWith();
     const session = container.createSession();
-    // `npx` itself is implemented now, so the case is a command this container still refuses BY POLICY, which is the shape that
-    // writes to the system stream. That stream is the whole defect: a stderr-only reader saw nothing and called it success.
+    // `npx` itself is implemented now, so the case is a command this container declines, which is the shape that writes to the
+    // SYSTEM stream. That stream is the whole defect: a stderr-only reader saw nothing and called it success.
     await container.execute(session.id, "pnpm install");
     expect(container.lastExitCode).toBe(1);
-    expect(output(container, session.id)).toContain("system:pnpm: pnpm is not available in the terminal yet (P1b).");
+    expect(output(container, session.id)).toContain(
+      "system:pnpm: pnpm is not implemented in this terminal; npm is the supported package manager.",
+    );
   });
 
   it("is 1 for a command this terminal does not implement at all", async () => {
