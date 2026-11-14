@@ -158,7 +158,39 @@ export interface ExecutionResult {
    * Present only when an UNHANDLED refusal ended the program (ADR-0014). A program that caught the refusal and carried
    * on has none: it handled the refusal, so there is nothing to classify.
    */
-  readonly refusal?: Refusal;}
+  readonly refusal?: Refusal;
+
+  /**
+   * Present only when an uncaught exception reached the runtime from OUTSIDE the program's synchronous body: a timer
+   * callback, a `process.nextTick` callback, a continuation the drain owned, or an unhandled rejection (W-40).
+   *
+   * Attributed rather than only printed, because the four outcomes this runtime distinguishes are not interchangeable and
+   * stderr is not a channel a supervisor can decide from: a caught exception, an explicit non-zero exit and a declared
+   * refusal all produce output, and none of them is this. A record is here only when the failure is one the program did not
+   * handle, and the run's status is always non-zero when one is present.
+   */
+  readonly asyncFailures?: readonly AsyncFailure[];
+}
+
+/** Which queue a failure came out of. The distinction is what makes an exit status diagnosable after the fact. */
+export type AsyncFailureSource = "timer" | "tick" | "callback" | "rejection";
+
+/**
+ * One uncaught asynchronous exception, as data.
+ *
+ * `phase` is `"run"` when the failure ended a live run, and `"after-run"` when it arrived once the result had already been
+ * handed back, which can only happen when the program kept something open (a listening server, a live timer) and a later
+ * callback threw. The second case cannot change an exit status that has already been reported, so it is recorded on the
+ * runtime itself instead of being reduced to a line on stderr that nothing owns.
+ */
+export interface AsyncFailure {
+  readonly source: AsyncFailureSource;
+  readonly phase: "run" | "after-run";
+  /** `Error`'s own name, or the constructor-less fallback `"Error"`. Data, never parsed out of the message below. */
+  readonly name: string;
+  /** The stack when there is one, exactly as it was written to stderr, so the two cannot disagree. */
+  readonly message: string;
+}
 
 export interface Runtime {
   run(entryPath: string, options?: RunOptions): Promise<ExecutionResult>;
@@ -234,6 +266,20 @@ export class InProcessRuntime implements Runtime {
    */
   readonly #pendingRequests = new Set<Promise<unknown>>();
   #idleWaiters: (() => void)[] = [];
+  /** Uncaught asynchronous exceptions that arrived after their run had already reported a result. */
+  readonly #lateFailures: AsyncFailure[] = [];
+
+  /**
+   * Uncaught asynchronous exceptions recorded after the run that owns them had already settled (W-40).
+   *
+   * A program that kept something open has no exit status left to change, so "the callback that threw killed the process"
+   * cannot be expressed as a result nobody is waiting for. It is available here instead, as the same record the run would
+   * have carried, with `phase: "after-run"`: attributable, so a supervisor can settle the process from it rather than
+   * discover the silence later.
+   */
+  get asyncFailures(): readonly AsyncFailure[] {
+    return [...this.#lateFailures];
+  }
 
   constructor(vfs: FileSystemPort, options: InProcessRuntimeOptions = {}) {
     this.#vfs = vfs;
@@ -471,7 +517,11 @@ export class InProcessRuntime implements Runtime {
     const stdout = createSink(onOutput === undefined ? undefined : (text) => onOutput("stdout", text));
     const stderr = createSink(onOutput === undefined ? undefined : (text) => onOutput("stderr", text));
     const cwd = options.cwd ?? "/";
-    const ticks = new TickQueue();
+    // The reporter is the run's, not the queue's: a tick that throws is the program's failure, and it has to end the run
+    // through the same path a timer does rather than escape as a rejection from whichever frame happened to flush the queue.
+    const ticks = new TickQueue((error: unknown) => {
+      reportAsyncFailure("tick", error);
+    });
     const terminal = options.terminal ?? null;
     /**
      * `process.exit` is immediate in Node, and it is called from places this runtime does not control: a timer callback, or a
@@ -479,10 +529,39 @@ export class InProcessRuntime implements Runtime {
      * timer queued before the exit still runs and the run reports the program's code rather than an uncaught exception.
      */
     let exitRequested: number | undefined;
+    /** Uncaught asynchronous exceptions that belong to THIS run, in the order they were reported. */
+    const asyncFailures: AsyncFailure[] = [];
+    /** Whether this run has already handed its result back. A failure after that cannot change the result. */
+    let settled = false;
     const requestExit = (code: number): void => {
       if (exitRequested !== undefined) return;
       exitRequested = code;
       scheduler.abort();
+    };
+
+    /**
+     * The single contract for an uncaught ASYNCHRONOUS exception (W-40, ADR-0035).
+     *
+     * Before this existed the four routes disagreed: a synchronous throw failed the run, an unhandled rejection exited 1, a
+     * timer callback printed `Uncaught …` and left the run at exit 0, and a `nextTick` callback escaped as a rejection out of
+     * `run()` so the caller got no result at all. One answer now: print it in Node's shape, record it as data, and end the run
+     * with status 1 - which is what Node does, and the reason a crashed program can no longer pass an exit-code assertion.
+     *
+     * `process.exit` stays a different thing on purpose: it is the program choosing a status, so it takes its own branch and
+     * is neither printed as uncaught nor recorded as a failure.
+     */
+    const reportAsyncFailure = (source: AsyncFailureSource, error: unknown): void => {
+      if (error instanceof ProcessExit) {
+        requestExit(error.code);
+        return;
+      }
+      const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+      const name = error instanceof Error ? error.name : "Error";
+      stderr.write(`Uncaught ${message}\n`);
+      const record: AsyncFailure = { source, phase: settled ? "after-run" : "run", name, message };
+      if (settled) this.#lateFailures.push(record);
+      else asyncFailures.push(record);
+      requestExit(1);
     };
 
     /**
@@ -494,9 +573,7 @@ export class InProcessRuntime implements Runtime {
      * that crash, and the reason is reported in the same shape an uncaught exception gets, which is the shape Node prints.
      */
     const rejections = watchUnhandledRejections((reason: unknown) => {
-      const message = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
-      stderr.write(`Uncaught ${message}\n`);
-      requestExit(1);
+      reportAsyncFailure("rejection", reason);
     });
 
     /**
@@ -579,10 +656,11 @@ export class InProcessRuntime implements Runtime {
           requestExit(error.code);
           return;
         }
-        // Node would kill the process. Killing the run would make one bad callback look like a broken harness, so the error
-        // is reported on stderr and draining continues deterministically.
-        const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
-        stderr.write(`Uncaught ${message}\n`);
+        // Node ends the process on an uncaught exception, and this used to be the one place that disagreed: the error was
+        // printed and draining carried on, so a crashed program settled with status 0 and an exit-code assertion on it passed
+        // (W-40). The run is now ended the way Node ends it, and the failure is carried as data rather than only as a line on
+        // stderr - `reportAsyncFailure` owns both halves so this route cannot drift from the tick and rejection ones again.
+        reportAsyncFailure("timer", error);
       },
     );
 
@@ -823,7 +901,14 @@ export class InProcessRuntime implements Runtime {
         }
         return { code: result.code, timedOut: false };
       } finally {
-        ticks.flushNow();
+        // The queue reports its own failure through the run's contract now, so this cannot throw. It stays wrapped anyway:
+        // a throw from here rejects `run()` itself, which is the shape that left the harness with no verdict at all, and one
+        // `try` is cheaper than the guarantee that a future hook never throws.
+        try {
+          ticks.flushNow();
+        } catch (error) {
+          reportAsyncFailure("tick", error);
+        }
       }
     };
 
@@ -872,9 +957,10 @@ export class InProcessRuntime implements Runtime {
         await drainAfterEvaluation();
       } catch (error) {
         // A throw from inside a callback or continuation belongs to THIS run. Letting it escape became an uncaught
-        // exception that killed the harness process, which would have taken every later fixture down with it.
-        const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
-        stderr.write(`${message}\n`);
+        // exception that killed the harness process, which would have taken every later fixture down with it. Both
+        // callbacks and continuations land in this fence, and it reports through the same contract as the rest: the shape
+        // on stderr is Node's, and the failure is recorded rather than only printed.
+        reportAsyncFailure("callback", error);
         exitCode = 1;
       }
     }
@@ -891,6 +977,9 @@ export class InProcessRuntime implements Runtime {
     // The observer goes with the run for the same reason the signal listeners do: a leaked `unhandledRejection` listener would keep
     // suppressing the host's own crash reporting for every run after this one.
     rejections.stop();
+    // From here the result is the answer: a failure that arrives later belongs to the runtime, not to this run, and is
+    // recorded there with `phase: "after-run"` instead of silently changing a status nobody is waiting for.
+    settled = true;
 
     return {
       stdout: stdout.text,
@@ -901,6 +990,7 @@ export class InProcessRuntime implements Runtime {
       scheduler: scheduler.evidence,
       // Spread rather than `refusal: undefined`, so the field is absent instead of present-and-empty.
       ...(capturedRefusal === undefined ? {} : { refusal: capturedRefusal }),
+      ...(asyncFailures.length === 0 ? {} : { asyncFailures: [...asyncFailures] }),
     };
   }
 }
