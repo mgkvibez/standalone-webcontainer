@@ -135,6 +135,15 @@ export class ProcessHost {
   readonly #onMessage: ProcessHostOptions["onMessage"];
   readonly #holdOpen: ProcessHostOptions["holdOpen"] | undefined;
   readonly #onSettled: ProcessHostOptions["onSettled"] | undefined;
+  /**
+   * Pids that have already been reported as settled.
+   *
+   * `onSettled` is a first-and-only notification, and the table cannot enforce that for it: a held-open process stays `running` after its
+   * exit is announced, so "is it terminal?" is the wrong question to ask. Without this set, a Worker that posts `exit` twice (and a Worker
+   * that posts `exit` after `failed`) announced the same settlement twice, and a caller that counts settlements - the harness's fidelity
+   * accounting, or any future consumer - counts a run that happened once as two.
+   */
+  readonly #settled = new Set<number>();
 
   constructor(options: ProcessHostOptions = {}) {
     this.#spawn = options.spawn ?? defaultSpawn;
@@ -227,17 +236,22 @@ export class ProcessHost {
     return killed;
   }
 
-  /** Mark a process finished. Called from the Worker's own exit report or from a failure. */
+  /**
+   * Mark a process finished. Called from the Worker's own exit report or from a failure.
+   *
+   * Only a LIVE process can finish. The guard used to name the two states it refused (`exited`, `failed`), which left `killed` looking
+   * finishable: a Worker that posted `exit` after its process was killed threw `InvalidTransitionError` from inside `onmessage`, where nothing
+   * catches it - a stale report from a dying Worker took down the host. A process that is already over keeps the ending it had.
+   */
   finish(
     pid: number,
     state: Extract<ProcessState, "exited" | "failed">,
     detail: { readonly exitCode?: number; readonly reason?: string; readonly refusal?: Refusal } = {},
   ): void {
     const entry = this.#table.get(pid);
-    if (!["exited", "failed"].includes(entry.state)) {
-      this.#table.transition(pid, state, detail);
-      this.#retire(pid, entry.handle);
-    }
+    if (entry.state !== "queued" && entry.state !== "running") return;
+    this.#table.transition(pid, state, detail);
+    this.#retire(pid, entry.handle);
   }
 
   #onWorkerMessage(pid: number, data: unknown): void {
@@ -260,7 +274,9 @@ export class ProcessHost {
       // refusal this runtime can produce becomes "no refusal": the process still exits with the status it reported, and a malformed
       // diagnostic can never be promoted to a by-design classification.
       const refusal = refusalFromWire(message.refusal);
-      this.#onSettled?.(pid, typeof message.code === "number" ? message.code : 0, refusal);
+      // ONE invocation, with the status and the validated refusal together: the callback fires here and nowhere else on this path, and never
+      // a second time for the same process. A repeated exit is not a second settlement.
+      this.#settle(pid, typeof message.code === "number" ? message.code : 0, refusal);
       // Held open by something the process still owns (a listening server). Its state stays live, so it can still be killed and can
       // still be routed to; the exit is remembered rather than acted on.
       if (this.#holdOpen?.(pid) === true) return;
@@ -282,6 +298,23 @@ export class ProcessHost {
 
   #fail(pid: number, reason: string): void {
     this.finish(pid, "failed", { reason });
+  }
+
+  /**
+   * Announce a settlement, once per process.
+   *
+   * The single gate for `onSettled`, so there is exactly one place to be right. The mark OUTLIVES retirement on purpose: the pid counter is
+   * monotonic and the table keeps its rows, so a message that arrives after the process was retired - a Worker posting `exit`, then its queue
+   * flushing a second one - still refers to a process that has settled, and must stay silent. One number per process, not a leak worth trading
+   * this guarantee for.
+   */
+  #settle(pid: number, code: number, refusal: Refusal | undefined): void {
+    if (this.#settled.has(pid)) return;
+    // A process that already ended did not exit just because an exit report arrived late: `failed` (a worker fault) and `killed` are both
+    // terminal, and announcing a settlement for either would present a fault or a kill as a program that finished by itself.
+    if (["exited", "failed", "killed"].includes(this.#table.get(pid).state)) return;
+    this.#settled.add(pid);
+    this.#onSettled?.(pid, code, refusal);
   }
 
   /**
