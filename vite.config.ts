@@ -8,7 +8,12 @@
  * and `type: "module"` is what lets a single bundle serve both page and Worker without a second build.
  */
 
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+
 import { defineConfig, loadEnv } from "vite";
+
+import { PAGES_HEADERS_OUTPUT_NAME, PAGES_HEADERS_SOURCE, pagesHeaderProblems } from "./tools/deploy/pages-headers.js";
 
 /**
  * Isolation headers, needed for `crossOriginIsolated` and therefore for `SharedArrayBuffer`, which ADR-0018's synchronous
@@ -29,6 +34,48 @@ const ISOLATION_HEADERS = {
   "Cross-Origin-Embedder-Policy": "require-corp",
   "Cross-Origin-Resource-Policy": "cross-origin",
 } as const;
+
+/**
+ * Cloudflare Pages reads response headers from a `_headers` file in the *published* directory, not from `vercel.json`.
+ * That file is generated (`npm run headers:write`) from `ISOLATION_HEADERS` above, and this plugin fails the build if
+ * what landed in the output is missing or wrong.
+ *
+ * The reason to fail the build rather than only test the source file: a Pages deploy runs the build command and
+ * publishes whatever it produced. If `public/_headers` were moved, renamed or emptied, the deploy would succeed, the
+ * page would load, and the runtime would fail to boot with no stated cause, because `crossOriginIsolated` would be
+ * false and `SharedArrayBuffer` would not exist. A failed build is the only version of that which gets noticed.
+ */
+const pagesHeadersContract = () => {
+  let outDir = "";
+  return {
+    name: "pages-headers-contract",
+    apply: "build" as const,
+    configResolved(config: { root: string; build: { outDir: string } }) {
+      outDir = resolve(config.root, config.build.outDir);
+    },
+    closeBundle() {
+      const path = join(outDir, PAGES_HEADERS_OUTPUT_NAME);
+      let text: string;
+      try {
+        text = readFileSync(path, "utf8");
+      } catch {
+        throw new Error(
+          `the build output has no ${path}. It is copied from ${PAGES_HEADERS_SOURCE}; without COOP/COEP the deployed ` +
+            "document is not cross-origin isolated, SharedArrayBuffer does not exist, and ADR-0018's syscall channel " +
+            "cannot boot. Run `npm run headers:write`.",
+        );
+      }
+      const problems = pagesHeaderProblems(text, {
+        opener: ISOLATION_HEADERS["Cross-Origin-Opener-Policy"],
+        embedder: ISOLATION_HEADERS["Cross-Origin-Embedder-Policy"],
+        resource: ISOLATION_HEADERS["Cross-Origin-Resource-Policy"],
+      });
+      if (problems.length > 0) {
+        throw new Error(`the built ${PAGES_HEADERS_OUTPUT_NAME} would not isolate the document:\n- ${problems.join("\n- ")}`);
+      }
+    },
+  };
+};
 
 const isDnsName = (value: string): boolean =>
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(value);
@@ -59,7 +106,7 @@ export default defineConfig(({ command, mode }) => {
     worker: { format: "es" },
     // Browser-native stand-ins for the three Node-shaped dependencies the runtime ships with.
     optimizeDeps: { include: ["buffer", "acorn", "pathe"] },
-    plugins: [{
+    plugins: [pagesHeadersContract(), {
       name: "preview-base-domain",
       transformIndexHtml(html: string) {
         return html.replace('name="preview-base-domain" content=""', `name="preview-base-domain" content="${previewBaseDomain}"`);

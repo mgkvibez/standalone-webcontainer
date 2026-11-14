@@ -15,6 +15,7 @@ decision that is yours to make: **which domain**.
 | Build command is `npm run build:browser:preview` | `vercel.json` `buildCommand` | yes |
 | No SPA fallback for `/preview/<port>/` | `vercel.json` has no `rewrites` and no `routes` | yes, asserted in `tests/unit/deployment.contract.test.ts` |
 | `/preview-sw.js` is never cached | `vercel.json` header rule | yes |
+| The same headers exist for a Cloudflare Pages deploy | `public/_headers`, generated from the Vite config and checked by `npm run headers:check` | yes, see [cloudflare-pages.md](cloudflare-pages.md) |
 | Hashed assets are immutable | `vercel.json` header rule | yes |
 | Nothing forbids the editor framing the shell | no `X-Frame-Options`, no CSP `frame-ancestors` anywhere | yes |
 | The shell only loads its iframe once the worker controls the origin | `preview-shell.ts` registers, awaits `ready`, then waits for `controllerchange` | read in source |
