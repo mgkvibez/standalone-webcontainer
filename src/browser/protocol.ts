@@ -16,6 +16,7 @@ export interface TerminalSize {
 }
 
 import type { ProjectFileContents } from "../container/types.js";
+import type { Refusal } from "../runtime/refusal.js";
 
 export interface RunRequest {
   readonly type: "run";
@@ -246,6 +247,14 @@ export interface RunResultMessage {
   readonly timedOut: boolean;
   /** Timer-queue evidence from the runtime (ADR-0013), passed through unchanged. */
   readonly scheduler: unknown;
+  /**
+   * The refusal that ended the program, when the runtime made one on purpose (ADR-0014).
+   *
+   * Its FIELDS cross the thread boundary, because structured clone does not carry a prototype or a freeze: the page's client re-freezes it
+   * through `createRefusal` on arrival, and validates it there. Nothing is read out of `stderr` to decide whether this run was refused, which
+   * is what made a by-design refusal indistinguishable from a crash until now.
+   */
+  readonly refusal?: Refusal;
   /** Servers started by this entrypoint remain owned by the runtime after bootstrap returns. */
   readonly previewPorts?: readonly number[];
 }
