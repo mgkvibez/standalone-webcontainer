@@ -27,7 +27,7 @@ import type { CommandOutcome, ProjectFiles } from "../../src/container/types.js"
 import type { RegistryClient } from "../../src/npm/install.js";
 import { ProbeFault, type AssertionEnvironment } from "../../src/harness/assertions.js";
 import { createRestriction } from "../../src/harness/restriction.js";
-import type { FixtureDefinition } from "../../src/harness/definition.js";
+import { parseDefinition, type FixtureDefinition } from "../../src/harness/definition.js";
 import { NotPreviewable } from "../../src/harness/preview-target.js";
 import { InProcessClient } from "./in-process-client.js";
 
@@ -115,12 +115,20 @@ export const loadRegistry = async (): Promise<Registry> => {
   return loaded.registry;
 };
 
+/**
+ * Every definition on disk, validated.
+ *
+ * This used to be `JSON.parse(...) as FixtureDefinition`, which is a cast, not a check: the CLI would happily run a definition the
+ * parser rejects - an assertion with no `target`, a step whose kind does not match its command - because nothing on this path ever
+ * asked. `parseDefinition` is the same function the tests and the freeze checker use, so the CLI now runs exactly the fixture the rest
+ * of the toolchain believes in, and a malformed file fails loudly at load rather than scoring as an odd result.
+ */
 export const readDefinitions = (): FixtureDefinition[] => {
   const dir = join(repoRoot, "fixtures", "definitions");
   return readdirSync(dir)
     .filter((name) => name.endsWith(".json"))
     .sort()
-    .map((name) => JSON.parse(readFileSync(join(dir, name), "utf8")) as FixtureDefinition);
+    .map((name) => parseDefinition(JSON.parse(readFileSync(join(dir, name), "utf8"))));
 };
 
 export const runDefinition = async (

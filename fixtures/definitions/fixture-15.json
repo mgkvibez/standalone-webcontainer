@@ -4,39 +4,69 @@
   "slug": "fixture-15",
   "lane": "boundary",
   "title": "A native addon is refused cleanly, on purpose",
-  "intent": "The only fixture that must NOT pass cleanly. Native addons cannot run in the browser lane, so the correct behaviour is a typed, immediate refusal. This proves the runtime can say no, which is what separates a limitation from a defect.",
+  "intent": "The only fixture that must NOT pass cleanly. Native addons cannot run in the browser lane, so the correct behaviour is a typed, immediate refusal that the evidence can explain. This proves the runtime can say no, which is what separates a limitation from a defect.",
   "source": "our own scenario, informed by the incumbent's documented --no-addons policy",
   "status": "proposed",
   "steps": [
     {
-      "kind": "install",
-      "command": "npm install sharp",
-      "timeoutClass": "install",
-      "purpose": "Install a package whose main path is a native addon"
+      "kind": "run",
+      "command": "node load-addon.mjs",
+      "timeoutClass": "run",
+      "purpose": "Load a package whose main path requires its compiled .node binding"
     },
     {
       "kind": "run",
-      "command": "node require-native.mjs",
+      "command": "node after-refusal.mjs",
       "timeoutClass": "run",
-      "purpose": "Require it and expect refusal"
+      "purpose": "Must not run: a refusal ends the fixture, and this step's assertions must be not-evaluated"
     }
   ],
   "assertions": [
     {
+      "kind": "stdout-contains",
+      "step": 0,
+      "contains": "loading native binding"
+    },
+    {
       "kind": "exit-code",
-      "step": 1,
+      "step": 0,
       "equals": 1
     },
     {
       "kind": "stderr-contains",
-      "step": 1,
+      "step": 0,
       "contains": "native addon"
+    },
+    {
+      "kind": "stdout-contains",
+      "step": 1,
+      "contains": "after-refusal ran"
+    },
+    {
+      "kind": "exit-code",
+      "step": 1,
+      "equals": 0
+    },
+    {
+      "kind": "file-exists",
+      "target": "/after-refusal-ran.txt",
+      "step": 1
     }
   ],
+  "files": {
+    "package.json": "{\n  \"name\": \"fixture-15-native-addon\",\n  \"private\": true,\n  \"version\": \"0.0.0\",\n  \"type\": \"module\"\n}\n",
+    "load-addon.mjs": "// Fixture 15: a package whose main path is a native addon.\n//\n// The require below is the whole point. `native-binding` is a real package layout: its `main` is JavaScript, and that JavaScript\n// requires its compiled binding, which is how sharp, better-sqlite3 and every other node-gyp package is shaped. The runtime\n// cannot load a .node binary, so the correct behaviour is a typed refusal rather than a parse error or a silent success.\n//\n// The line before it is deliberate. Without a marker, a refusal at load time and a program that never ran produce the same\n// evidence (an exit status and some stderr), and a fixture that cannot tell those apart is not measuring the boundary.\n\nconsole.log(\"loading native binding\");\nawait import(\"./native-binding/index.js\");\nconsole.log(\"binding loaded\"); // Unreachable: a PASS here would mean the runtime claimed to load a native addon.\n",
+    "native-binding/package.json": "{\n  \"name\": \"native-binding\",\n  \"private\": true,\n  \"version\": \"0.0.0\",\n  \"main\": \"index.js\"\n}\n",
+    "native-binding/index.js": "// A package main that reaches for its compiled binding, exactly as a node-gyp package does.\nmodule.exports = require(\"./build/Release/addon.node\");\n",
+    "native-binding/build/Release/addon.node": "ELF\u0002\u0001\u0001\u0000native-addon-placeholder\u0000",
+    "after-refusal.mjs": "// Never reached: the run stops at the refusal (ADR-0014 D-3), so this step is recorded as skipped rather than quietly omitted.\nimport { writeFileSync } from \"node:fs\";\nwriteFileSync(\"/after-refusal-ran.txt\", \"step 2 ran\");\nconsole.log(\"after-refusal ran\");\n"
+  },
   "expected": [
     "UNSUPPORTED_BY_DESIGN"
   ],
   "knownLimits": [
-    "A PASS here would mean the runtime claimed to load a native addon and would be a false positive. A TIMEOUT or an unstructured crash is still a defect: refusal must be fast and typed."
+    "A PASS here would mean the runtime claimed to load a native addon and would be a false positive. A TIMEOUT or an unstructured crash is still a defect: refusal must be fast and typed.",
+    "The package is vendored in the fixture rather than installed from a registry, so the fixture is hermetic and measures the loader, not the installer. Its shape is a node-gyp package's shape: a JavaScript main that requires ./build/Release/addon.node.",
+    "The addon file itself is a placeholder with the ELF magic, not a compiled binding. The runtime refuses a .node path by capability, before reading the file, so the bytes cannot affect the classification."
   ]
 }

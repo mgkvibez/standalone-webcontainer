@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import { parseDefinition, type FixtureDefinition } from "../../src/harness/definition.js";
 import { assertionState, decideVerdict, runFixture, type StepRun } from "../../src/harness/runner.js";
 import type { AssertionEnvironment, AssertionResult, StepRecord } from "../../src/harness/assertions.js";
+import { definitionPayload } from "../../src/harness/freeze.js";
 import { GATE_THRESHOLD } from "../../src/harness/score.js";
 import { createRefusal, type Refusal } from "../../src/runtime/refusal.js";
 import { testProvenance } from "../helpers/provenance.js";
@@ -312,11 +313,23 @@ describe("T14 the production consumer ignores not-evaluated", () => {
 
 describe("T15 the guards: nothing was relaxed to make this work", () => {
   const sha256 = (path: string): string => createHash("sha256").update(readFileSync(path)).digest("hex");
+  /** SHA-256 of the definition's canonical content with `status` excluded - the text `hashDefinition` pins (ADR-0007). */
+  const contentPin = (path: string): string => {
+    const parsed = parseDefinition(JSON.parse(readFileSync(path, "utf8")));
+    return createHash("sha256").update(definitionPayload(parsed)).digest("hex");
+  };
 
-  it("leaves fixture 15 byte-identical to the commit before this work", () => {
-    // Hashes verified against 429a019 by hand. Editing the fixture to fit the code is the dishonesty the charter forbids.
-    expect(sha256("fixtures/definitions/fixture-15.json")).toBe(
-      "98c336562b54fe93e4243cf87410f96f560634d39527e1256d07b949513ea025",
+  it("pins fixture 15's authored content, so it cannot be edited to fit the code", () => {
+    // This guard used to be a byte hash of the UNAUTHORED definition (`429a019`, 98c3365...), because ADR-0014 §8 forbade editing
+    // fixture 15 to make the refusal path look right. The owner then ordered the fixture authored, which is exactly the edit that
+    // hash forbade, so the pin was re-taken rather than dropped (ADR-0014 §14). It is taken over the definition's canonical CONTENT
+    // with `status` excluded - the text `hashDefinition` pins - so the owner freezing the fixture does not trip a guard meant for
+    // editors. The assertion's meaning is unchanged: an edit to the fixture fails here, by name.
+    //
+    // The semantic half of the guard (lane, the exact `expected` set, the refusal-bearing assertions, the post-refusal controls) is
+    // `tests/unit/harness.fixture-15.test.ts`; this half catches every other silent edit, including one nobody thought to assert.
+    expect(contentPin("fixtures/definitions/fixture-15.json")).toBe(
+      "70e461bc5b2ccc56abaa1b7a0d8b8dc54431a269a8d84b763148db7aa19545f0",
     );
   });
 
