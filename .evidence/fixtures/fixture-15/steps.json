@@ -1,32 +1,34 @@
 [
   {
     "index": 0,
-    "kind": "install",
-    "command": "npm install sharp",
+    "kind": "run",
+    "command": "node load-addon.mjs",
     "state": "ran",
-    "termination": "ok",
-    "detail": "builtin command reported a failure: npm: only npm install/npm ci and --omit=dev are supported; package arguments and other flags are refused",
-    "elapsedMs": 0,
+    "termination": "unsupported",
+    "detail": "process 1 ended with a refusal: native addon (native-addon) — Cannot load native addon /native-binding/build/Release/addon.node: native addons are not supported in this runtime. A package that needs one must ship a WASM build or be replaced with a pure-JS alternative.",
+    "elapsedMs": 39,
     "record": {
       "index": 0,
       "exitCode": 1,
-      "stdout": "",
-      "stderr": "npm: only npm install/npm ci and --omit=dev are supported; package arguments and other flags are refused"
+      "stdout": "loading native binding\n",
+      "stderr": "ProcessRefusal: Cannot load native addon /native-binding/build/Release/addon.node: native addons are not supported in this runtime. A package that needs one must ship a WASM build or be replaced with a pure-JS alternative.\n    at CommonJsLoader.loadFile (/tmp/p06-main/src/runtime/commonjs.ts:527:13)\n    at CommonJsLoader.require (/tmp/p06-main/src/runtime/commonjs.ts:778:25)\n    at requireFromHere (/tmp/p06-main/src/runtime/commonjs.ts:573:66)\n    at Object.eval (/native-binding/index.js:4:18)\n    at CommonJsLoader.loadFile (/tmp/p06-main/src/runtime/commonjs.ts:692:13)\n    at CommonJsLoader.loadFileAsync (/tmp/p06-main/src/runtime/commonjs.ts:707:25)\n    at CommonJsLoader.importModule (/tmp/p06-main/src/runtime/commonjs.ts:721:24)\n    at /tmp/p06-main/src/runtime/commonjs.ts:641:61\n    at __esmDynamicImport (/load-addon.mjs:7:38)\n    at eval (/load-addon.mjs:19:7)\n"
+    },
+    "refusal": {
+      "code": "native-addon",
+      "capability": "native addon",
+      "message": "Cannot load native addon /native-binding/build/Release/addon.node: native addons are not supported in this runtime. A package that needs one must ship a WASM build or be replaced with a pure-JS alternative.",
+      "subject": "/native-binding/build/Release/addon.node"
     }
   },
   {
     "index": 1,
     "kind": "run",
-    "command": "node require-native.mjs",
-    "state": "ran",
-    "termination": "ok",
-    "detail": "builtin command completed: node: cannot find module '/require-native.mjs'",
+    "command": "node after-refusal.mjs",
+    "state": "skipped",
+    "skipReason": "step 0 refused native addon (native-addon)",
+    "termination": "not-run",
+    "detail": "not run: step 0 refused native addon (native-addon)",
     "elapsedMs": 0,
-    "record": {
-      "index": 1,
-      "exitCode": 0,
-      "stdout": "",
-      "stderr": "node: cannot find module '/require-native.mjs'"
-    }
+    "record": null
   }
 ]

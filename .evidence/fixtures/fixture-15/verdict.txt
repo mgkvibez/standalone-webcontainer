@@ -1,4 +1,8 @@
 fixture: fixture-15
-evidence schema: 2
-classification: RUNTIME_INCOMPATIBILITY
-reason: assertion failed: exit-code: expected exit code 1, observed 0 (and 1 more)
+evidence schema: 4
+run: 20261114193149-70e461bc-3b36513e
+lane: offline corpus (fixtures/registry)
+commit: 37a56ea90e9ed40596d7c598ad10e32c869e34d2
+classification: UNSUPPORTED_BY_DESIGN
+reason: step 0 (node load-addon.mjs) was refused by design: native addon (native-addon) — Cannot load native addon /native-binding/build/Release/addon.node: native addons are not supported in this runtime. A package that needs one must ship a WASM build or be replaced with a pure-JS alternative. [1 later step skipped; 3 assertion(s) not evaluated]
+refusal: native-addon (native addon)
