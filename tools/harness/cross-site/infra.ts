@@ -1,52 +1,41 @@
 /**
- * Infrastructure for the cross-site harness: reserved hostnames, a locally trusted
- * CA per browser, and one HTTPS fixture server.
+ * Unprivileged infrastructure for the cross-site harness: hostname verification, per-user CA
+ * trust, one HTTPS fixture server, and the diagnostics that make a launch failure obvious.
  *
- * Nothing here is deployed and nothing here is a certificate bypass. Every browser
- * is made to genuinely trust the CA by the mechanism that browser reads, which is
- * different for each of them (measured, see docs/deploy/cross-site-harness.md).
+ * Everything here runs as the invoking user. System-wide work (OS packages, the system trust
+ * store, /etc/hosts) lives in system-setup.ts and must already have been done.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createServer as createHttpsServer, type Server } from "node:https";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
+import { chromium, firefox, webkit } from "@playwright/test";
 import { buildDocuments } from "./documents.js";
+import { ALL_HOSTS, HarnessInfrastructureError, HOSTS, HOSTS_MARKER, PORT, type HarnessState } from "./state.js";
 
-export class HarnessInfrastructureError extends Error {}
+export { HOSTS, HarnessInfrastructureError, PORT } from "./state.js";
 
-export const HOSTS = {
-  /** Editor stand-in for the cross-site cases. */
-  app: "swc-app.test",
-  /** A second registrable domain, used as another top-level site. */
-  other: "swc-other.test",
-  /** Engine stand-in for the cross-site cases. */
-  engine: "swc-engine.test",
-  /** Same registrable domain as `sameEngine`, different origin: design A's shape. */
-  sameApp: "a.swc.test",
-  sameEngine: "b.swc.test",
-} as const;
-
-export const ALL_HOSTS = Object.values(HOSTS);
-export const PORT = 9443;
-const MARKER = "# swc-cross-site-harness";
-
-export function requireRoot(what: string): void {
-  if (typeof process.getuid === "function" && process.getuid() !== 0) {
+export function verifyHostsReserved(): void {
+  const text = readFileSync("/etc/hosts", "utf8");
+  const missing = ALL_HOSTS.filter((host) => !new RegExp(`^\\s*127\\.0\\.0\\.1\\s+${host.replace(/\./g, "\\.")}\\s*$`, "m").test(text));
+  if (missing.length > 0) {
     throw new HarnessInfrastructureError(
-      `${what} needs root: /etc/hosts and the system trust store are root-owned. Re-run under sudo.`,
+      `hostnames not reserved in /etc/hosts (missing ${missing.join(", ")}). Run the privileged setup first: `
+      + "sudo npm run harness:cross-site:setup",
+    );
+  }
+  if (!text.includes(HOSTS_MARKER)) {
+    throw new HarnessInfrastructureError(
+      "/etc/hosts has the hostnames but not the harness marker; run sudo npm run harness:cross-site:setup",
     );
   }
 }
 
-/** Add the reserved hostnames, remembering the previous file so it can be restored. */
-export function installHosts(): () => void {
-  requireRoot("reserving test hostnames in /etc/hosts");
-  const path = "/etc/hosts";
-  const original = readFileSync(path, "utf8");
-  const block = [MARKER, ...ALL_HOSTS.map((host) => `127.0.0.1 ${host}`), MARKER, ""].join("\n");
-  writeFileSync(path, original + (original.endsWith("\n") ? "" : "\n") + block);
-  return () => writeFileSync(path, original);
+export interface TrustSetup {
+  readonly firefoxProfileDir: string;
+  readonly chromiumNssDir: string;
+  readonly cleanup: () => void;
 }
 
 function tryRun(cmd: string, args: readonly string[]): void {
@@ -66,77 +55,71 @@ function run(cmd: string, args: readonly string[]): string {
   }
 }
 
-export interface TrustSetup {
-  readonly caCertPath: string;
-  readonly leafKeyPath: string;
-  readonly leafCertPath: string;
-  readonly firefoxProfileDir: string;
-  readonly cleanup: () => void;
-}
-
 /**
- * Generate a CA and a leaf covering every harness hostname, then make each browser
- * trust the CA by the store it actually reads:
- *   - WebKit  -> the system bundle (/etc/ssl/certs)
- *   - Chromium -> the NSS database at $HOME/.pki/nssdb (the system bundle is NOT enough)
- *   - Firefox -> the per-profile NSS database (enterprise roots and policies.json are NOT enough)
+ * Trust the CA in the two browsers that do not read the system bundle, using the databases
+ * those browsers actually open — in THIS user's home and THIS harness's profile. If this runs
+ * as root, it writes /root/.pki and the trust applies to the wrong identity, which is exactly
+ * the failure that made the CI lane red.
  */
-export function installTrust(): TrustSetup {
-  requireRoot("installing a locally trusted CA");
-  const dir = join(tmpdir(), `swc-cross-site-${process.pid}`);
-  mkdirSync(dir, { recursive: true });
-  const caKey = join(dir, "ca.key");
-  const caCert = join(dir, "ca.crt");
-  const leafKey = join(dir, "leaf.key");
-  const leafCsr = join(dir, "leaf.csr");
-  const leafCert = join(dir, "leaf.crt");
-  const ext = join(dir, "leaf.ext");
-  const profile = join(dir, "firefox-profile");
-
-  run("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", caKey, "-out", caCert,
-    "-days", "2", "-subj", "/CN=swc cross-site harness CA"]);
-  run("openssl", ["req", "-newkey", "rsa:2048", "-nodes", "-keyout", leafKey, "-out", leafCsr,
-    "-subj", `/CN=${HOSTS.app}`]);
-  writeFileSync(ext, `subjectAltName=${ALL_HOSTS.map((host) => `DNS:${host}`).join(",")}\nbasicConstraints=CA:FALSE\n`);
-  run("openssl", ["x509", "-req", "-in", leafCsr, "-CA", caCert, "-CAkey", caKey, "-CAcreateserial",
-    "-out", leafCert, "-days", "2", "-extfile", ext]);
-
+export function prepareBrowserTrust(state: HarnessState): TrustSetup {
   try {
-    // `certutil -H` exits non-zero after printing usage, so it cannot be the probe.
     execFileSync("sh", ["-c", "command -v certutil"], { stdio: "ignore" });
   } catch {
     throw new HarnessInfrastructureError(
       "certutil is missing; install it (Debian/Ubuntu: apt-get install -y libnss3-tools). Chromium and Firefox both need it.",
     );
   }
+  const home = homedir();
+  const chromiumNssDir = join(home, ".pki", "nssdb");
+  mkdirSync(chromiumNssDir, { recursive: true });
+  tryRun("certutil", ["-d", `sql:${chromiumNssDir}`, "-D", "-n", "swc-cross-site-harness"]);
+  run("certutil", ["-d", `sql:${chromiumNssDir}`, "-A", "-t", "C,,", "-n", "swc-cross-site-harness", "-i", state.caCertPath]);
 
-  // WebKit: system bundle.
-  const systemStore = "/usr/local/share/ca-certificates/swc-cross-site-harness.crt";
-  writeFileSync(systemStore, readFileSync(caCert));
-  run("update-ca-certificates", []);
-
-  // Chromium: NSS database in $HOME/.pki/nssdb.
-  const nssDb = join(homedir(), ".pki", "nssdb");
-  mkdirSync(nssDb, { recursive: true });
-  tryRun("certutil", ["-d", `sql:${nssDb}`, "-D", "-n", "swc-cross-site-harness"]);
-  run("certutil", ["-d", `sql:${nssDb}`, "-A", "-t", "C,,", "-n", "swc-cross-site-harness", "-i", caCert]);
-
-  // Firefox: the profile database it will actually open.
-  mkdirSync(profile, { recursive: true });
-  tryRun("certutil", ["-d", `sql:${profile}`, "-N", "--empty-password"]);
-  run("certutil", ["-d", `sql:${profile}`, "-A", "-t", "C,,", "-n", "swc-cross-site-harness", "-i", caCert]);
+  // Fresh profile every run: a reused profile carries the previous run's service worker and
+  // storage, which turns "does this browser control a new registration" into "what did last
+  // run leave behind". CI is a clean runner, so the harness makes itself look like one.
+  const firefoxProfileDir = join(state.stateDir, "firefox-profile");
+  rmSync(firefoxProfileDir, { recursive: true, force: true });
+  mkdirSync(firefoxProfileDir, { recursive: true });
+  tryRun("certutil", ["-d", `sql:${firefoxProfileDir}`, "-N", "--empty-password"]);
+  tryRun("certutil", ["-d", `sql:${firefoxProfileDir}`, "-D", "-n", "swc-cross-site-harness"]);
+  run("certutil", ["-d", `sql:${firefoxProfileDir}`, "-A", "-t", "C,,", "-n", "swc-cross-site-harness", "-i", state.caCertPath]);
 
   return {
-    caCertPath: caCert,
-    leafKeyPath: leafKey,
-    leafCertPath: leafCert,
-    firefoxProfileDir: profile,
+    firefoxProfileDir,
+    chromiumNssDir,
     cleanup: () => {
-      try { rmSync(systemStore, { force: true }); execFileSync("update-ca-certificates", [], { stdio: "ignore" }); } catch { /* best effort */ }
-      try { execFileSync("certutil", ["-d", `sql:${nssDb}`, "-D", "-n", "swc-cross-site-harness"], { stdio: "ignore" }); } catch { /* best effort */ }
-      rmSync(dir, { recursive: true, force: true });
+      tryRun("certutil", ["-d", `sql:${chromiumNssDir}`, "-D", "-n", "swc-cross-site-harness"]);
+      rmSync(firefoxProfileDir, { recursive: true, force: true });
     },
   };
+}
+
+function describe(path: string): string {
+  if (!existsSync(path)) return `${path} (missing)`;
+  const stat = statSync(path);
+  const mode = (stat.mode & 0o777).toString(8).padStart(3, "0");
+  return `${path} (mode ${mode}, uid ${stat.uid}, gid ${stat.gid})`;
+}
+
+/** Printed before any browser launches, so a launch failure is diagnosable from the log alone. */
+export function printDiagnostics(trust: TrustSetup): void {
+  const uid = typeof process.getuid === "function" ? process.getuid() : -1;
+  const gid = typeof process.getgid === "function" ? process.getgid() : -1;
+  let whoami = "unknown";
+  try { whoami = execFileSync("whoami", { encoding: "utf8" }).trim(); } catch { /* best effort */ }
+  const lines = [
+    `id: uid=${uid} gid=${gid}`,
+    `whoami: ${whoami}`,
+    `HOME: ${homedir()}`,
+    `home ownership: ${describe(homedir())}`,
+    `nss db: ${describe(trust.chromiumNssDir)}`,
+    `firefox profile: ${describe(trust.firefoxProfileDir)}`,
+  ];
+  for (const [name, exe] of [["chromium", chromium.executablePath()], ["firefox", firefox.executablePath()], ["webkit", webkit.executablePath()]] as const) {
+    lines.push(`${name} executable: ${describe(exe)}`);
+  }
+  process.stdout.write(`${lines.join("\n")}\n`);
 }
 
 export interface Fixture {
@@ -145,14 +128,13 @@ export interface Fixture {
 }
 
 /**
- * One HTTPS server answers every hostname. Behaviour is selected by `Host`, and the
- * document roles are explicit: embedder pages, engine documents, the worker script,
- * the credentialed-echo endpoint and the inert storage reader.
+ * One HTTPS server answers every hostname. Behaviour is selected by `Host`: embedder pages,
+ * engine documents, the worker script, the credentialed-echo endpoint, the inert reader.
  */
-export function startFixture(trust: TrustSetup): Promise<Fixture> {
+export function startFixture(state: HarnessState): Promise<Fixture> {
   const docs = buildDocuments(HOSTS, PORT);
   const server: Server = createHttpsServer(
-    { key: readFileSync(trust.leafKeyPath), cert: readFileSync(trust.leafCertPath) },
+    { key: readFileSync(state.leafKeyPath), cert: readFileSync(state.leafCertPath) },
     (req, res) => {
       const host = String(req.headers.host ?? "").split(":")[0] ?? "";
       const url = new URL(req.url ?? "/", `https://${host}`);
@@ -171,11 +153,12 @@ export function startFixture(trust: TrustSetup): Promise<Fixture> {
         // Reflect the caller: the same-site case has a different engine origin, and a
         // hardcoded allow-origin would make its fetch fail for reasons unrelated to cookies.
         const origin = String(req.headers.origin ?? `https://${HOSTS.engine}:${PORT}`);
-        return send("application/json", JSON.stringify({ cookieHeader: req.headers.cookie ?? null, origin: req.headers.origin ?? null, referer: req.headers.referer ?? null, secFetchSite: req.headers["sec-fetch-site"] ?? null }), {
-          "access-control-allow-origin": origin,
-          "access-control-allow-credentials": "true",
-          vary: "origin",
-        });
+        return send("application/json", JSON.stringify({
+          cookieHeader: req.headers.cookie ?? null,
+          origin: req.headers.origin ?? null,
+          referer: req.headers.referer ?? null,
+          secFetchSite: req.headers["sec-fetch-site"] ?? null,
+        }), { "access-control-allow-origin": origin, "access-control-allow-credentials": "true", vary: "origin" });
       }
       if (!isEngineHost && url.pathname === "/") {
         const engineHost = host === HOSTS.sameApp ? HOSTS.sameEngine : HOSTS.engine;
@@ -193,10 +176,4 @@ export function startFixture(trust: TrustSetup): Promise<Fixture> {
       });
     });
   });
-}
-
-export function assertRepoRoot(cwd: string): void {
-  if (!existsSync(join(cwd, "package.json"))) {
-    throw new HarnessInfrastructureError(`expected to run from the repository root, got ${cwd}`);
-  }
 }

@@ -62,17 +62,28 @@ const post = (payload) => { window.__result = payload; if (window.top !== window
     out.storagePrior = prior;
   } catch (error) { out.storageError = String(error && error.message || error); }
   try {
-    await navigator.serviceWorker.register("/sw.js", { scope: "/" });
-    out.registration = "accepted";
+    // A registration call that never settles would hide every later observation behind a
+    // harness timeout, so it is raced against a clock and the outcome is recorded explicitly.
+    const registration = navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    out.registration = await Promise.race([
+      registration.then(() => "accepted"),
+      new Promise((resolve) => setTimeout(() => resolve("pending"), 10000)),
+    ]);
   } catch (error) {
     out.registration = "refused";
     out.registrationDetail = String(error && error.message || error);
     post(out); return;
   }
+  // Activation first: ready resolves when the worker is active, and a claim cannot control
+  // anything before that. It is still not proof of control, so the wait below proves that.
+  out.activation = await Promise.race([
+    navigator.serviceWorker.ready.then(() => "active"),
+    new Promise((resolve) => setTimeout(() => resolve("activation-pending"), 10000)),
+  ]);
   out.controlledBeforeWait = Boolean(navigator.serviceWorker.controller);
   if (!navigator.serviceWorker.controller) {
     await new Promise((resolve) => {
-      const timer = setTimeout(() => resolve("timeout"), 8000);
+      const timer = setTimeout(() => resolve("timeout"), 15000);
       navigator.serviceWorker.addEventListener("controllerchange", () => { clearTimeout(timer); resolve("controllerchange"); }, { once: true });
     });
     out.controllerChange = "waited";

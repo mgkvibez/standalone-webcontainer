@@ -18,16 +18,16 @@ import type { Browser, BrowserContext, Page } from "@playwright/test";
 import { chromium, firefox, webkit } from "@playwright/test";
 import { assertTopology, describeTopology, TopologyMismatchError, type TopologyRecord } from "./topology.js";
 import {
-  ALL_HOSTS,
   HarnessInfrastructureError,
   HOSTS,
   PORT,
-  assertRepoRoot,
-  installHosts,
-  installTrust,
+  prepareBrowserTrust,
+  printDiagnostics,
   startFixture,
+  verifyHostsReserved,
   type Fixture,
 } from "./infra.js";
+import { ALL_HOSTS, assertUnprivileged, readState } from "./state.js";
 import { STORAGE_KEY } from "./documents.js";
 
 /** Pinned so a result is always attributable to an engine version. */
@@ -103,6 +103,8 @@ interface CaseResult {
   registration?: string | undefined;
   control?: boolean | undefined;
   controlAfter?: string | undefined;
+  navigationAttempts?: number;
+  pageDiagnostics?: string[];
   workerServed?: boolean | undefined;
   cookiesSent?: string[] | null | undefined;
   embedderCookies?: string | undefined;
@@ -114,6 +116,7 @@ interface CaseResult {
 
 interface EngineReport {
   tag?: string;
+  activation?: string;
   thirdParty?: boolean;
   storagePrior?: string | null;
   registration?: string;
@@ -169,12 +172,23 @@ async function runCase(
     throw error;
   }
 
+  const console_: string[] = [];
+  page.on("console", (message) => { if (message.type() === "error") console_.push(`console: ${message.text()}`); });
+  page.on("pageerror", (error) => console_.push(`pageerror: ${String(error.message).split("\n")[0]}`));
+  result.pageDiagnostics = console_;
+
   const inFrame = spec.frameRelationship === "third-party-iframe";
   let report: EngineReport;
   try {
     report = await openEngineReport(page, inFrame);
-  } catch (error) {
-    return { ...result, status: "infrastructure", detail: `engine document never reported: ${String((error as Error).message).split("\n")[0]}` };
+  } catch (firstError) {
+    try {
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 25_000 });
+      report = await openEngineReport(page, inFrame);
+      result.navigationAttempts = 2;
+    } catch {
+      return { ...result, status: "infrastructure", detail: `engine document never reported after two navigations: ${String((firstError as Error).message).split("\n")[0]}` };
+    }
   }
 
   result.frameThirdParty = report.thirdParty;
@@ -191,6 +205,24 @@ async function runCase(
     priorInThisPartition: report.storagePrior,
     ownCookie: report.ownCookie ?? null,
   };
+
+  // A third-party iframe that registers but never takes control within the bound is re-navigated
+  // once: a fresh client of an already active worker is controlled immediately, which separates a
+  // slow activation from a browser that will not control the frame at all.
+  if (inFrame && report.registration === "accepted" && report.control !== true) {
+    try {
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 25_000 });
+      const retried = await openEngineReport(page, true);
+      if (retried.control === true) {
+        report = { ...retried, registration: report.registration };
+        result.control = retried.control;
+        result.workerServed = retried.workerServed?.servedBySw;
+        result.cookiesSent = retried.credentialedFetch ? cookieNames(retried.credentialedFetch.cookieHeader) : result.cookiesSent;
+        if (retried.credentialedFetch) result.cookieProbe = retried.credentialedFetch;
+        result.controlAfter = "reload";
+      }
+    } catch { /* reported below */ }
+  }
 
   // A first-party document is not controlled until the fresh worker claims the client, and
   // engines differ on whether that lands on the first navigation (Firefox does not). One
@@ -241,7 +273,14 @@ async function runCase(
       problems.push(`SameSite=None cookie was not attached on a credentialed fetch (sent: ${sent.join(",") || "nothing"})`);
     }
   }
-  if (problems.length > 0) return { ...result, status: "harness-error", detail: problems.join("; ") };
+  if (problems.length > 0) {
+    const diagnostics = result.pageDiagnostics ?? [];
+    return {
+      ...result,
+      status: "harness-error",
+      detail: problems.join("; ") + (diagnostics.length > 0 ? ` [${diagnostics.slice(0, 3).join(" | ")}]` : ""),
+    };
+  }
   return result;
 }
 
@@ -322,22 +361,25 @@ function printTable(results: readonly CaseResult[]): void {
 
 async function main(): Promise<number> {
   const cwd = process.cwd();
-  assertRepoRoot(cwd);
   const requested = process.argv.slice(2).filter((arg) => !arg.startsWith("-"));
   const browsers: BrowserName[] = requested.length > 0 ? (requested as BrowserName[]) : ["chromium", "firefox", "webkit"];
 
-  let restoreHosts: () => void;
-  let trust: ReturnType<typeof installTrust>;
+  let trust: ReturnType<typeof prepareBrowserTrust>;
+  let fixture: Fixture;
   try {
-    restoreHosts = installHosts();
-    trust = installTrust();
+    // Order matters: refuse root first, because a root browser trusts /root/.pki and the whole
+    // point of the lane is to test the identity that actually runs it.
+    assertUnprivileged();
+    const state = readState();
+    verifyHostsReserved();
+    trust = prepareBrowserTrust(state);
+    printDiagnostics(trust);
+    fixture = await startFixture(state);
   } catch (error) {
     const message = error instanceof HarnessInfrastructureError ? error.message : String(error);
     process.stderr.write(`infrastructure: ${message}\n`);
     return 1;
   }
-
-  const fixture = await startFixture(trust);
   const results: CaseResult[] = [];
   try {
     for (const name of browsers) {
@@ -355,6 +397,25 @@ async function main(): Promise<number> {
         await driver.close();
         continue;
       }
+      // Preflight: prove the CA is trusted by the process that just launched, before any row
+      // is recorded. A browser that cannot negotiate HTTPS yields infrastructure, never a
+      // compatibility verdict about service workers.
+      try {
+        const probe = await driver.context.newPage();
+        await probe.goto(`${fixture.origin(HOSTS.engine)}/`, { waitUntil: "domcontentloaded", timeout: 25_000 });
+        const protocol = await probe.evaluate(() => location.protocol);
+        await probe.close();
+        if (protocol !== "https:") throw new Error(`navigation settled on ${protocol}`);
+      } catch (error) {
+        results.push({
+          ...versionBase,
+          caseId: "trust-preflight",
+          status: "infrastructure",
+          detail: `TLS navigation failed in the launched browser (${TRUST_PATH[name].split("—")[0]?.trim()}): ${String((error as Error).message ?? error).split("\n")[0]}`,
+        });
+        await driver.close();
+        continue;
+      }
       try {
         const page = await driver.context.newPage();
         for (const spec of CASES) {
@@ -369,7 +430,6 @@ async function main(): Promise<number> {
   } finally {
     await fixture.close();
     trust.cleanup();
-    restoreHosts();
   }
 
   printTable(results);
