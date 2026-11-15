@@ -7,6 +7,11 @@ enforce between origins and sites, plus what ADR-0019 specifies and W-19 still o
 Scope: compare the two approved candidate topologies for the preview tier and recommend one. The Worker itself is H2's
 next step and is not written yet.
 
+**Revision, 2026-11-15, second pass (manager review).** §8 extended with a measured cookie-scope investigation: separate
+origins do **not** isolate cookies, a preview can write a parent-domain cookie for the engine site and every other project
+reads it, and the Worker plus the preview service worker must strip `Cookie` inbound and `Set-Cookie` outbound while the
+design still never trusts a cookie. The engine-site rule gains the cookie clause. Nothing implemented.
+
 **Revision, 2026-11-15 (manager review).** Three documentation corrections: the runtime placement contradiction is gone
 (the runtime and previews are on the engine site, each on its own origin, recorded as decided rather than open, with the
 engine-site rule stated); the `SameSite=None` note now says such a cookie is *eligible* for cross-site requests subject to
@@ -153,6 +158,9 @@ guarantee, and it is worth having because it is enforced by the browser rather t
 - **It does not stop a request being sent to an authenticated endpoint either.** CORS is a response-side control: it
   decides whether the caller may *read* the response, not whether the request is made. A credentialed request the browser
   does attach in some future configuration has still happened.
+- **It says nothing about cookies *inside* the engine site.** Previews share a registrable domain, so previewed code can
+  write a parent-domain cookie that every other preview origin reads (§8, measured). B separates the editor from that
+  namespace; it does not make the namespace private.
 - **It is not a sandbox.** Nothing in this document should be read as one.
 
 So endpoint authorisation, server-side CSRF protection (a token bound to the session, and `Origin` / `Sec-Fetch-Site`
@@ -307,6 +315,129 @@ and both are easy to violate accidentally in a Worker:
 
 Chrome's ancestor bit and per-site partitioning reduce cross-project leaks further in B, but they are not the mechanism.
 
+### Cookies are not isolated by separate origins (measured, 2026-11-15)
+
+Separate origins give separate `localStorage`, `IndexedDB`, `caches` and service-worker scopes. **They do not give separate
+cookie scope**, and that has to be said plainly because the rest of this document reads as if they might.
+
+Measured over HTTPS on real registrable domains in **Chromium 158.0.8127.18** and **WebKit 27.2**, with
+`a.preview.test`, `b.preview.test`, `runtime.preview.test` as the engine family and `app.test` as the editor (the same
+results in both browsers):
+
+| Attempt | Result |
+| --- | --- |
+| `a.preview.test` sets `poison=from-a; Domain=preview.test` | **accepted** |
+| `b.preview.test` reads `document.cookie` | **sees `poison=from-a`** |
+| `runtime.preview.test` reads `document.cookie` | **sees `poison=from-a`** |
+| `app.test`, the editor, reads `document.cookie` | does **not** see it |
+| `a.preview.test` sets `Domain=app.test` | **rejected** |
+| `a.preview.test` sets `__Host-poison=x; Domain=preview.test` | **rejected** |
+| `b.preview.test` writes `poison=from-b; Domain=preview.test`, then `a` reads | `a` reads `from-b`: last writer wins |
+| `b.preview.test` sets `__Host-secret=…` host-only, then `a` tries `__Host-secret=evil; Domain=preview.test` | **rejected**; `b` still reads its own value |
+
+#### 1. Can preview JavaScript create parent-domain cookies, and do other projects see them?
+
+**Yes to both.** A cookie's `Domain` attribute only has to *domain-match* the request host, and `a.preview.test` is a
+subdomain of `preview.test`, so the write is legal. The cookie is then attached to every host under `preview.test`, and any
+of those origins reads it with plain `document.cookie`. No exploit is required. This is the threat scenario the review
+described, and it is real.
+
+#### 2. Can cookies expose data across projects, or cause tossing and service confusion?
+
+All four are possible, and three of them are measured above:
+
+- **Cross-project data exposure**: one project can leave a value that another project reads. It is a channel, not just
+  noise.
+- **Cookie tossing / name collisions**: writes are last-writer-wins across projects (measured in both directions), so two
+  projects using the same cookie name will silently overwrite each other.
+- **Service confusion**: a preview can pre-seed a name that *another* project's own logic reads (a session-ish name, a
+  theme, a feature flag, a "signed out" marker), so that project behaves as if state it never set were true. It is not a
+  privilege escalation on its own, and it becomes one the moment any code on the engine site trusts a cookie for identity.
+- **Persistence**: a cookie survives the preview that set it until it expires or the browser session ends, so it can sit
+  in the jar waiting for the next project on that namespace.
+
+What is **not** possible, and this is the boundary that matters: a preview cannot set or read a cookie for `app.test`.
+`Domain` cannot span registrable domains (measured: rejected), so the editor's cookies are out of reach from the engine
+site in both designs.
+
+#### 3. Can the Worker strip `Cookie` in and `Set-Cookie` out, and where?
+
+Partly, and only for traffic that crosses the boundary:
+
+- **Inbound**: strip the `Cookie` header on every request to a preview host or the runtime origin. The Worker is the only
+  network entry point for those hosts, so this is enforceable there — and it must **also** be done in the preview service
+  worker, because the SW answers `/preview/<port>/…` from memory without the request ever reaching the edge. Two entry
+  points, two places to strip. (H1 established the same shape for headers: `_headers` does not apply to Worker responses,
+  so the Worker must send them itself.)
+- **Outbound**: strip `Set-Cookie` from every response the Worker returns and every response the preview SW synthesises,
+  and never add `Cache-Control`/`Set-Cookie` pairs that could be replayed. A user's dev server inside the preview can
+  legitimately return `Set-Cookie`; our boundary must drop it rather than pass it through.
+- **What stripping cannot do**, and this is the limit that must not be blurred: it cannot stop the browser's cookie jar
+  from *storing* a cookie written by `document.cookie` inside previewed code, and it cannot stop another preview page from
+  *reading* it, because that read is a jar read and never a request. It also cannot stop requests that never pass through
+  our boundary — a navigation, an `<img>` beacon, or a `fetch` to a sibling preview host that the SW does not scope.
+
+So stripping protects **our handlers** from cookie-based trust. It does not produce cookie isolation.
+
+#### 4. Can the runtime endpoints operate without cookies?
+
+**Yes, and they must.** Identity on the engine site is the per-connection nonce in the URL (§5), not a cookie; the runtime
+origin holds no cookies and no storage (ADR-0019, and the engine-site rule above). With `Cookie` stripped inbound and
+`Set-Cookie` stripped outbound, no cookie reaches a handler we own, and none leaves one.
+
+The rule to hold, stated so a review can test it: **no endpoint on the engine site may derive identity, authorisation or
+trust from a cookie.** A dev server running *inside* a preview is the user's own code and is outside that guarantee; if it
+trusts a cookie, the cookie is one that previewed code could have set.
+
+#### 5. Host-only and `__Host-` cookies: what they give, and what they do not
+
+- `__Host-` requires `Secure`, `Path=/` and **no `Domain` attribute**, so the cookie is host-only by construction. Measured:
+  a sibling origin cannot set a `__Host-` cookie with a `Domain`, and cannot overwrite one already set on another host.
+- Host-only cookies without the prefix are also safe from *sibling writes*: there is no API to set a cookie for another
+  host. They are **not** safe from a sibling *reading a parent-domain cookie of the same name*, and they do not stop the
+  parent-domain cookie from existing alongside them.
+- The prefix protects only cookies that use it. It does not remove cookies already in the jar, does not stop
+  non-prefixed parent-domain cookies, and gives nothing if the value is set by code on the *same* host (the case that does
+  not arise here, since each project has its own host).
+
+#### 6. Is any additional origin or site separation necessary?
+
+- **Editor versus engine: no further separation is needed.** It is already a site boundary, and both directions are
+  measured: a preview cannot set a cookie for `app.test`, and the editor does not see engine cookies.
+- **Preview versus preview, and preview versus runtime: no further separation is *achievable* within one registrable
+  domain.** Cookie scope is host-and-site based, so per-project cookie isolation would require one registrable domain per
+  project, which is not viable. The design must therefore not *depend* on cookie isolation there — which is why the rule
+  is "no cookies on the engine site" rather than "careful cookies".
+- **The tripwire to record:** if the runtime origin ever needs a cookie for any reason, that is the moment it needs its own
+  registrable domain, because it would otherwise share the cookie namespace with every project's preview. Written here so
+  the decision cannot be made accidentally by adding one `Set-Cookie`.
+
+#### What is guaranteed, what is mitigated, what remains possible
+
+**Guaranteed (measured in two browsers, browser-enforced):**
+
+- A preview cannot set or read a cookie for the editor's registrable domain.
+- A `__Host-` cookie cannot be created with a `Domain` attribute, and cannot be overwritten by a sibling origin.
+- The editor is a different site, so the same-site ambient-cookie scenario in §2 does not apply to it.
+
+**Mitigated (enforced by our code, and only on paths that cross it):**
+
+- Stripping `Cookie` inbound and `Set-Cookie` outbound at **both** entry points (Worker and preview service worker) means
+  our handlers never observe a cookie, and no response of ours plants one.
+- Identity stays the nonce, never a cookie, so a planted cookie has nothing to be trusted for.
+
+**Still possible, and accepted:**
+
+- Preview code can set a parent-domain cookie for the engine site and every other project can read it.
+- Cross-project last-writer-wins collisions on any cookie name.
+- A preview can pre-seed state that another project's own client logic reads.
+- A planted cookie can persist past the preview that set it.
+- A request that bypasses our boundary (navigation, beacon, sibling-host subresource) still carries the cookie.
+
+**Not implemented.** This section is documentation. The strips in "Mitigated" are requirements for the Worker (H2) and
+the preview service worker (H3), each with a contract test, and neither exists yet. Nothing here claims the preview tier
+is sandboxed: it is not.
+
 ## 9. Cost and operational complexity
 
 | | A | B |
@@ -367,7 +498,9 @@ them onto a third registrable domain was considered and dropped: another domain 
 today.
 
 **The rule that makes that acceptable, stated so it can be enforced:** the engine site must contain no editor credentials,
-no editor cookies and no editor storage. Concretely, nothing under `example-preview.com` may ever hold a session, a token,
+no editor cookies and no editor storage, **and no endpoint on it may trust a cookie at all** (§8 measures why: previewed
+code can write a parent-domain cookie that every other project's origin reads, so a cookie on this site is a shared
+namespace, not private state). Concretely, nothing under `example-preview.com` may ever hold a session, a token,
 or a copy of the editor's project store, and no engine origin may be granted a "trusted first party" exemption from the
 editor's API. If that rule is ever violated, the reason for grouping runtime and previews on one site is gone and the
 runtime needs its own registrable domain.
