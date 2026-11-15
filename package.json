@@ -43,7 +43,9 @@
     "diff:modules": "vite-node tools/differential/modules.ts",
     "diff:modules:strict": "vite-node tools/differential/modules.ts --strict",
     "fixtures:run": "vite-node tools/harness/run-fixture.ts",
-    "snapshot:build": "vite-node tools/npm/build-snapshot.ts"
+    "snapshot:build": "vite-node tools/npm/build-snapshot.ts",
+    "test:browser:cross-site": "vite-node tools/harness/cross-site/run.ts",
+    "test:browser:cross-site:chromium": "vite-node tools/harness/cross-site/run.ts chromium"
   },
   "devDependencies": {
     "@codemirror/lang-javascript": "^6.2.5",
