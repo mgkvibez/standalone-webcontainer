@@ -7,6 +7,12 @@ enforce between origins and sites, plus what ADR-0019 specifies and W-19 still o
 Scope: compare the two approved candidate topologies for the preview tier and recommend one. The Worker itself is H2's
 next step and is not written yet.
 
+**Revision, 2026-11-15 (manager review).** Three documentation corrections: the runtime placement contradiction is gone
+(the runtime and previews are on the engine site, each on its own origin, recorded as decided rather than open, with the
+engine-site rule stated); the `SameSite=None` note now says such a cookie is *eligible* for cross-site requests subject to
+the browser's third-party-cookie policy and that policy is explicitly not a security control; nothing else changed. W-15,
+W-19 and W-20 remain open and no runtime behaviour is claimed or changed.
+
 **Revision, 2026-11-14 (owner review).** Topology B is accepted. Two corrections applied to this document, both of which
 tighter wording would have avoided the first time: the `*.localhost` Chromium lane is no longer described as evidence of
 third-party service-worker behaviour (§3 now separates what that lane proves from what it does not), and §2 now states
@@ -52,8 +58,14 @@ previewed user code initiates. B moves that decision out of our code and into th
 expensive to retrofit later (a hostname change after launch means every stored project, every shared preview URL and every
 deployment target moves).
 
-What is *not* decided by this document: the second domain's name, whether `runtime.` sits on the engine domain or its own,
-and the ACM-versus-flat-naming trade in A. Those are the owner's, listed under "Decisions still open".
+**Decided with this revision (owner, 2026-11-15): the runtime and the previews both live on the engine site, each on its own
+origin.** `runtime.example-preview.com` serves the runtime frame and `{id}.example-preview.com` serves one preview each; both
+execute user code, so both belong on the engine site, and being same-site with each other is acceptable only because
+neither holds anything the editor owns. The engine site **must contain no editor credentials, no editor cookies and no
+editor storage**; the editor's session, its `localStorage` project store and anything it ever gains stay on the app
+registrable domain. "Decisions" below records it with the reasoning.
+
+What is still *not* decided: the second domain's name, and the ACM-versus-flat-naming trade in A. Those are the owner's.
 
 ## What the preview architecture actually rests on
 
@@ -128,10 +140,14 @@ guarantee, and it is worth having because it is enforced by the browser rather t
 
 - **It does not block cross-site requests.** Preview code can still send requests anywhere; the browser only refuses to
   attach credentials the cookie policy does not allow. Every request still arrives at whatever it addresses.
-- **It does not defeat a deliberately cross-site cookie.** A cookie set with `SameSite=None; Secure` is sent on
-  cross-site subresource requests by design, so if the editor ever sets one (an embed-friendly analytics or SSO cookie,
-  say), it is exposed to preview code in B exactly as it is in A. The rule that keeps B's guarantee is "the editor sets
-  no `SameSite=None` cookie for any authenticated purpose", and it needs to be stated where cookies are introduced.
+- **It does not defeat a deliberately cross-site cookie.** A cookie set with `SameSite=None; Secure` is **eligible** to be
+  sent on cross-site subresource requests; whether it actually is depends on the browser's third-party-cookie policy, the
+  user's settings and the current state of each engine's phase-out, all of which differ and all of which change. So if the
+  editor ever sets one (an embed-friendly analytics or SSO cookie, say), it may be exposed to preview code in B much as it
+  would be in A. **Third-party-cookie policy is a mitigation, not a security control**: it is user- and browser-controlled,
+  uneven across engines, and not something to rely on for an authenticated cookie. The rule that keeps B's guarantee is
+  "the editor sets no `SameSite=None` cookie for any authenticated purpose", and it needs to be written where cookies are
+  introduced.
 - **It does not cover unauthenticated actions.** An endpoint that accepts a write without a credential is equally
   writable from a preview in either design.
 - **It does not stop a request being sent to an authenticated endpoint either.** CORS is a response-side control: it
@@ -321,7 +337,7 @@ a wildcard DNS requirement and a wildcard TLS requirement") is A's shape, and it
 Vercel Pro wildcard as the blocker. The amendment should say:
 
 - Three origin families remain, but they are grouped into **two sites**: the editor site, and an engine site that holds the
-  runtime origin and every preview origin.
+  runtime origin and every preview origin, each on its own origin (decided 2026-11-15; see "Decisions").
 - The engine site **must hold no cookies, no editor storage and no credentials**. That is already true of the runtime
   origin by construction; making it a rule for the whole engine site is what keeps runtime-and-preview being same-site
   acceptable.
@@ -333,17 +349,37 @@ Vercel Pro wildcard as the blocker. The amendment should say:
 wildcard DNS and TLS, or an equivalent routing mechanism", which is agnostic about the site. It should point at this
 document and record that the preview base sits on the engine domain.
 
-## Decisions still open (owner)
+## Decisions
+
+### Decided: runtime placement (owner, 2026-11-15)
+
+**The runtime and the previews share the engine registrable domain, each on its own origin.**
+
+```text
+app.example.com                  editor            editor credentials, cookies and storage live here and only here
+runtime.example-preview.com      runtime frame     no cookies, no storage, no credentials (ADR-0019)
+{id}.example-preview.com         project preview   one origin per project
+```
+
+Reasoning, recorded so it is not re-litigated from a diagram: both engine origins execute user code, so neither is a place
+to keep anything the editor owns, and there is therefore nothing on the engine site for the runtime to reach. Separating
+them onto a third registrable domain was considered and dropped: another domain and zone for no boundary that matters
+today.
+
+**The rule that makes that acceptable, stated so it can be enforced:** the engine site must contain no editor credentials,
+no editor cookies and no editor storage. Concretely, nothing under `example-preview.com` may ever hold a session, a token,
+or a copy of the editor's project store, and no engine origin may be granted a "trusted first party" exemption from the
+editor's API. If that rule is ever violated, the reason for grouping runtime and previews on one site is gone and the
+runtime needs its own registrable domain.
+
+### Still open (owner)
 
 1. **Second domain name and whether to buy now.** B assumes one. Staging can prove the topology without buying (below),
    but the name should be chosen before any public launch of previews.
-2. **Where the runtime origin lives.** This document puts it on the engine domain (`runtime.example-preview.com`) because
-   it executes user code and must never share a site with credentials. The alternative — a third registrable domain just
-   for the runtime — is defensible and costs another domain and zone for no additional boundary that matters today.
-3. **ACM versus a flat hostname, only if A is chosen anyway.** A can avoid the paid add-on by naming previews
+2. **ACM versus a flat hostname, only if A is chosen anyway.** A can avoid the paid add-on by naming previews
    `{id}.example.com` (first-level, covered by Universal SSL) at the cost of an unguessable-but-colliding namespace under
    the apex and no clean Worker route pattern. Recorded for completeness; not recommended.
-4. **Whether the editor stays on Cloudflare Pages** (H1's assumption) while the engine zone hosts a standalone Worker.
+3. **Whether the editor stays on Cloudflare Pages** (H1's assumption) while the engine zone hosts a standalone Worker.
    That is the shape this document assumes; it is not implemented.
 
 ## Before B ships: the gates
