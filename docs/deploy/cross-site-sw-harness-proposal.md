@@ -1,8 +1,9 @@
 # Proposal: a cross-browser harness for third-party service workers
 
-Status: **proposal only.** Nothing here is implemented: no lane, no script, no CI job. This revision (2026-11-15, manager
-review) replaces the spike's conclusions with measurements taken across three browsers on the intended runner, and fixes
-the storage test the earlier version got wrong.
+Status: **proposal only.** Nothing here is implemented: no lane, no script, no CI job. This revision (2026-11-15, second
+pass) adds the solved Firefox trust path and a three-browser measurement of registration, control and worker-served
+responses, corrects the storage test, and records a layout mistake in the previous run that turned out to be the most
+useful measurement of all.
 
 It references `docs/deploy/h2-preview-domain-design.md`, which at the time of writing is PR #99 and not yet on `main`.
 
@@ -31,7 +32,7 @@ is its own registrable domain: genuine cross-site conditions, unlike `*.localhos
 | Browser | `update-ca-certificates` only | `--use-system-ca` | `security.enterprise_roots.enabled` | CA in the NSS database |
 | --- | --- | --- | --- | --- |
 | Chromium 158.0.8127.18 | `net::ERR_CERT_AUTHORITY_INVALID` | still `ERR_CERT_AUTHORITY_INVALID` | n/a | **works** (`certutil -d sql:$HOME/.pki/nssdb -A -t "C,,"`) |
-| Firefox 159.0 | `SEC_ERROR_UNKNOWN_ISSUER` | n/a | still `SEC_ERROR_UNKNOWN_ISSUER` | not tested (Firefox profile DB) |
+| Firefox 159.0 | `SEC_ERROR_UNKNOWN_ISSUER` | n/a | still `SEC_ERROR_UNKNOWN_ISSUER` (`distribution/policies.json` with `Certificates.Install` tried as well: also failed) | **works**, via a profile NSS database seeded with `certutil -d sql:<profile> -N --empty-password` then `-A -t "C,,"`, launched with `launchPersistentContext(<profile>)` |
 | WebKit 27.2 | **works** | n/a | n/a | n/a |
 
 So the assumption the review warned about is exactly wrong on this runner: `update-ca-certificates` configures **one** of
@@ -47,16 +48,21 @@ opposite of what this lane is for.
 
 ### B. Where TLS succeeded, the preview architecture works
 
-Two browsers reached the application. Both rows are the same script, the same origin layout and the same assertions.
+**All three browsers** reached the application once each had a CA it genuinely trusts. Same script, same assertions; the
+editor and engine were on different registrable domains for the cookie row.
 
-| Observation | Chromium 158 (NSS CA) | WebKit 27.2 (system CA) |
-| --- | --- | --- |
-| HTTPS navigation to the editor host | ok | ok |
-| Worker script fetched and registration accepted, in a cross-site third-party iframe | yes | yes |
-| `controller` after a bounded `controllerchange` wait | `true` | `true` |
-| A request actually served by the worker (`/relay-probe` → `{servedBySw:true}`) | yes | yes |
-| Credentialed cross-site `fetch` to the editor host | `SameSite=None` sent, `SameSite=Lax` **withheld** | same |
-| `localStorage` for the engine origin under two different top-level sites | **shared** | **shared** |
+| Observation | Chromium 158 (NSS CA) | Firefox 159 (profile NSS CA) | WebKit 27.2 (system CA) |
+| --- | --- | --- | --- |
+| HTTPS navigation to the editor host | ok | ok | ok |
+| Worker script fetched and registration accepted, in a cross-site third-party iframe | yes | yes | yes |
+| `controller` after a bounded `controllerchange` wait | `true` | `true` | `true` |
+| A request actually served by the worker (`/relay-probe` → `{servedBySw:true}`) | yes | yes | yes |
+| Credentialed `fetch` **cross-site** to the editor host | `SameSite=None` sent, `SameSite=Lax` **withheld** | same | same |
+| Credentialed `fetch` **same-site** (editor and engine under one registrable domain) | not measured | `SameSite=Lax` **sent** | not measured |
+| `localStorage` for the engine origin under two different top-level sites | **shared** | **shared** | **shared** |
+
+That is a **three-browser result for the first four rows** and nothing more. Partitioning is an observation, not a product
+claim, and Safari remains unknown (below).
 
 Two of those rows need care before anyone quotes them.
 
@@ -69,12 +75,27 @@ Two of those rows need care before anyone quotes them.
   reading is that this harness measures **Playwright's browsers**, and the partitioning row must be recorded as an
   observation per build rather than asserted as a requirement.
 
-### C. Firefox is currently an infrastructure failure, not a refusal
+### C. Firefox was an infrastructure failure, and the fix was the trust path, not the browser
 
-Firefox launched and navigated, but TLS could not be established, so no registration result was recorded. That is
-**infrastructure**, and the harness must label it that way rather than as "Firefox refuses third-party service workers".
-Recording it as a refusal would be a false compatibility finding, which is precisely the confusion this section exists to
-prevent.
+In the previous revision Firefox could not establish TLS, so no registration result was recorded. That was recorded as
+**infrastructure**, never as "Firefox refuses third-party service workers", and the distinction paid off: with the CA in the
+profile NSS database Firefox registers, controls and serves exactly like the other two. Nothing about Firefox changed; only
+the trust configuration did.
+
+Two configuration attempts failed on the way, both worth recording so nobody repeats them: putting
+`{"Certificates": {"Install": [...]}}` in the bundled browser's `distribution/policies.json` did **not** take effect in
+Playwright's Firefox build, and `security.enterprise_roots.enabled` did not either. What worked was
+`launchPersistentContext(<profile>)` over a profile whose NSS database already held the CA.
+
+### D. A layout mistake worth keeping: same-site and cross-site are different rows
+
+The first Firefox run put the embedder on `a.preview.test` and the engine on `b.preview.test`. Those are different
+**origins** and the same **site**, so that run measured same-site attachment: the credentialed `fetch` carried the
+`SameSite=Lax` cookie. Moving the embedder to a different registrable domain withheld it.
+
+That is the harness's most useful lesson so far, and it is a measurement rather than an interpretation: it is the design-A
+hazard, observed. The harness must therefore **assert the topology it believes it is testing** (a same-site pair and a
+cross-site pair are separate rows with opposite expectations), and a run whose topology was not asserted is not a result.
 
 ## Harness design
 
@@ -166,11 +187,11 @@ unknown until it is tested in actual Safari. Whether Safari matters enough to te
   Chromium, the profile's NSS database for Firefox. No `ignoreHTTPSErrors`, no `--ignore-certificate-errors`.
 - Pinned browser versions printed in every record.
 
-## Open before the harness can claim three browsers
+## What is open
 
-1. **Firefox's trust path.** Neither the system store nor the enterprise-roots pref worked here; the remaining candidate is
-   seeding the per-profile NSS database (`certutil -d sql:<profile>/cert9.db`), untested. Until it is solved, Firefox rows
-   will be infrastructure failures, and that is what the report must say.
+1. ~~**Firefox's trust path.**~~ **Solved 2026-11-15**: per-profile NSS database plus `launchPersistentContext`. Firefox
+   rows are now measured, not infrastructure failures. The recipe belongs in the harness's setup step, with a check that
+   fails loudly if the CA is missing rather than silently recording a TLS failure.
 2. **Whether Playwright's flags change partitioning.** Compare an unflagged Chrome build and, if the owner wants it, real
    Safari, before quoting any partitioning behaviour as product behaviour.
 3. **Safari.** Unknown by construction. Manual testing is a separate decision.
