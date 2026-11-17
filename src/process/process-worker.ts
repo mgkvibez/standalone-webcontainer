@@ -48,6 +48,20 @@ export interface StartMessage {
   readonly buffer: SharedArrayBuffer;
   readonly sizes: ChannelSizes;
   /**
+   * The trusted control channel, created by the host and transferred here.
+   *
+   * Everything the kernel believes about this process travels on it: output, exit, failure, the scheduler record and the port report.
+   * The ordinary Worker channel is bootstrap only and is blinded the moment this port is in hand (see `scope.onmessage`), because
+   * `postMessage` on it is reachable by user code and a forged `exit` used to settle the kernel with whatever status the program liked.
+   *
+   * A session token rides on every control message as WELL as the port, and it is freshness, not authentication: the port is the
+   * authority (user code cannot reach a closure), and the token stops a port left over from an older process being believed by a
+   * newer one that inherited the pid. Neither is asked to do the other's job.
+   */
+  readonly control: MessagePortLike;
+  /** Freshness token for the control channel; see `control`. */
+  readonly session: string;
+  /**
    * The reply channel for preview requests addressed to a server this process owns.
    *
    * Optional because a process started by a harness that never serves a preview does not need one, and a Worker that demanded it
@@ -139,17 +153,34 @@ const scope = globalThis as unknown as ProcessScope;
  */
 let terminal: Terminal | null = null;
 
+/**
+ * The private control channel, captured in module scope and never published.
+ *
+ * Not on the global, not in a shim, not in an export: user code reaches this only if it can read a closure, which JS does not allow.
+ * `sendControl` is the single outbound door, so a future message type cannot accidentally travel on the forgeable channel.
+ */
+let control: MessagePortLike | null = null;
+
+/** The session this Worker was booted with. Stamped on every outbound control message; the host refuses a mismatch. */
+let session: string | null = null;
+
+/**
+ * The single outbound door for trusted process control.
+ *
+ * Every message carries the session it belongs to. The port is the authority - user code cannot reach this closure - and the session is
+ * freshness: a port left over from an earlier process cannot be believed by a newer one, and the host checks both before it reads a field.
+ */
+function sendControl(message: object): void {
+  control?.postMessage({ ...(message as Record<string, unknown>), session });
+}
+
 scope.onmessage = (event) => {
   const message = event.data;
-  if (message?.type === "input") {
-    terminal?.write(message.text);
-    return;
-  }
-  if (message?.type === "resize") {
-    terminal?.resize(message.columns, message.rows);
-    return;
-  }
+  // Bootstrap only. Keystrokes and resizes used to arrive here; they moved to the control channel in W-19 P2, because a channel user
+  // code can post on must never carry anything the kernel trusts. Anything except the first `start` is ignored, and the handler is
+  // cleared once the port is in hand, so a program that reassigns `globalThis.onmessage` is talking to nobody.
   if (message?.type !== "start") return;
+  scope.onmessage = null;
 
   // Deliberately not awaited into a promise chain nobody observes: a rejection inside an async handler is invisible
   // outside this Worker (no `onerror` fires), which is how a silent process death looks like a hung test. Everything is
@@ -159,6 +190,19 @@ scope.onmessage = (event) => {
 
 async function run(start: StartMessage): Promise<void> {
   try {
+    // FIRST, before anything can post: the port is in hand and the ordinary channel is already blinded by `scope.onmessage`.
+    control = start.control;
+    session = start.session;
+    control.onmessage = (event) => {
+      const message = event.data as { readonly type?: unknown; readonly text?: unknown; readonly columns?: unknown; readonly rows?: unknown };
+      if (message?.type === "input" && typeof message.text === "string") {
+        terminal?.write(message.text);
+        return;
+      }
+      if (message?.type === "resize" && typeof message.columns === "number" && typeof message.rows === "number") {
+        terminal?.resize(message.columns, message.rows);
+      }
+    };
     const client = new SyscallClient({ buffer: start.buffer, sizes: start.sizes });
     const fs = createRemoteFileSystem(client, { timeoutMs: SYSCALL_TIMEOUT_MS });
     // Watching from inside a process is pulled over the same channel as everything else: the kernel owns the registry, this
@@ -166,7 +210,7 @@ async function run(start: StartMessage): Promise<void> {
     const transport = start.transport;
     const registry = new ReportingPortRegistry((ports) => {
       const message: ProcessToKernelMessage = { type: "ports", ports };
-      transport?.postMessage(message);
+      sendControl(message);
     });
     const runtime = new InProcessRuntime(fs, {
       registry,
@@ -186,7 +230,7 @@ async function run(start: StartMessage): Promise<void> {
 
     const entry = start.argv[1];
     if (entry === undefined) {
-      scope.postMessage({ type: "failed", reason: "no entry script in argv" });
+      sendControl({ type: "failed", reason: "no entry script in argv" });
       return;
     }
 
@@ -195,27 +239,27 @@ async function run(start: StartMessage): Promise<void> {
       ...(start.env === undefined ? {} : { env: start.env }),
       ...(start.cwd === undefined ? {} : { cwd: start.cwd }),
       onOutput: (channel, text) => {
-        scope.postMessage({ type: "output", channel, text });
+        sendControl({ type: "output", channel, text });
       },
       // W-41: ADR-0035 records a throw that lands after the result was handed back, but a held-open process is still
       // `running` in the table, so the row would keep describing a crashed server as healthy. This is the only route from
       // that record to the kernel, and it is the same record - not a second opinion about what happened.
       onAfterRunFailure: (failure) => {
-        scope.postMessage({ type: "failed", reason: `${failure.name}: ${failure.message}`.replace(/^Error: Error: /, "Error: ") });
+        sendControl({ type: "failed", reason: `${failure.name}: ${failure.message}`.replace(/^Error: Error: /, "Error: ") });
       },
       ...(terminal === null ? {} : { terminal }),
     });
 
-    if (result.scheduler !== undefined) scope.postMessage({ type: "scheduler", evidence: result.scheduler });
+    if (result.scheduler !== undefined) sendControl({ type: "scheduler", evidence: result.scheduler });
     // The refusal is copied into the message as plain data. Structured clone strips the freeze, so the far side re-freezes it through
     // `createRefusal`; what must NOT happen is the far side reading stderr and deciding for itself, which is how this got lost.
-    scope.postMessage({
+    sendControl({
       type: "exit",
       code: result.exitCode,
       ...(result.refusal === undefined ? {} : { refusal: { ...result.refusal } }),
     });
   } catch (error) {
-    scope.postMessage({ type: "failed", reason: (error as Error)?.message ?? String(error) });
+    sendControl({ type: "failed", reason: (error as Error)?.message ?? String(error) });
   }
 }
 

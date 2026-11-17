@@ -144,6 +144,15 @@ export class ProcessHost {
    * accounting, or any future consumer - counts a run that happened once as two.
    */
   readonly #settled = new Set<number>();
+  /**
+   * The private control channel per live process: the port the kernel believes and the session it belongs to.
+   *
+   * The port is the authority. User code inside the process Worker cannot reach it, because it lives in a closure there and this end
+   * lives here; the ordinary Worker channel that user code CAN post on is no longer believed at all (see the `onmessage` assignment in
+   * `start`). The session token is freshness only: a pid is not reused today, but a port left over from a dead session must never be
+   * able to answer for a live one, and a second guarantee that costs one string is worth having where the first is a lifetime argument.
+   */
+  readonly #control = new Map<number, { readonly port: { postMessage(message: unknown): void; close?(): void }; readonly session: string }>();
 
   constructor(options: ProcessHostOptions = {}) {
     this.#spawn = options.spawn ?? defaultSpawn;
@@ -174,8 +183,28 @@ export class ProcessHost {
     const pid = this.#table.add({ argv: options.argv, handle: worker });
     this.#channels.set(pid, allocation);
 
-    worker.onmessage = (event) => this.#onWorkerMessage(pid, event.data);
+    // The ordinary Worker channel is BOOTSTRAP ONLY and is not believed: `postMessage` on it is reachable by user code, and a forged
+    // `exit` on it used to settle the kernel with a status the program chose. Nothing trusted arrives here any more; a message on it is
+    // ignored rather than acted on, so forging is inert instead of merely detectable.
+    worker.onmessage = () => {};
     worker.onerror = (event) => this.#fail(pid, event.message ?? "worker error");
+    // Created here, on the trusted side, before the Worker exists: the process receives one end and never learns how to make another.
+    const channel = new MessageChannel();
+    const session = (globalThis.crypto as { randomUUID?: () => string } | undefined)?.randomUUID?.() ??
+      `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    const port = channel.port1 as unknown as {
+      postMessage(message: unknown): void;
+      onmessage: ((event: { readonly data: unknown }) => void) | null;
+      close?(): void;
+      start?(): void;
+      unref?(): void;
+    };
+    // Node's MessagePort keeps the loop alive until it is unref'd or closed; browsers auto-start on `onmessage`. Both are guarded so the
+    // same code runs in the unit lane (Node) and the browser lane without a branch on the environment.
+    port.start?.();
+    port.unref?.();
+    port.onmessage = (event: { readonly data: unknown }) => this.#onControlMessage(pid, event.data);
+    this.#control.set(pid, { port, session });
     const transport = options.transport;
     worker.postMessage(
       {
@@ -187,11 +216,16 @@ export class ProcessHost {
         ...(options.terminal === undefined ? {} : { terminal: options.terminal }),
         buffer: allocation.buffer,
         sizes: allocation.sizes,
+        control: channel.port2,
+        session,
         ...(transport === undefined ? {} : { transport }),
       },
       // Transfer, not copy: a MessagePort that is cloned rather than transferred arrives with no channel behind it, and the
-      // failure looks like a server that never answers.
-      transport === undefined ? undefined : [transport as unknown as Transferable],
+      // failure looks like a server that never answers. The control port is transferred in the same message as the preview one, so a
+      // partial bootstrap cannot leave the process holding one and not the other.
+      transport === undefined
+        ? [channel.port2 as unknown as Transferable]
+        : [transport as unknown as Transferable, channel.port2 as unknown as Transferable],
     );
 
     return { pid, allocation };
@@ -219,10 +253,13 @@ export class ProcessHost {
    */
   post(pid: number, message: unknown): boolean {
     const entry = this.#table.get(pid);
-    const worker = entry?.handle;
-    if (worker === undefined) return false;
+    if (entry === undefined) return false;
+    // Over the control port, not the Worker channel: keystrokes and window sizes are addressed to a live process, and the port is what
+    // says which one. A process whose port is gone cannot be typed at, which is the same answer as a process that is over.
+    const control = this.#control.get(pid);
+    if (control === undefined) return false;
     try {
-      worker.postMessage(message);
+      control.port.postMessage(message);
       return true;
     } catch {
       return false;
@@ -232,7 +269,10 @@ export class ProcessHost {
   kill(pid: number, reason = "killed"): boolean {
     const entry = this.#table.get(pid);
     const killed = this.#table.kill(pid, reason);
-    if (killed) this.#retire(pid, entry.handle);
+    if (killed) {
+      this.#releaseControl(pid);
+      this.#retire(pid, entry.handle);
+    }
     return killed;
   }
 
@@ -251,7 +291,40 @@ export class ProcessHost {
     const entry = this.#table.get(pid);
     if (entry.state !== "queued" && entry.state !== "running") return;
     this.#table.transition(pid, state, detail);
+    this.#releaseControl(pid);
     this.#retire(pid, entry.handle);
+  }
+
+  /**
+   * The trusted door. Structure first, then session freshness, then the same dispatch the ordinary channel used to run.
+   *
+   * Structure is checked before anything reads a field: an array, a string or a number arriving here is not a process report, and the
+   * dispatch below reads `type` on the way in. The session is compared before dispatch for the same reason a rejected connection is
+   * closed before it is served.
+   */
+  #onControlMessage(pid: number, data: unknown): void {
+    const control = this.#control.get(pid);
+    if (control === undefined) return;
+    if (typeof data !== "object" || data === null) return;
+    if ((data as { readonly session?: unknown }).session !== control.session) return;
+    this.#onWorkerMessage(pid, data);
+  }
+
+  /** Live control channels, in pid order. Introspection only: it is how a test can see that a killed process left nothing behind. */
+  controlChannels(): readonly number[] {
+    return [...this.#control.keys()].sort((left, right) => left - right);
+  }
+
+  /** Drop the channel and its port. Closing the port is what stops a late message from a dying Worker being delivered at all. */
+  #releaseControl(pid: number): void {
+    const control = this.#control.get(pid);
+    if (control === undefined) return;
+    this.#control.delete(pid);
+    try {
+      control.port.close?.();
+    } catch {
+      // A port already closed by the other end throws in some environments; there is nothing left to clean up either way.
+    }
   }
 
   #onWorkerMessage(pid: number, data: unknown): void {
