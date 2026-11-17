@@ -75,8 +75,6 @@ jobs:
   cross-site-harness:
     name: cross-site harness
     runs-on: ubuntu-latest
-    env:
-      SWC_HARNESS_STATE: ${{ runner.temp }}/swc-cross-site
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -92,6 +90,8 @@ jobs:
       # Privileged work is limited to system setup: /etc/hosts, the system trust store for
       # WebKit, and ownership of the generated CA. No browser is launched from here.
       - name: System setup (privileged)
+        env:
+          SWC_HARNESS_STATE: ${{ runner.temp }}/swc-cross-site
         run: sudo --preserve-env=PATH,SWC_HARNESS_STATE npm run harness:cross-site:setup
       - name: Diagnostics
         run: |
@@ -104,9 +104,13 @@ jobs:
       # The harness runs as the runner user, with the runner's HOME, so Chromium trusts
       # $HOME/.pki/nssdb and Firefox trusts its own profile database. Never under sudo.
       - name: Run the cross-site matrix (unprivileged)
+        env:
+          SWC_HARNESS_STATE: ${{ runner.temp }}/swc-cross-site
         run: npm run test:browser:cross-site
       - name: System teardown (privileged)
         if: always()
+        env:
+          SWC_HARNESS_STATE: ${{ runner.temp }}/swc-cross-site
         run: sudo --preserve-env=PATH,SWC_HARNESS_STATE npm run harness:cross-site:teardown
       - name: Upload the matrix
         if: always()
