@@ -98,6 +98,14 @@ export interface RunOptions {
    */
   readonly onOutput?: (stream: "stdout" | "stderr", text: string) => void;
   /**
+   * A failure that arrived after the run handed its result back (W-41).
+   *
+   * ADR-0035 records these with `phase: "after-run"` and deliberately stops there: the result cannot change, so the record
+   * lives on the runtime. A process that still owns a port is not over, though, and only the owner of the runtime can say so
+   * - so the same record is published here, once, and the process Worker turns it into the transition the kernel needs.
+   */
+  readonly onAfterRunFailure?: (failure: { readonly source: string; readonly name: string; readonly message: string }) => void;
+  /**
    * Working directory for the program, which is what a relative `fs` path resolves against and what `process.cwd()`
    * reports. Node takes it from the shell; a fixture step takes it from the project root it runs in.
    */
@@ -559,8 +567,12 @@ export class InProcessRuntime implements Runtime {
       const name = error instanceof Error ? error.name : "Error";
       stderr.write(`Uncaught ${message}\n`);
       const record: AsyncFailure = { source, phase: settled ? "after-run" : "run", name, message };
-      if (settled) this.#lateFailures.push(record);
-      else asyncFailures.push(record);
+      if (settled) {
+        this.#lateFailures.push(record);
+        // W-41: the run is over, so nothing downstream of `run()` will ever see this. Publishing it here is what lets a
+        // held-open process be ended instead of staying alive and healthy behind a server that has already crashed.
+        options.onAfterRunFailure?.({ source: record.source, name: record.name, message: record.message });
+      } else asyncFailures.push(record);
       requestExit(1);
     };
 
