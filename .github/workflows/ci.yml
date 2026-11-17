@@ -68,3 +68,54 @@ jobs:
           name: playwright-output
           path: test-results/
           if-no-files-found: ignore
+
+  # Cross-site harness: the one thing the *.localhost lane cannot measure, because localhost is
+  # not a registrable domain. Needs three engines, a certificate each browser genuinely trusts,
+  # and root for /etc/hosts — so it is its own job and never a dependency of `verify`.
+  cross-site-harness:
+    name: cross-site harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Install browsers and certutil (as the runner user)
+        run: |
+          npx playwright install --with-deps chromium firefox webkit
+          sudo apt-get install -y libnss3-tools
+      # Privileged work is limited to system setup: /etc/hosts, the system trust store for
+      # WebKit, and ownership of the generated CA. No browser is launched from here.
+      - name: System setup (privileged)
+        env:
+          SWC_HARNESS_STATE: ${{ runner.temp }}/swc-cross-site
+        run: sudo --preserve-env=PATH,SWC_HARNESS_STATE npm run harness:cross-site:setup
+      - name: Diagnostics
+        run: |
+          id
+          whoami
+          printf 'HOME=%s\n' "$HOME"
+          ls -ld "$HOME" "$HOME/.pki" "$HOME/.pki/nssdb" 2>/dev/null || true
+          ls -l "$HOME"/.cache/ms-playwright/*/[a-z]* 2>/dev/null | head -5 || true
+          node -e "const {chromium,firefox,webkit}=require('@playwright/test');for(const [n,b] of Object.entries({chromium,firefox,webkit}))console.log(n, b.name(), b.executablePath())"
+      # The harness runs as the runner user, with the runner's HOME, so Chromium trusts
+      # $HOME/.pki/nssdb and Firefox trusts its own profile database. Never under sudo.
+      - name: Run the cross-site matrix (unprivileged)
+        env:
+          SWC_HARNESS_STATE: ${{ runner.temp }}/swc-cross-site
+        run: npm run test:browser:cross-site
+      - name: System teardown (privileged)
+        if: always()
+        env:
+          SWC_HARNESS_STATE: ${{ runner.temp }}/swc-cross-site
+        run: sudo --preserve-env=PATH,SWC_HARNESS_STATE npm run harness:cross-site:teardown
+      - name: Upload the matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-site-harness
+          path: artifacts/cross-site-harness.json
+          if-no-files-found: warn
