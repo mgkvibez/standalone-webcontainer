@@ -197,6 +197,12 @@ async function run(start: StartMessage): Promise<void> {
       onOutput: (channel, text) => {
         scope.postMessage({ type: "output", channel, text });
       },
+      // W-41: ADR-0035 records a throw that lands after the result was handed back, but a held-open process is still
+      // `running` in the table, so the row would keep describing a crashed server as healthy. This is the only route from
+      // that record to the kernel, and it is the same record - not a second opinion about what happened.
+      onAfterRunFailure: (failure) => {
+        scope.postMessage({ type: "failed", reason: `${failure.name}: ${failure.message}`.replace(/^Error: Error: /, "Error: ") });
+      },
       ...(terminal === null ? {} : { terminal }),
     });
 
