@@ -288,14 +288,19 @@ describe("11. draining is quiescence, not one pass (R5)", () => {
     expect(lines(result.stdout)).toEqual(["after pipeline"]);
   });
 
-  it("keeps a synchronous throw from a timer callback inside the run, without killing the harness", async () => {
+  it("ends the run the way Node ends it when a timer callback throws, without killing the harness", async () => {
     const result = await runScript(`
       setTimeout(() => { throw new Error("thrown in a timer"); }, 5);
       setTimeout(() => console.log("still running"), 10);
     `);
-    // The scheduler catches it, reports it on stderr, and keeps draining: one bad callback is not the end of the run.
+    // Measured in Node v20.20.2: `setTimeout(() => { throw … }, 5)` followed by a 10 ms timer prints NOTHING and exits 1 - an
+    // uncaught exception ends the process, it does not skip to the next callback. This test pinned the opposite until W-40
+    // (drain continued, exit stayed 0), which is exactly the defect: a crashed program settled with a successful status.
+    // What stays true, and is the reason the test survives at all, is that the harness is not killed: the failure is reported
+    // on stderr and settles as a result rather than escaping as an exception.
     expect(result.stderr).toContain("thrown in a timer");
-    expect(lines(result.stdout)).toEqual(["still running"]);
+    expect(lines(result.stdout)).toEqual([]);
+    expect(result.exitCode).toBe(1);
   });
 });
 
