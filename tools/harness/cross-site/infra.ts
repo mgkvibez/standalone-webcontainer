@@ -143,6 +143,9 @@ export function startFixture(state: HarnessState): Promise<Fixture> {
         res.end(body);
       };
       const isEngineHost = host === HOSTS.engine || host === HOSTS.sameEngine;
+      // Served first and from every host: a TLS probe must not run application script, or it
+      // registers a worker and writes storage before the first case is measured.
+      if (url.pathname === "/preflight") return send("text/html; charset=utf-8", docs.preflight);
       if (isEngineHost && url.pathname === "/sw.js") return send("application/javascript", docs.serviceWorker);
       if (isEngineHost && url.pathname === "/engine") {
         return send("text/html; charset=utf-8", docs.engine(url.searchParams.get("tag") ?? "engine"));

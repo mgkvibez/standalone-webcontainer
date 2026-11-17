@@ -14,6 +14,8 @@ export interface Documents {
   readonly embedder: (topHost: string, engineHost: string) => string;
   readonly engine: (tag: string) => string;
   readonly inertReader: string;
+  /** Script-free: proves TLS without registering a worker or writing storage. */
+  readonly preflight: string;
   readonly serviceWorker: string;
 }
 
@@ -134,5 +136,7 @@ self.addEventListener("fetch", (event) => {
 });
 `;
 
-  return { embedder, engine, inertReader, serviceWorker };
+  const preflight = `<!doctype html><meta charset=utf-8><title>preflight</title><body>preflight</body>`;
+
+  return { embedder, engine, inertReader, preflight, serviceWorker };
 }

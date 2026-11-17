@@ -402,7 +402,7 @@ async function main(): Promise<number> {
       // compatibility verdict about service workers.
       try {
         const probe = await driver.context.newPage();
-        await probe.goto(`${fixture.origin(HOSTS.engine)}/`, { waitUntil: "domcontentloaded", timeout: 25_000 });
+        await probe.goto(`${fixture.origin(HOSTS.engine)}/preflight`, { waitUntil: "domcontentloaded", timeout: 25_000 });
         const protocol = await probe.evaluate(() => location.protocol);
         await probe.close();
         if (protocol !== "https:") throw new Error(`navigation settled on ${protocol}`);
