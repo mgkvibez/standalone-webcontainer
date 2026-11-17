@@ -26,7 +26,30 @@ class FakeWorker implements ProcessWorkerLike {
     this.terminated = true;
   }
 
-  emit(data: unknown): void {
+  /** The private control port the host transferred in the bootstrap message, and the session it belongs to. */
+  private control(): { postMessage(message: unknown): void; session: string | undefined } | undefined {
+    const start = this.posted[0] as { control?: { postMessage(message: unknown): void }; session?: string } | undefined;
+    if (start?.control === undefined) return undefined;
+    return { postMessage: (message: unknown) => start.control!.postMessage(message), session: start.session };
+  }
+
+  /**
+   * Report as the process adapter does now: on the private control channel, stamped with its session.
+   *
+   * Async because Node delivers port messages on the event loop, and the boundary is genuinely asynchronous now - the old synchronous
+   * `onmessage` shortcut is what made a forged message indistinguishable from a real one.
+   */
+  async emitTrusted(data: unknown): Promise<void> {
+    const control = this.control();
+    if (control === undefined) throw new Error("the process was never booted with a control port");
+    control.postMessage({ ...(data as Record<string, unknown>), session: control.session });
+    // Two turns: a MessagePort delivery is a macrotask, and one `setImmediate` is not always enough for it to land.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  /** The untrusted channel user code can post on. Kept as its own name so a test cannot accidentally use it to mean "real". */
+  emitUntrusted(data: unknown): void {
     this.onmessage?.({ data });
   }
 
@@ -49,7 +72,7 @@ const hostWith = (maxProcesses = 4) => {
 };
 
 describe("process host", () => {
-  it("spawns one Worker per process, with its own channel and an init message carrying pid, argv and env", () => {
+  it("spawns one Worker per process, with its own channel and an init message carrying pid, argv and env", async () => {
     const { host, spawned } = hostWith();
     const first = host.start({ argv: ["node", "a.js"], env: { NODE_ENV: "test" } });
     const second = host.start({ argv: ["node", "b.js"] });
@@ -68,18 +91,18 @@ describe("process host", () => {
     expect(host.table.live()).toHaveLength(2);
   });
 
-  it("records an exit the Worker reports and releases the Worker", () => {
+  it("records an exit the Worker reports and releases the Worker", async () => {
     const { host, spawned } = hostWith();
     const { pid } = host.start({ argv: ["node", "a.js"] });
 
-    spawned[0]?.emit({ type: "exit", code: 0 });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 0 });
 
     expect(host.table.get(pid)).toMatchObject({ state: "exited", exitCode: 0, endedAt: expect.any(Number) });
     expect(spawned[0]?.terminated).toBe(true);
     expect(host.table.live()).toHaveLength(0);
   });
 
-  it("records a Worker error as a failed process with the message kept", () => {
+  it("records a Worker error as a failed process with the message kept", async () => {
     const { host, spawned } = hostWith();
     const { pid } = host.start({ argv: ["node", "a.js"] });
 
@@ -88,7 +111,7 @@ describe("process host", () => {
     expect(host.table.get(pid)).toMatchObject({ state: "failed", reason: "boom" });
   });
 
-  it("kills a process by terminating its Worker and marking it killed, leaving the others alone", () => {
+  it("kills a process by terminating its Worker and marking it killed, leaving the others alone", async () => {
     const { host, spawned } = hostWith();
     const first = host.start({ argv: ["node", "a.js"] });
     const second = host.start({ argv: ["node", "b.js"] });
@@ -102,7 +125,7 @@ describe("process host", () => {
     expect(host.kill(first.pid)).toBe(false);
   });
 
-  it("does not spawn beyond the limit, so a runaway spawn loop hits a wall", () => {
+  it("does not spawn beyond the limit, so a runaway spawn loop hits a wall", async () => {
     const { host, spawned } = hostWith(1);
     host.start({ argv: ["node", "a.js"] });
 
@@ -110,25 +133,25 @@ describe("process host", () => {
     expect(spawned).toHaveLength(1);
   });
 
-  it("ignores unrelated Worker messages instead of mangling the table", () => {
+  it("ignores unrelated Worker messages instead of mangling the table", async () => {
     const { host, spawned } = hostWith();
     const { pid } = host.start({ argv: ["node", "a.js"] });
 
-    spawned[0]?.emit({ type: "stdout", text: "hello" });
-    spawned[0]?.emit(null);
-    spawned[0]?.emit("not an object");
+    await spawned[0]?.emitTrusted({ type: "stdout", text: "hello" });
+    await spawned[0]?.emitTrusted(null);
+    await spawned[0]?.emitTrusted("not an object");
 
     expect(host.table.get(pid).state).toBe("running");
   });
 
-  it("lists live channels for a kernel loop, and drops them when a process ends", () => {
+  it("lists live channels for a kernel loop, and drops them when a process ends", async () => {
     const { host, spawned } = hostWith();
     const first = host.start({ argv: ["node", "a.js"] });
     const second = host.start({ argv: ["node", "b.js"] });
 
     expect(host.channels().map((entry) => entry.pid)).toEqual([1, 2]);
 
-    spawned[0]?.emit({ type: "exit", code: 0 });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 0 });
     expect(host.channels().map((entry) => entry.pid)).toEqual([second.pid]);
     // The dead process keeps neither its Worker nor its shared buffer: a channel is live memory, and a table of finished
     // pids holding buffers is a leak that would only show up as "why is the tab using 400 MB".
@@ -166,11 +189,11 @@ describe("a refusal reported by a process Worker", () => {
     return { host, spawned, seen };
   };
 
-  it("carries the refusal to the settle notification and to the table, keeping the status it exited with", () => {
+  it("carries the refusal to the settle notification and to the table, keeping the status it exited with", async () => {
     const { host, spawned, seen } = settled();
     const { pid } = host.start({ argv: ["node", "app.js"] });
 
-    spawned[0]?.emit({ type: "exit", code: 1, refusal });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 1, refusal });
 
     const entry = host.table.get(pid);
     expect(entry.state).toBe("exited");
@@ -183,23 +206,23 @@ describe("a refusal reported by a process Worker", () => {
     expect(seen[0]?.code).toBe(1);
   });
 
-  it("revives the refusal into the runtime's frozen shape rather than trusting the object it received", () => {
+  it("revives the refusal into the runtime's frozen shape rather than trusting the object it received", async () => {
     const { host, spawned } = settled();
     const { pid } = host.start({ argv: ["node", "app.js"] });
 
-    spawned[0]?.emit({ type: "exit", code: 1, refusal: { ...refusal } });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 1, refusal: { ...refusal } });
 
     const carried = host.table.get(pid).refusal;
     expect(Object.isFrozen(carried)).toBe(true);
   });
 
-  it("does not turn an ordinary exit into a refusal, whichever status it left", () => {
+  it("does not turn an ordinary exit into a refusal, whichever status it left", async () => {
     const { host, spawned, seen } = settled();
     const first = host.start({ argv: ["node", "ok.js"] });
     const second = host.start({ argv: ["node", "fails.js"] });
 
-    spawned[0]?.emit({ type: "exit", code: 0 });
-    spawned[1]?.emit({ type: "exit", code: 1 });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 0 });
+    await spawned[1]?.emitTrusted({ type: "exit", code: 1 });
 
     expect(host.table.get(first.pid).refusal).toBeUndefined();
     expect(host.table.get(second.pid).refusal).toBeUndefined();
@@ -207,11 +230,11 @@ describe("a refusal reported by a process Worker", () => {
     expect(seen.map((entry) => entry.refusal)).toEqual([undefined, undefined]);
   });
 
-  it("drops a malformed refusal and keeps the exit it came with, because a bad diagnostic is not a classification", () => {
+  it("drops a malformed refusal and keeps the exit it came with, because a bad diagnostic is not a classification", async () => {
     const { host, spawned, seen } = settled();
     const { pid } = host.start({ argv: ["node", "app.js"] });
 
-    spawned[0]?.emit({ type: "exit", code: 1, refusal: { ...refusal, code: "looks-by-design" } });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 1, refusal: { ...refusal, code: "looks-by-design" } });
 
     const entry = host.table.get(pid);
     expect(entry.state).toBe("exited");
@@ -220,19 +243,19 @@ describe("a refusal reported by a process Worker", () => {
     expect(seen[0]?.refusal).toBeUndefined();
   });
 
-  it("reports a crash as failed with no refusal, even if the crash names one in its message", () => {
+  it("reports a crash as failed with no refusal, even if the crash names one in its message", async () => {
     const { host, spawned, seen } = settled();
     const { pid } = host.start({ argv: ["node", "app.js"] });
 
     // A worker fault carries a reason, never a refusal record: the classification is not available to be inferred from prose.
-    spawned[0]?.emit({ type: "failed", reason: refusal.message });
+    await spawned[0]?.emitTrusted({ type: "failed", reason: refusal.message });
 
     expect(host.table.get(pid).state).toBe("failed");
     expect(host.table.get(pid).refusal).toBeUndefined();
     expect(seen).toHaveLength(0);
   });
 
-  it("does not lose the refusal when the process is held open by a server it started", () => {
+  it("does not lose the refusal when the process is held open by a server it started", async () => {
     // A refusal cannot hold a process open in practice (it ends the run with no ports), but the hold-open branch returns before `finish`, so
     // the notification is the only carrier there. A settle that announced a refusal must announce it on every path.
     const seen: unknown[] = [];
@@ -244,7 +267,7 @@ describe("a refusal reported by a process Worker", () => {
     });
     const { pid } = host.start({ argv: ["node", "app.js"] });
 
-    worker.emit({ type: "exit", code: 1, refusal });
+    await worker.emitTrusted({ type: "exit", code: 1, refusal });
 
     expect(seen).toEqual([refusal]);
     expect(host.table.get(pid).state).toBe("running");
@@ -289,11 +312,11 @@ describe("exactly one settlement per process", () => {
     return { host, spawned, calls, transitions };
   };
 
-  it("announces one settlement for a declared refusal, carrying the status and the refusal together", () => {
+  it("announces one settlement for a declared refusal, carrying the status and the refusal together", async () => {
     const { host, spawned, calls, transitions } = counter();
     const { pid } = host.start({ argv: ["node", "app.js"] });
 
-    spawned[0]?.emit({ type: "exit", code: 1, refusal });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 1, refusal });
 
     expect(calls).toHaveLength(1);
     expect(calls[0]).toEqual({ pid, code: 1, refusal });
@@ -301,49 +324,49 @@ describe("exactly one settlement per process", () => {
     expect(transitions.filter((entry) => entry.endsWith(":exited"))).toHaveLength(1);
   });
 
-  it("announces one settlement for an ordinary exit code 0", () => {
+  it("announces one settlement for an ordinary exit code 0", async () => {
     const { host, spawned, calls } = counter();
     const { pid } = host.start({ argv: ["node", "app.js"] });
 
-    spawned[0]?.emit({ type: "exit", code: 0 });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 0 });
 
     expect(calls).toEqual([{ pid, code: 0, refusal: undefined }]);
     expect(host.table.get(pid).exitCode).toBe(0);
   });
 
-  it("announces one settlement for an ordinary non-zero exit, and no refusal with it", () => {
+  it("announces one settlement for an ordinary non-zero exit, and no refusal with it", async () => {
     const { host, spawned, calls } = counter();
     const { pid } = host.start({ argv: ["node", "app.js"] });
 
-    spawned[0]?.emit({ type: "exit", code: 2 });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 2 });
 
     expect(calls).toEqual([{ pid, code: 2, refusal: undefined }]);
     expect(host.table.get(pid).refusal).toBeUndefined();
   });
 
-  it("announces one settlement for a malformed refusal, which is dropped rather than passed on", () => {
+  it("announces one settlement for a malformed refusal, which is dropped rather than passed on", async () => {
     const { host, spawned, calls } = counter();
     host.start({ argv: ["node", "app.js"] });
 
-    spawned[0]?.emit({ type: "exit", code: 1, refusal: { ...refusal, code: "not-a-real-code" } });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 1, refusal: { ...refusal, code: "not-a-real-code" } });
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.refusal).toBeUndefined();
     expect(calls[0]?.code).toBe(1);
   });
 
-  it("announces no settlement for a worker fault, because a fault is not an exit report", () => {
+  it("announces no settlement for a worker fault, because a fault is not an exit report", async () => {
     const { host, spawned, calls, transitions } = counter();
     const { pid } = host.start({ argv: ["node", "app.js"] });
 
-    spawned[0]?.emit({ type: "failed", reason: "the worker died" });
+    await spawned[0]?.emitTrusted({ type: "failed", reason: "the worker died" });
 
     expect(calls).toHaveLength(0);
     expect(transitions).toContain(`${pid}:failed`);
     expect(host.table.get(pid).reason).toBe("the worker died");
   });
 
-  it("announces no settlement for a Worker that errors instead of reporting", () => {
+  it("announces no settlement for a Worker that errors instead of reporting", async () => {
     const { host, spawned, calls } = counter();
     const { pid } = host.start({ argv: ["node", "app.js"] });
 
@@ -353,11 +376,11 @@ describe("exactly one settlement per process", () => {
     expect(host.table.get(pid).state).toBe("failed");
   });
 
-  it("announces one settlement for a held-open process, and leaves it running", () => {
+  it("announces one settlement for a held-open process, and leaves it running", async () => {
     const { host, spawned, calls, transitions } = counter({ holdOpen: true });
     const { pid } = host.start({ argv: ["node", "server.js"] });
 
-    spawned[0]?.emit({ type: "exit", code: 0, refusal });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 0, refusal });
 
     expect(calls).toHaveLength(1);
     // Held open is the one case where a settled process is NOT terminal, which is exactly why the table cannot be the guard.
@@ -365,36 +388,36 @@ describe("exactly one settlement per process", () => {
     expect(transitions).not.toContain(`${pid}:exited`);
   });
 
-  it("does not announce a second settlement when the same exit arrives twice", () => {
+  it("does not announce a second settlement when the same exit arrives twice", async () => {
     const { host, spawned, calls } = counter();
     const { pid } = host.start({ argv: ["node", "app.js"] });
 
-    spawned[0]?.emit({ type: "exit", code: 0 });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 0 });
     // A Worker whose queue flushes a second exit report, or a host wired to a port that duplicates a message. The run happened once.
-    spawned[0]?.emit({ type: "exit", code: 0 });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 0 });
 
     expect(calls).toHaveLength(1);
     expect(host.table.get(pid).exitCode).toBe(0);
   });
 
-  it("does not announce a settlement when an exit follows a reported failure", () => {
+  it("does not announce a settlement when an exit follows a reported failure", async () => {
     const { host, spawned, calls } = counter();
     const { pid } = host.start({ argv: ["node", "app.js"] });
 
-    spawned[0]?.emit({ type: "failed", reason: "the worker died" });
-    spawned[0]?.emit({ type: "exit", code: 1 });
+    await spawned[0]?.emitTrusted({ type: "failed", reason: "the worker died" });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 1 });
 
     // The fault already ended this process; an exit arriving afterwards must not present it as a program that exited.
     expect(calls).toHaveLength(0);
     expect(host.table.get(pid).state).toBe("failed");
   });
 
-  it("announces no settlement for a process that was killed and then reports its exit", () => {
+  it("announces no settlement for a process that was killed and then reports its exit", async () => {
     const { host, spawned, calls, transitions } = counter();
     const { pid } = host.start({ argv: ["node", "app.js"] });
 
     const killed = host.kill(pid, "test kill");
-    spawned[0]?.emit({ type: "exit", code: 0 });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 0 });
 
     // The kill is the settlement, and the kernel already records it from the state transition. An exit report arriving afterwards must not
     // present the process as one that finished by itself, with a status that contradicts the kill.
@@ -404,19 +427,19 @@ describe("exactly one settlement per process", () => {
     expect(transitions.filter((entry) => entry.endsWith(":killed"))).toHaveLength(1);
   });
 
-  it("makes exactly one terminal transition per process, whichever way it ends", () => {
+  it("makes exactly one terminal transition per process, whichever way it ends", async () => {
     const { host, spawned, transitions } = counter();
     const exits = host.start({ argv: ["node", "a.js"] });
     const fails = host.start({ argv: ["node", "b.js"] });
     const killed = host.start({ argv: ["node", "c.js"] });
 
-    spawned[0]?.emit({ type: "exit", code: 0 });
-    spawned[1]?.emit({ type: "failed", reason: "the worker died" });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 0 });
+    await spawned[1]?.emitTrusted({ type: "failed", reason: "the worker died" });
     host.kill(killed.pid, "test kill");
     // Late reports, which must add no transition of their own.
-    spawned[0]?.emit({ type: "exit", code: 0 });
-    spawned[1]?.emit({ type: "exit", code: 1 });
-    spawned[2]?.emit({ type: "exit", code: 0 });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 0 });
+    await spawned[1]?.emitTrusted({ type: "exit", code: 1 });
+    await spawned[2]?.emitTrusted({ type: "exit", code: 0 });
 
     const terminal = (pid: number) => transitions.filter((entry) => entry.startsWith(`${pid}:`) && /:(exited|failed|killed)$/.test(entry)).length;
     expect(terminal(exits.pid)).toBe(1);
@@ -424,12 +447,12 @@ describe("exactly one settlement per process", () => {
     expect(terminal(killed.pid)).toBe(1);
   });
 
-  it("settles a held-open process once even when its exit is reported twice", () => {
+  it("settles a held-open process once even when its exit is reported twice", async () => {
     const { host, spawned, calls } = counter({ holdOpen: true });
     const { pid } = host.start({ argv: ["node", "server.js"] });
 
-    spawned[0]?.emit({ type: "exit", code: 0 });
-    spawned[0]?.emit({ type: "exit", code: 0 });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 0 });
+    await spawned[0]?.emitTrusted({ type: "exit", code: 0 });
 
     expect(calls).toHaveLength(1);
     expect(host.table.get(pid).state).toBe("running");
@@ -497,4 +520,40 @@ describe("serving a process without blocking the kernel", () => {
 
     expect(answers).toEqual([true, true]);
   });
+});
+
+/**
+ * The boundary's NEGATIVES, which are the point of W-19 P2.
+ *
+ * Each of the first two was a real attack before the change: a forged `exit` on the ordinary channel settled the kernel with a status
+ * the program chose, and any message that arrived without a session was believed.
+ */
+it("ignores a report arriving on the ordinary Worker channel", async () => {
+  const { host, spawned } = hostWith();
+  const { pid } = host.start({ argv: ["node", "a.js"] });
+
+  spawned[0]?.emitUntrusted({ type: "exit", code: 0 });
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(host.table.get(pid).state).toBe("running");
+});
+
+it("ignores a control message stamped with another session", async () => {
+  const { host, spawned } = hostWith();
+  const { pid } = host.start({ argv: ["node", "a.js"] });
+  const start = (spawned[0] as unknown as { posted: { control: { postMessage(message: unknown): void } }[] }).posted[0]!;
+
+  start.control.postMessage({ type: "exit", code: 0, session: "not-this-session" });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(host.table.get(pid).state).toBe("running");
+});
+
+it("drops the control channel when the process is killed", async () => {
+  const { host } = hostWith();
+  const { pid } = host.start({ argv: ["node", "a.js"] });
+  expect(host.controlChannels()).toContain(pid);
+
+  host.kill(pid);
+
+  expect(host.controlChannels()).not.toContain(pid);
 });
