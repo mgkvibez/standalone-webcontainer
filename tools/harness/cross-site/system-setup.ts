@@ -63,6 +63,38 @@ function writeHosts(): void {
   writeFileSync(path, current.replace(/\n+$/, "\n") + block);
 }
 
+/** How long a generated CA and leaf stay valid, and when they are replaced before expiry. */
+const CERT_LIFETIME_DAYS = 7;
+const MIN_REMAINING_SECONDS = 2 * 24 * 60 * 60;
+
+/**
+ * Is this certificate usable for the run about to happen?
+ *
+ * The state directory is reused between local runs, so a leaf generated two days ago is a
+ * certificate the browsers reject with ERR_CERT_DATE_INVALID, which reports as infrastructure
+ * for all three engines at once. Expiry is a property of the file, so check the file.
+ */
+function certificateUsable(path: string, minRemainingSeconds: number): boolean {
+  if (!existsSync(path)) return false;
+  try {
+    run("openssl", ["x509", "-checkend", String(minRemainingSeconds), "-noout", "-in", path]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Does the leaf cover exactly the hosts the fixture serves? A SAN change also invalidates it. */
+function leafCoversHosts(path: string): boolean {
+  try {
+    const text = run("openssl", ["x509", "-noout", "-text", "-in", path]);
+    const names = [...text.matchAll(/DNS:([^,\s]+)/g)].map((match) => match[1]);
+    return names.length === ALL_HOSTS.length && ALL_HOSTS.every((host) => names.includes(host));
+  } catch {
+    return false;
+  }
+}
+
 function installCa(dir: string): void {
   const caCert = join(dir, "ca.crt");
   const caKey = join(dir, "ca.key");
@@ -70,15 +102,22 @@ function installCa(dir: string): void {
   const leafCsr = join(dir, "leaf.csr");
   const leafCert = join(dir, "leaf.crt");
   const ext = join(dir, "leaf.ext");
-  if (!existsSync(caCert)) {
+  const caUsable = certificateUsable(caCert, MIN_REMAINING_SECONDS) && existsSync(caKey);
+  if (!caUsable) {
+    // A replaced CA must be re-signed against, so a leaf it signed cannot survive it.
+    for (const stale of [caCert, caKey, leafCert, leafCsr, leafKey]) rmSync(stale, { force: true });
     run("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", caKey, "-out", caCert,
-      "-days", "2", "-subj", "/CN=swc cross-site harness CA"]);
+      "-days", String(CERT_LIFETIME_DAYS), "-subj", "/CN=swc cross-site harness CA"]);
   }
-  if (!existsSync(leafCert)) {
+  const leafUsable = caUsable
+    && certificateUsable(leafCert, MIN_REMAINING_SECONDS)
+    && existsSync(leafKey)
+    && leafCoversHosts(leafCert);
+  if (!leafUsable) {
     run("openssl", ["req", "-newkey", "rsa:2048", "-nodes", "-keyout", leafKey, "-out", leafCsr, "-subj", `/CN=${ALL_HOSTS[0] ?? "swc-app.test"}`]);
     writeFileSync(ext, `subjectAltName=${ALL_HOSTS.map((host) => `DNS:${host}`).join(",")}\nbasicConstraints=CA:FALSE\n`);
     run("openssl", ["x509", "-req", "-in", leafCsr, "-CA", caCert, "-CAkey", caKey, "-CAcreateserial",
-      "-out", leafCert, "-days", "2", "-extfile", ext]);
+      "-out", leafCert, "-days", String(CERT_LIFETIME_DAYS), "-extfile", ext]);
   }
   // WebKit reads the system bundle; the other two are seeded per user by the harness.
   copyFileSync(caCert, SYSTEM_CA_PATH);
