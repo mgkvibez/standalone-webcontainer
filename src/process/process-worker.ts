@@ -33,6 +33,7 @@ import { relaySocket } from "./process-transport.js";
 // globalThis and nothing is added to the facade: the bindings stay in that module's scope for the phases that restrict
 // ambient capabilities. This is preparation, not isolation - user code shares this realm either way.
 import "./quarantine.js";
+import { removeAmbientCapabilities } from "./ambient-removal.js";
 import { createRemoteWatcher, realTimerScheduler } from "./remote-watch.js";
 import { InProcessRuntime } from "../runtime/in-process.js";
 import type { Refusal } from "../runtime/refusal.js";
@@ -215,6 +216,11 @@ async function run(start: StartMessage): Promise<void> {
         terminal?.resize(message.columns, message.rows);
       }
     };
+    // P3-1: the control channel is installed, so the bootstrap has done everything it needs the ambient globals for, and no
+    // user code has run yet. Capabilities go now - after the port, before the program - because removing them earlier would
+    // break the bootstrap and removing them later would leave a window a program could use.
+    removeAmbientCapabilities();
+
     const client = new SyscallClient({ buffer: start.buffer, sizes: start.sizes });
     const fs = createRemoteFileSystem(client, { timeoutMs: SYSCALL_TIMEOUT_MS });
     // Watching from inside a process is pulled over the same channel as everything else: the kernel owns the registry, this
