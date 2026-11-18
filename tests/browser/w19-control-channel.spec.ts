@@ -199,6 +199,8 @@ test("one process cannot settle another, nor register a port in its name", async
       const bReply = await kernel.transport({ method: "GET", url: "/preview/3302/b", headers: {}, body: new Uint8Array() });
       const stateBBefore = stateOf(pidB);
       const settledB = await kernel.settled(pidB).catch(() => null);
+      // AFTER the settlement, not inferred from it: the claim below is that a held-open process still reads running.
+      const stateBAfter = stateOf(pidB);
       return {
         aBound,
         bBound,
@@ -210,6 +212,7 @@ test("one process cannot settle another, nor register a port in its name", async
         ownerOf3302: ownersOf(3302),
         stateABefore: stateOf(pidA),
         stateBBefore,
+        stateBAfter,
         bStatus: bReply.statusCode,
         bBody: new TextDecoder().decode(bReply.body ?? new Uint8Array()),
         bExit: (settledB as { exitCode?: number } | null)?.exitCode ?? null,
@@ -232,7 +235,7 @@ test("one process cannot settle another, nor register a port in its name", async
     ownerOf3302: outcome.ownerOf3302,
     pidA: outcome.pidA,
     pidB: outcome.pidB,
-    states: { aBefore: outcome.stateABefore, aAfter: outcome.stateAAfter, bBefore: outcome.stateBBefore },
+    states: { aBefore: outcome.stateABefore, aAfter: outcome.stateAAfter, bBefore: outcome.stateBBefore, bAfter: outcome.stateBAfter },
     output: outcome.text,
   });
   expect(outcome.bBound, diagnostic).toBe(true);
@@ -242,6 +245,8 @@ test("one process cannot settle another, nor register a port in its name", async
 
   // B is a held-open server, so it serves and stays live until its own timer exits it with 5.
   expect(outcome.stateBBefore, diagnostic).toBe("running");
+  // ADR-0028 measured, not described: B owns a listening port, so its result arrives while the row still reads running.
+  expect(outcome.stateBAfter, diagnostic).toBe("running");
   expect(outcome.bStatus).toBe(200);
   expect(outcome.bBody).toBe("B");
   expect(outcome.bExit).toBe(5);
