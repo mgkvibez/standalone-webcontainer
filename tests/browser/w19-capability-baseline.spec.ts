@@ -122,8 +122,28 @@ report.clock = {
   samePerformance: self.performance === globalThis.performance,
   worked: sink > 0,
 };
-report.realTimerFired = false;
-self.setTimeout(() => { report.realTimerFired = true; }, 5);
+// TIMERS, two surfaces, named for what they are and measured only for what a synchronous turn can establish.
+//   self.setTimeout         the facade's timer, which is the runtime's
+//   globalThis.setTimeout   the platform's timer, which the scheduler never sees
+// Observation window: this synchronous turn. No callback can run inside it on either surface, so the facts available
+// here are identity, acceptance and whether scheduling throws. Whether a PLATFORM timer FIRES is not observable from
+// inside a run that settles first, so it is measured in T9, where the process is held open and the callback can be
+// seen to arrive; asserting "it did not fire" here would be asserting the schedule rather than the capability.
+report.timers = {
+  facadeDiffersFromPlatform: self.setTimeout !== globalThis.setTimeout,
+  facadeAccepts: typeof self.setTimeout === 'function',
+  platformAccepts: typeof globalThis.setTimeout === 'function',
+};
+try {
+  self.setTimeout(() => {}, 5);
+} catch (error) {
+  report.timers.facadeScheduleError = String(error && error.message);
+}
+try {
+  globalThis.setTimeout(() => {}, 5);
+} catch (error) {
+  report.timers.platformScheduleError = String(error && error.message);
+}
 
 const names = Object.getOwnPropertyNames(globalThis);
 const sabNames = [];
@@ -224,7 +244,13 @@ interface ProbeReport {
     samePerformance: boolean;
     worked: boolean;
   };
-  realTimerFired: boolean;
+  timers: {
+    facadeDiffersFromPlatform: boolean;
+    facadeAccepts: boolean;
+    platformAccepts: boolean;
+    facadeScheduleError?: string;
+    platformScheduleError?: string;
+  };
   reach: { sabNames: string[]; portLike: string[]; plumbingNames: string[]; nativeChannels: string[]; fsPortishKeys: string[]; fsCallableKeys: string[] };
   inventory: { own: Record<string, string>; inherited: Record<string, string>; facade: Record<string, string> };
   facadeFs: string[];
@@ -262,22 +288,183 @@ async function runProbe(page: import("@playwright/test").Page, files: Record<str
  * appends its own line, must not turn into "parsed something else". A crash produces no report at all, and that case
  * is reported with the program's own output, because a bare `JSON.parse` failure says nothing about what happened.
  */
-async function probeReport(page: import("@playwright/test").Page, files: Record<string, string>, entry: string): Promise<ProbeReport> {
-  const stdout = await runProbe(page, files, entry);
+/**
+ * Validates the report the program sent back, field by field.
+ *
+ * The tests read these fields, so an incomplete report is a broken probe, not a failing capability. Casting parsed JSON
+ * to `ProbeReport` would turn that into a `TypeError` somewhere inside an assertion, which says nothing about the
+ * probe; this says which field is missing or the wrong type, and reports every problem at once.
+ *
+ * The checks are narrow on purpose: shape and primitive type, not semantics. A field that exists with a sane type but
+ * an unexpected value should fail the assertion that reads it, with its own message.
+ */
+function validateReport(value: unknown): ProbeReport {
+  const problems: string[] = [];
+
+  const isRecord = (candidate: unknown): candidate is Record<string, unknown> =>
+    candidate !== null && typeof candidate === "object" && !Array.isArray(candidate);
+
+  const record = (source: Record<string, unknown>, path: string, key: string): Record<string, unknown> => {
+    const nested = source[key];
+    if (!isRecord(nested)) {
+      problems.push(`${path}.${key}: expected an object, got ${describeType(nested)}`);
+      return {};
+    }
+    return nested;
+  };
+
+  const strings = (source: Record<string, unknown>, path: string, keys: readonly string[]): void => {
+    for (const key of keys) {
+      const field = source[key];
+      if (field !== undefined && typeof field !== "string") {
+        problems.push(`${path}.${key}: expected a string, got ${describeType(field)}`);
+      }
+    }
+    for (const key of keys) {
+      if (source[key] === undefined) problems.push(`${path}.${key}: missing`);
+    }
+  };
+
+  const booleans = (source: Record<string, unknown>, path: string, keys: readonly string[]): void => {
+    for (const key of keys) {
+      if (typeof source[key] !== "boolean") {
+        problems.push(`${path}.${key}: expected a boolean, got ${describeType(source[key])}`);
+      }
+    }
+  };
+
+  const numbers = (source: Record<string, unknown>, path: string, keys: readonly string[]): void => {
+    for (const key of keys) {
+      if (typeof source[key] !== "number" || Number.isNaN(source[key] as number)) {
+        problems.push(`${path}.${key}: expected a number, got ${describeType(source[key])}`);
+      }
+    }
+  };
+
+  const stringLists = (source: Record<string, unknown>, path: string, keys: readonly string[]): void => {
+    for (const key of keys) {
+      const field = source[key];
+      if (!Array.isArray(field) || field.some((entry) => typeof entry !== "string")) {
+        problems.push(`${path}.${key}: expected an array of strings, got ${describeType(field)}`);
+      }
+    }
+  };
+
+  if (!isRecord(value)) {
+    throw new Error(`the probe's report was not an object, it was ${describeType(value)}`);
+  }
+
+  const routes = record(value, "report", "routes");
+  strings(routes, "routes", ["self", "direct", "globalThis", "constructed", "platformSelfViaFunction"]);
+
+  const realm = record(value, "report", "realm");
+  strings(realm, "realm", ["indirectEval", "directEval", "selfFunction", "selfObjectCtor", "literalCtor"]);
+
+  const constructors = record(value, "report", "constructors");
+  for (const key of ["async", "generator"] as const) {
+    const entry = record(constructors, "constructors", key);
+    strings(entry, `constructors.${key}`, ["returned", "observed"]);
+  }
+
+  const chain = value["prototypeChain"];
+  if (!Array.isArray(chain) || chain.length === 0) {
+    problems.push(`report.prototypeChain: expected a non-empty array, got ${describeType(chain)}`);
+  } else {
+    chain.forEach((level: unknown, index: number) => {
+      if (!isRecord(level)) {
+        problems.push(`prototypeChain[${index}]: expected an object, got ${describeType(level)}`);
+        return;
+      }
+      strings(level, `prototypeChain[${index}]`, ["name", "fetch", "onmessage", "xhr"]);
+    });
+  }
+
+  const clock = record(value, "report", "clock");
+  numbers(clock, "clock", ["virtualDelta", "facadeDelta", "platformDelta"]);
+  booleans(clock, "clock", ["sameDate", "sameSetTimeout", "samePerformance", "worked"]);
+
+  const reach = record(value, "report", "reach");
+  stringLists(reach, "reach", ["sabNames", "portLike", "plumbingNames", "nativeChannels", "fsPortishKeys", "fsCallableKeys"]);
+
+  const inventory = record(value, "report", "inventory");
+  for (const key of ["own", "inherited", "facade"] as const) {
+    const table = record(inventory, "inventory", key);
+    if (Object.keys(table).length === 0) problems.push(`inventory.${key}: expected a non-empty record`);
+    for (const [name, entry] of Object.entries(table)) {
+      if (typeof entry !== "string") problems.push(`inventory.${key}.${name}: expected a string, got ${describeType(entry)}`);
+    }
+  }
+
+  const timers = record(value, "report", "timers");
+  booleans(timers, "timers", ["facadeDiffersFromPlatform", "facadeAccepts", "platformAccepts"]);
+
+  const xhr = record(value, "report", "xhrEffect");
+  if (xhr["error"] !== undefined && typeof xhr["error"] !== "string") {
+    problems.push(`xhrEffect.error: expected a string, got ${describeType(xhr["error"])}`);
+  }
+
+  if (!Array.isArray(value["facadeFs"]) || value["facadeFs"].some((entry) => typeof entry !== "string")) {
+    problems.push(`report.facadeFs: expected an array of strings, got ${describeType(value["facadeFs"])}`);
+  }
+
+  if (problems.length > 0) {
+    throw new Error(`the probe's report is malformed: ${problems.join("; ")}`);
+  }
+  return value as unknown as ProbeReport;
+}
+
+/** `typeof`, with arrays and null named honestly: "object" for either of those wastes a debugging session. */
+function describeType(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value === "undefined" ? "undefined (absent)" : typeof value;
+}
+
+/** The report a program sent back, located by marker and parsed. Shape is the caller's problem. */
+function parseMarked(stdout: string): unknown {
   const line = stdout.split("\n").find((candidate) => candidate.startsWith(REPORT));
   if (line === undefined) {
     throw new Error(`the probe produced no report (did the program crash?); its output was: ${JSON.stringify(stdout)}`);
   }
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(line.slice(REPORT.length));
+    return JSON.parse(line.slice(REPORT.length));
   } catch (error) {
     throw new Error(`the probe's report was not valid JSON (${(error as Error).message}); the line began: ${line.slice(0, 200)}`);
   }
-  if (parsed === null || typeof parsed !== "object") {
-    throw new Error(`the probe's report was not an object; the line began: ${line.slice(0, 200)}`);
+}
+
+/**
+ * The compatibility probe's report, validated the same way and for the same reason: a missing field there means the
+ * work did not happen, and the test should say which work rather than fail inside an assertion.
+ */
+function validateCompat(value: unknown, required: readonly string[]): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`the compatibility report was not an object, it was ${describeType(value)}`);
   }
-  return parsed as ProbeReport;
+  const record = value as Record<string, unknown>;
+  const problems: string[] = [];
+  for (const key of required) {
+    const field = record[key];
+    if (typeof field !== "string" && typeof field !== "number") {
+      problems.push(`${key}: expected a string or number, got ${describeType(field)}`);
+    }
+  }
+  if (problems.length > 0) throw new Error(`the compatibility report is malformed: ${problems.join("; ")}`);
+  return record;
+}
+
+/** `required` names the fields a given entry is supposed to prove, so a missing one is reported by name. */
+async function compatReport(
+  page: import("@playwright/test").Page,
+  files: Record<string, string>,
+  entry: string,
+  required: readonly string[],
+): Promise<Record<string, unknown>> {
+  return validateCompat(parseMarked(await runProbe(page, files, entry)), required);
+}
+
+async function probeReport(page: import("@playwright/test").Page, files: Record<string, string>, entry: string): Promise<ProbeReport> {
+  return validateReport(parseMarked(await runProbe(page, files, entry)));
 }
 
 test("T4: the platform global is reachable by every realm route, and XMLHttpRequest performs a real request", async ({ page }) => {
@@ -336,9 +523,15 @@ test("T5: the shim clock is virtual on both shim surfaces and the platform clock
   expect(report.clock.sameSetTimeout, JSON.stringify(report.clock)).toBe(false);
   expect(report.clock.samePerformance, JSON.stringify(report.clock)).toBe(false);
 
-  // A timer scheduled on the platform's setTimeout never runs: the run settles first and the Worker is retired. This
-  // field used to be set and never asserted, which is evidence-shaped and proves nothing.
-  expect(report.realTimerFired, JSON.stringify(report.clock)).toBe(false);
+  // TIMERS, and only what this turn can establish: the facade's timer is not the platform's, both accept a callback,
+  // and scheduling on either throws nothing. Firing is measured in T9, where the process is held open and the callback
+  // has time to arrive. No timing assertion lives here, so nothing here can flake on a browser that drains a macrotask
+  // earlier than another.
+  expect(report.timers.facadeDiffersFromPlatform, JSON.stringify(report.timers)).toBe(true);
+  expect(report.timers.facadeAccepts).toBe(true);
+  expect(report.timers.platformAccepts).toBe(true);
+  expect(report.timers.facadeScheduleError).toBeUndefined();
+  expect(report.timers.platformScheduleError).toBeUndefined();
 });
 
 test("T7: no filesystem port, syscall channel, shared buffer or port-like handle is reachable from user code", async ({ page }) => {
@@ -409,7 +602,7 @@ test("T6 baseline: filesystem and preview serving still work through the same bo
 
 test("T8 baseline: fs, WebAssembly, CommonJS, ESM and a node_modules package all still work", async ({ page }) => {
   await page.goto("/");
-  const report = await probeReport(page, COMPAT_FILES, "/compat.js") as unknown as Record<string, string>;
+  const report = await compatReport(page, COMPAT_FILES, "/compat.js", ["fsValue", "wasmValue", "cjsValue", "pkgValue", "facadeFs"]);
 
   // Each of these is a value produced by doing the work, not by inspecting a global for its existence.
   expect(report.fsValue, JSON.stringify(report)).toBe("vfs-round-trip");
@@ -419,6 +612,89 @@ test("T8 baseline: fs, WebAssembly, CommonJS, ESM and a node_modules package all
   // The facade's own `fs` is the surface esbuild-wasm reaches for; recorded so its removal is a deliberate change.
   expect(report.facadeFs, JSON.stringify(report)).toBe("object");
 
-  const esm = await probeReport(page, COMPAT_FILES, "/esm-entry.mjs") as unknown as Record<string, string>;
+  const esm = await compatReport(page, COMPAT_FILES, "/esm-entry.mjs", ["esmValue"]);
   expect(esm.esmValue, JSON.stringify(esm)).toBe("esm-ok");
+});
+
+test("T9: a platform timer fires inside a held-open process, which is work the scheduler never counted", async ({ page }) => {
+  await page.goto("/");
+  const outcome = await page.evaluate(async () => {
+    const { ProcessKernel } = await import(new URL("/src/process/process-kernel.ts", location.origin).href);
+    let text = "";
+    const kernel = new ProcessKernel({
+      files: {
+        "/timers.js": [
+          'globalThis.setTimeout(() => console.log("PLATFORM-TIMER-FIRED"), 5);',
+          'setTimeout(() => console.log("FACADE-TIMER-FIRED"), 5);',
+          'require("http").createServer((request, response) => response.end("held")).listen(3201);',
+          'console.log("body-settled");',
+        ].join("\n"),
+      },
+      transportTimeoutMs: 3_000,
+      onOutput: (_pid: number, _channel: string, chunk: string) => {
+        text += chunk;
+      },
+    });
+    try {
+      const pid = kernel.start({ argv: ["node", "/timers.js"] });
+      const waitFor = async (predicate: () => boolean, timeoutMs = 15_000): Promise<boolean> => {
+        const started = Date.now();
+        while (Date.now() - started < timeoutMs) {
+          if (predicate()) return true;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return false;
+      };
+      // The port proves the body settled: a listening server is what holds the process open past its result.
+      await waitFor(() => (kernel.ports() as readonly { port: number }[]).some((binding) => binding.port === 3201));
+      const fired = await waitFor(() => text.includes("PLATFORM-TIMER-FIRED"));
+      const stateWhenFired = (kernel.processes() as readonly { pid: number; state: string }[])
+        .find((entry) => entry.pid === pid)?.state;
+      return {
+        fired,
+        stateWhenFired,
+        bodySettledFirst: text.indexOf("body-settled") < text.indexOf("PLATFORM-TIMER-FIRED"),
+        facadeAlsoFired: text.includes("FACADE-TIMER-FIRED"),
+        text,
+      };
+    } finally {
+      kernel.stopServers([3201]);
+      kernel.dispose();
+    }
+  });
+
+  // This is the capability measured where it can be observed, rather than inferred from a run that settles first: the
+  // callback arrives while the process is still held open, so it happened outside the scheduler's accounting. It is not
+  // a timing assertion - it polls for the callback with a generous ceiling, so a slow browser costs time, not a failure.
+  expect(outcome.fired, JSON.stringify(outcome)).toBe(true);
+  expect(outcome.bodySettledFirst, JSON.stringify(outcome)).toBe(true);
+  expect(outcome.stateWhenFired).toBe("running");
+  // Both surfaces do fire; the difference is not whether they run but who is counting.
+  expect(outcome.facadeAlsoFired, JSON.stringify(outcome)).toBe(true);
+});
+
+test("the report validator names the field it rejects, instead of leaving a TypeError to an assertion", () => {
+  // Nothing at all: every container is reported, not just the first.
+  expect(() => validateReport({})).toThrow(/routes: expected an object/);
+  expect(() => validateReport({})).toThrow(/prototypeChain: expected a non-empty array/);
+  // A plausible-looking report with one field the wrong type.
+  const nearlyRight = {
+    routes: { self: "undefined", direct: "function", globalThis: "function", constructed: "function", platformSelfViaFunction: "function" },
+    realm: { indirectEval: "platform-global", directEval: "platform-global", selfFunction: "platform-global", selfObjectCtor: "platform-global", literalCtor: "platform-global" },
+    constructors: { async: { returned: "promise", observed: "function" }, generator: { returned: "iterator", observed: "function" } },
+    prototypeChain: [{ name: "DedicatedWorkerGlobalScope", fetch: "function", onmessage: "function", xhr: "undefined" }],
+    clock: { virtualDelta: 0, facadeDelta: 0, platformDelta: 12, sameDate: true, sameSetTimeout: false, samePerformance: false, worked: true },
+    reach: { sabNames: [], portLike: [], plumbingNames: [], nativeChannels: [], fsPortishKeys: [], fsCallableKeys: [] },
+    inventory: { own: { fetch: "function" }, inherited: { fetch: "no" }, facade: { fetch: "undefined" } },
+    timers: { facadeDiffersFromPlatform: true, facadeAccepts: true, platformAccepts: true },
+    xhrEffect: { status: 200 },
+    facadeFs: [],
+  };
+  expect(() => validateReport(nearlyRight)).not.toThrow();
+  // realDelta as a string is exactly the kind of thing that would surface as a confusing failure later.
+  expect(() => validateReport({ ...nearlyRight, clock: { ...nearlyRight.clock, platformDelta: "12" } })).toThrow(
+    /clock\.platformDelta: expected a number, got string/,
+  );
+  // A null report is named as null rather than "object".
+  expect(() => validateReport(null)).toThrow(/was not an object, it was null/);
 });
