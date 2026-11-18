@@ -87,19 +87,21 @@ export const CAPABILITY_AUDIT: ReadonlyArray<CapabilityAudit> = [
     decision: "preserve",
     reason:
       "Own, configurable DATA property on the global (measured in Chromium, W-19 P3-2), so this phase could delete it. It " +
-      "is preserved because deletion would buy nothing: the ordinary Worker channel is already untrusted by construction. " +
-      "The host ignores everything except the first `start`, and P2 blinds the handler once the control port is in hand, " +
-      "so a program posting here is talking to nobody. P3-1 removes capabilities with NO consumer; this one has a consumer " +
-      "whose trust was decided by P2.",
+      "is preserved because the channel it writes to is already untrusted by construction: the host ignores everything " +
+      "except the first `start`, so a program posting here reaches a listener that discards it. Deleting it would remove a " +
+      "channel that already carries nothing the kernel believes. P3-1 removes capabilities with no consumer; this one has a " +
+      "consumer whose trust was decided by P2.",
   },
   {
     name: "onmessage",
     decision: "preserve",
     reason:
       "Own, configurable ACCESSOR with a setter on the global (measured in Chromium, W-19 P3-2). The bootstrap needs it to " +
-      "receive `start`, and P2 disables it the correct way: it assigns an own `null` through that setter once the control " +
-      "port is in hand, before user code runs. P3-1 runs after that point, so the property is already inert when this " +
-      "phase could delete it, and deleting it would remove the setter the disable relies on without strengthening anything.",
+      "receive `start`; inside that handler P2 assigns an own `null` through the setter, which happens BEFORE the control " +
+      "port is installed and before user code runs. By the time this phase could delete it, the setter has already been " +
+      "invoked and the handler is inert, so deletion would change nothing a program can do: it can reassign `onmessage` " +
+      "and the host sends nothing further on that channel. Preserved because the bootstrap requires it and removing it " +
+      "afterwards is a no-op, not because deletion is unavailable.",
   },
 ];
 

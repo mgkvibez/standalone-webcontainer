@@ -39,11 +39,24 @@ not own properties of the global.** Own-property deletion, which is what P3-1 do
 The Worker-scope members are the opposite case, and their measured shape matters for the reason each is preserved:
 `onmessage` and `onmessageerror` are own **accessor** properties on the global with a setter, `postMessage` and `close` are
 own **data** properties, and all four are `configurable: true`. None of them lives on `DedicatedWorkerGlobalScope.prototype`.
-So P3-1 could have deleted them. It did not, because deleting them would not change what a program can do: P2 already
-decided the trust of the ordinary channel (the host ignores everything except the first `start`, and `onmessage` is set to
-`null` through its setter once the control port is in hand, before user code runs), and the private `MessagePort` is the
-only trusted channel. Deleting `onmessage` would also remove the setter that disable relies on. `importScripts` is the
-genuinely inherited one.
+So P3-1 could have deleted them. It did not, and the reason is per property rather than one blanket claim:
+
+- **`postMessage`**: the ordinary channel is untrusted by construction. The host ignores everything except the first
+  `start`, so a program posting here reaches a listener that discards it. Deleting the property would remove a channel
+  that already carries nothing the kernel believes.
+- **`onmessage`**: the bootstrap consumed its `start`, and inside that handler the setter was invoked with `null`, before
+  the control port was installed and before user code ran. After that point the property is inert: a program that
+  reassigns it hears nothing, because the host sends nothing further on this channel. The disable is already complete by
+  the time P3-1 runs, so deleting the property neither preserves nor destroys it.
+- **`onmessageerror`**: it fires for a deserialisation failure on a `message` event from this channel, and no such event
+  arrives after bootstrap, so no consumer remains that the kernel trusts. This one is reasoning from the channel's
+  post-bootstrap state rather than a measured firing, and it is the weakest of the four.
+- **`close`**: a real operation, and deletion would have an effect: a program could not terminate its own Worker. It is
+  preserved because self-termination is a legitimate operation, not a reach into anything the kernel trusts. The kernel
+  already has to tolerate a process dying without notice, and a program has other ways to stop (return, throw, or spin
+  until the work budget ends it). The security question is what a program can reach; `close` reaches only itself.
+
+`importScripts` is the genuinely inherited one.
 
 ## Inherited capabilities, and whether they are usable
 
