@@ -29,7 +29,8 @@
  * is ever enabled, these must take distinct ports.
  *
  * Coverage limits, stated rather than papered over:
- *   - T4 proves reachability and one real request; it does not prove what a payload would do with the response.
+ *   - T4 proves reachability and that the platform request object is present; it does NOT prove a completed request
+ *     (see the probe's note: a fetch continuation's report is not observable after settle).
  *   - T5 proves the shim clock is not the platform clock; it does not measure real-timer accuracy.
  *   - T7 proves no trusted object is reachable BY NAME or structurally on the global. It cannot prove absence
  *     through a closure, which JS gives no way to introspect.
@@ -54,7 +55,10 @@ const REPORT = "W19REPORT:";
 const PROBE = `
 const report = {};
 const via = (fn) => { try { return fn(); } catch (error) { return 'throw:' + (error && error.message); } };
-const isPlatform = (value) => Boolean(value) && typeof value === 'object' && typeof value.XMLHttpRequest !== 'undefined';
+// The marker that identifies the platform global has to be a name this realm still has AND the facade does not, or it
+// stops discriminating. XHR was that marker until P3-1 removed it, at which point every realm route was classified
+// "object" instead of "platform-global". fetch is measured to be absent from the facade and present on the global.
+const isPlatform = (value) => Boolean(value) && typeof value === 'object' && typeof value.fetch !== 'undefined';
 const describe = (value) => {
   if (isPlatform(value)) return 'platform-global';
   if (value && typeof value.then === 'function') return 'promise';
@@ -64,11 +68,13 @@ const describe = (value) => {
 };
 
 report.routes = {
-  self: describe(self.XMLHttpRequest),
-  direct: describe(XMLHttpRequest),
-  globalThis: describe(globalThis.XMLHttpRequest),
-  constructed: describe(via(() => Function('return XMLHttpRequest')())),
-  platformSelfViaFunction: describe(via(() => Function('return typeof self === "undefined" ? undefined : self.XMLHttpRequest')())),
+  self: describe(self.fetch),
+  // Probed through typeof because that is the only form safe for a name that might be absent: the baseline records
+  // ABSENCE rather than crashing the whole probe, which is what a bare identifier did once P3-1 removed XHR.
+  direct: describe(typeof fetch === 'undefined' ? undefined : fetch),
+  globalThis: describe(globalThis.fetch),
+  constructed: describe(via(() => Function('return fetch')())),
+  platformSelfViaFunction: describe(via(() => Function('return typeof self === "undefined" ? undefined : self.fetch')())),
 };
 
 report.realm = {
@@ -83,14 +89,14 @@ report.realm = {
 report.constructors = {};
 try {
   globalThis.__w19async = 'not-run';
-  const returnedAsync = (async function () {}).constructor('globalThis.__w19async = typeof XMLHttpRequest;')();
+  const returnedAsync = (async function () {}).constructor('globalThis.__w19async = typeof fetch;')();
   report.constructors.async = { returned: describe(returnedAsync), observed: globalThis.__w19async };
 } catch (error) {
   report.constructors.async = { returned: 'throw:' + error.message };
 }
 try {
   globalThis.__w19gen = 'not-run';
-  const iterator = (function* () {}).constructor('globalThis.__w19gen = typeof XMLHttpRequest; yield 1;')();
+  const iterator = (function* () {}).constructor('globalThis.__w19gen = typeof fetch; yield 1;')();
   const step = iterator.next();
   report.constructors.generator = { returned: describe(iterator), observed: globalThis.__w19gen, step: step && step.value };
 } catch (error) {
@@ -187,14 +193,13 @@ report.reach = {
 };
 report.inventory = { own, inherited, facade };
 report.facadeFs = Object.keys(self.fs || {}).sort();
-try {
-  const xhr = new globalThis.XMLHttpRequest();
-  xhr.open('GET', location.origin + '/', false);
-  xhr.send(null);
-  report.xhrEffect = { status: xhr.status, length: (xhr.responseText || '').length, origin: location.origin };
-} catch (error) {
-  report.xhrEffect = { error: String(error && error.message) };
-}
+// T4 used to complete a SYNCHRONOUS XHR here, which is why it could report a status. P3-1 removed XHR from this realm,
+// and a completed fetch cannot replace it in this probe: runProbe waits for the process to SETTLE and output written
+// after settle is not captured, so a report printed from a fetch continuation is lost (measured - the probe produced
+// no report at all). What is measured here is therefore the platform request object's presence, synchronously; the
+// real request itself is covered by the P3-1 browser spec, which serves HTTP from a process and reads it back through
+// kernel.transport.
+report.xhrEffect = { reachable: typeof fetch, origin: location.origin };
 
 console.log("${REPORT}" + JSON.stringify(report));
 `;
@@ -234,7 +239,7 @@ interface ProbeReport {
   realm: Record<string, string>;
   constructors: { async: { returned: string; observed?: string }; generator: { returned: string; observed?: string; step?: number } };
   prototypeChain: readonly { readonly name: string; readonly fetch: string; readonly xhr: string; readonly onmessage: string }[];
-  xhrEffect: { status?: number; length?: number; origin?: string; error?: string };
+  xhrEffect: { status?: number; length?: number; origin?: string; error?: string; reachable?: string };
   clock: {
     virtualDelta: number;
     facadeDelta: number;
@@ -413,7 +418,11 @@ function validateReport(value: unknown): ProbeReport {
   const xhr = record(value, "report", "xhrEffect");
   // The probe reports one of two shapes: a completed request, or the error that stopped it. Both are asserted by T4,
   // so both are checked here rather than left to fail inside an assertion on the far side.
-  if (xhr["error"] !== undefined) {
+  if (xhr["reachable"] !== undefined) {
+    if (typeof xhr["reachable"] !== "string") {
+      problems.push(`xhrEffect.reachable: expected a string, got ${describeType(xhr["reachable"])}`);
+    }
+  } else if (xhr["error"] !== undefined) {
     if (typeof xhr["error"] !== "string") {
       problems.push(`xhrEffect.error: expected a string, got ${describeType(xhr["error"])}`);
     }
@@ -503,11 +512,13 @@ async function probeReport(page: import("@playwright/test").Page, files: Record<
   return validateReport(parseMarked(await runProbe(page, files, entry)));
 }
 
-test("T4: the platform global is reachable by every realm route, and XMLHttpRequest performs a real request", async ({ page }) => {
+test("T4: the platform global is reachable by every realm route, and fetch is available synchronously", async ({ page }) => {
   await page.goto("/");
   const report = await probeReport(page, { "/probe.js": PROBE }, "/probe.js");
 
-  // The curated facade: XHR is not on it. That is `self` doing its job and must stay true.
+  // The curated facade: fetch is not on it, so `self` keeps doing its job. The probe object moved from XHR to fetch
+  // because P3-1 removed XHR from this realm; the invariant is unchanged, and fetch was measured through all four
+  // routes before the switch (self undefined; direct, globalThis, constructed and platform-self all functions).
   expect(report.routes.self, JSON.stringify(report.routes)).toBe("undefined");
   // The bare identifier, the platform global and a constructed function all reach it.
   expect(report.routes.direct, JSON.stringify(report.routes)).toBe("function");
@@ -522,7 +533,7 @@ test("T4: the platform global is reachable by every realm route, and XMLHttpRequ
     expect(outcome, `realm route ${route} produced ${outcome}`).toBe("platform-global");
   }
 
-  // A constructor body that runs returns a Promise; a generator's runs on `.next()`. Both observe the platform XHR,
+  // A constructor body that runs returns a Promise; a generator's runs on `.next()`. Both observe the platform fetch,
   // so the distinction being pinned is the RETURN SHAPE, not "it did not escape".
   expect(report.constructors.async.returned, JSON.stringify(report.constructors)).toBe("promise");
   expect(report.constructors.async.observed, JSON.stringify(report.constructors)).toBe("function");
@@ -537,11 +548,10 @@ test("T4: the platform global is reachable by every realm route, and XMLHttpRequ
     expect(level.xhr, `prototype level ${level.name} exposes XMLHttpRequest`).toBe("undefined");
   }
 
-  // Reachability alone is not the finding; completing a request against the host's origin is.
-  expect(report.xhrEffect.error, JSON.stringify(report.xhrEffect)).toBeUndefined();
+  // The platform request object is present on this realm. What T4 no longer claims, and must not pretend to, is a
+  // completed request: see the probe's note on why a fetch continuation's report is not observable here.
+  expect(report.xhrEffect.reachable, JSON.stringify(report.xhrEffect)).toBe("function");
   expect(report.xhrEffect.origin).toBe(await page.evaluate(() => location.origin));
-  expect(report.xhrEffect.status).toBe(200);
-  expect(report.xhrEffect.length ?? 0).toBeGreaterThan(0);
 });
 
 test("T5: the shim clock is virtual on both shim surfaces and the platform clock is not", async ({ page }) => {
@@ -588,8 +598,11 @@ test("T7: no filesystem port, syscall channel, shared buffer or port-like handle
   // the channel ends actually live; that is a property of the reading, not of this test. Nor does it cover a name
   // nobody thought to put in the pattern - the structural sweep is the part that does not depend on guesswork, and
   // it only recognises objects, so a port hidden inside a function's properties would not be seen here either.
-  expect(report.reach.nativeChannels).toContain("MessageChannel");
-  expect(report.reach.nativeChannels).toContain("SharedArrayBuffer");
+  // POST-P3-1 STATE, intentional and measured. The original P1 measurement found three native channels here
+  // (MessageChannel, BroadcastChannel, SharedArrayBuffer). P3-1 deleted MessageChannel and BroadcastChannel as own
+  // configurable globals because the scheduler has a proven 0 ms fallback and nothing else in the Worker's module graph
+  // used either. SharedArrayBuffer stays: the syscall channel blocks on it (Atomics.wait), so it is load-bearing.
+  expect(report.reach.nativeChannels).toEqual(["SharedArrayBuffer"]);
 });
 
 test("T6 baseline: filesystem and preview serving still work through the same boundary", async ({ page }) => {
