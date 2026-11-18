@@ -7,8 +7,9 @@
  * does not confine a program that is trying. Isolation is the separate origin, and only that.
  *
  * WHAT THIS PHASE MAY DO. Delete an OWN, CONFIGURABLE property from the process Worker's global object. That is the whole
- * mechanism, and it is deliberately the only one: shadowing a prototype-owned property is P3-2, and pretending a
- * `delete` blocked something it did not would make the phase's own tests lie.
+ * mechanism, and it is deliberately the only one. Shadowing an INHERITED property was P3-2's question, and P3-2 closed
+ * with no implementation (docs/audit/w19-p3-2-closeout.md): a shadow is recovered through prototype traversal, so
+ * pretending it blocked something would make the phase's own tests lie.
  *
  * WHY A REPORT RATHER THAN A LIST. `delete scope[name]` fails silently in two ways that look identical from the outside -
  * the property was never own, or it was own and non-configurable - and a removal module that assumed success would let a
@@ -35,9 +36,9 @@ export interface CapabilityAudit {
  *     (`src/process/quarantine.ts`). Removing them would break the runtime, and the capture is what stops a later phase
  *     from doing it by accident.
  *   - WebSocket, postMessage and onmessage are NOT captured references. WebSocket is a capability programs legitimately
- *     use for preview sockets (ADR-0033), served through the curated facade. postMessage and onmessage are
- *     prototype-owned members of the Worker scope, so deleting an own global property is not even the mechanism that
- *     could remove them. P3-2 measured the inherited surface and recommends no shadowing (docs/audit/w19-p3-2-closeout.md).
+ *     use for preview sockets (ADR-0033), served through the curated facade. postMessage and onmessage are own and
+ *     configurable, so this phase COULD delete them; they are preserved because the trust decision about the channel they
+ *     expose has already been made by P2, not because deletion is unavailable (see each entry's reason).
  */
 export const CAPABILITY_AUDIT: ReadonlyArray<CapabilityAudit> = [
   {
@@ -85,17 +86,20 @@ export const CAPABILITY_AUDIT: ReadonlyArray<CapabilityAudit> = [
     name: "postMessage",
     decision: "preserve",
     reason:
-      "Prototype-owned on DedicatedWorkerGlobalScope, so deletion is not the mechanism and this phase must not fake one. " +
-      "The ordinary channel is already untrusted by construction: P2 ignores everything except the first `start` and " +
-      "blinds the handler once the control port is in hand.",
+      "Own, configurable DATA property on the global (measured in Chromium, W-19 P3-2), so this phase could delete it. It " +
+      "is preserved because deletion would buy nothing: the ordinary Worker channel is already untrusted by construction. " +
+      "The host ignores everything except the first `start`, and P2 blinds the handler once the control port is in hand, " +
+      "so a program posting here is talking to nobody. P3-1 removes capabilities with NO consumer; this one has a consumer " +
+      "whose trust was decided by P2.",
   },
   {
     name: "onmessage",
     decision: "preserve",
     reason:
-      "Prototype-owned accessor. The bootstrap needs it to receive `start`, and P2 already disables it by assigning an own " +
-      "`null` once the port is in hand - the correct disable, in the correct place. Blocking the prototype accessor " +
-      "belongs to P3-2.",
+      "Own, configurable ACCESSOR with a setter on the global (measured in Chromium, W-19 P3-2). The bootstrap needs it to " +
+      "receive `start`, and P2 disables it the correct way: it assigns an own `null` through that setter once the control " +
+      "port is in hand, before user code runs. P3-1 runs after that point, so the property is already inert when this " +
+      "phase could delete it, and deleting it would remove the setter the disable relies on without strengthening anything.",
   },
 ];
 

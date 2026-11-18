@@ -13,7 +13,14 @@ note, and nothing here should be read as three-engine verification.
 P3-1 deleted own, configurable properties from the Process Worker global. P3-2 asked whether the properties that remained
 inherited from the prototype chain expose ambient capabilities, and whether shadowing them is safe, necessary or useful.
 
-The answer is no to all three. This note records why, so the question is not reopened from memory.
+The three questions have different answers, and collapsing them is how a note starts lying:
+
+- **Do inherited properties expose ambient capabilities? Yes.** `fetch`, `indexedDB`, `caches` and `crypto` are reachable
+  and usable from this realm, measured below.
+- **Is shadowing them a safe, necessary or effective security boundary? No.** A shadow is recovered by prototype
+  traversal, and the recovered reference still works.
+- **Is a production implementation recommended? No.** The reasoning and the measurement are recorded here so the question
+  is not reopened from memory.
 
 ## The prototype chain, measured
 
@@ -27,9 +34,16 @@ The answer is no to all three. This note records why, so the question is not reo
 | 5 | `null` | - | terminal |
 
 The distinction that decides the phase: **`fetch`, `indexedDB` and `caches` are inherited from `WorkerGlobalScope.prototype`,
-not own properties of the global.** Own-property deletion, which is what P3-1 does, cannot reach them at all. `onmessage`,
-`postMessage` and `close` are own accessor properties on the global (measured `accessor`, `configurable: true`), and
-`importScripts` is inherited.
+not own properties of the global.** Own-property deletion, which is what P3-1 does, cannot reach them at all.
+
+The Worker-scope members are the opposite case, and their measured shape matters for the reason each is preserved:
+`onmessage` and `onmessageerror` are own **accessor** properties on the global with a setter, `postMessage` and `close` are
+own **data** properties, and all four are `configurable: true`. None of them lives on `DedicatedWorkerGlobalScope.prototype`.
+So P3-1 could have deleted them. It did not, because deleting them would not change what a program can do: P2 already
+decided the trust of the ordinary channel (the host ignores everything except the first `start`, and `onmessage` is set to
+`null` through its setter once the control port is in hand, before user code runs), and the private `MessagePort` is the
+only trusted channel. Deleting `onmessage` would also remove the setter that disable relies on. `importScripts` is the
+genuinely inherited one.
 
 ## Inherited capabilities, and whether they are usable
 
@@ -72,11 +86,14 @@ this realm has the browser's own `fetch`, subject to the browser's own rules.
 
 Two corrections worth keeping:
 
-- **CORS is not an outbound firewall.** CORS governs whether JavaScript may *read* a cross-origin response. A request can
-  still be sent to an endpoint that answers without CORS headers; the response is unreadable, the request is not
-  prevented.
-- **`connect-src` CSP is the relevant policy control** for restricting where connections may go, and it is a thing to
-  investigate, not something this phase configured or tested.
+- **CORS is not an outbound firewall.** CORS governs whether JavaScript may *read* a cross-origin response. What happens
+  to the request itself depends on its shape. A simple request can reach the server even when the response is unreadable
+  to JavaScript, because CORS withholds the response rather than the request. A request that triggers a preflight can be
+  stopped before it is ever sent, because a failed preflight fails the fetch. Neither behaviour is a general outbound
+  network firewall: requests the browser considers simple are not gated on the target agreeing to anything.
+- **`connect-src` CSP is the relevant policy control** for restricting where connections may go, from the Worker
+  execution context that actually runs the code. It is a thing to investigate, not something this phase configured or
+  tested.
 - **A parent page's CSP does not automatically govern a Worker.** Whether a policy applies to a given Worker depends on
   the Worker's own response headers and the deployment arrangement, and the effective policy must be verified for the
   actual execution context. That verification has not been done.
