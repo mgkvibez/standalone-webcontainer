@@ -41,7 +41,8 @@
  * - `structuredClone` - `src/shims/v8.ts` serialisation.
  * - `Atomics` / `SharedArrayBuffer` - `src/process/syscall-channel.ts`, `src/process/remote-fs.ts`,
  *   `src/process/remote-watch.ts`: the synchronous syscall channel cannot work without both.
- * - `setTimeout` / `setInterval` - `src/process/remote-watch.ts` polls watches on REAL timers (a virtual interval never
+ * - `setTimeout` / `clearTimeout` - `src/process/remote-watch.ts:77-78` polls watches on REAL timers and cancels the
+ *   pending tick when the watch closes (a virtual interval never
  *   fires, because virtual time only advances while the queue runs), so the ambient timers are load-bearing.
  *
  * DELIBERATELY ABSENT: `queueMicrotask`. A source audit finds no production call site in `src/process` or
@@ -64,7 +65,12 @@ export interface RealmReferences {
   readonly Atomics: typeof Atomics;
   readonly SharedArrayBuffer: SharedArrayBufferConstructor;
   readonly setTimeout: (handler: () => void, timeout?: number) => unknown;
-  readonly setInterval: (handler: () => void, interval?: number) => unknown;
+  /**
+   * The cancellation half of the pair. `remote-watch.ts:78` returns a closer that calls it, and `process-transport.ts:419`
+   * clears a socket-open deadline, so a scheduler that could arm a timer but not disarm one would leave ticks running after
+   * a watch or a request was finished with.
+   */
+  readonly clearTimeout: (handle: unknown) => void;
 }
 
 /** The shape capture reads from. Structural so a test can hand it a recorder instead of a realm. */
@@ -104,7 +110,7 @@ export const CAPTURED_REFERENCES: ReadonlyArray<keyof RealmReferences> = [
   "Atomics",
   "SharedArrayBuffer",
   "setTimeout",
-  "setInterval",
+  "clearTimeout",
 ];
 
 /**
@@ -135,8 +141,11 @@ export function captureRealmReferences(source: RealmSource = globalThis as unkno
     structuredClone: source.structuredClone as typeof structuredClone,
     Atomics: source.Atomics as typeof Atomics,
     SharedArrayBuffer: source.SharedArrayBuffer as SharedArrayBufferConstructor,
-    setTimeout: (source.setTimeout as RealmReferences["setTimeout"]).bind(globalThis),
-    setInterval: (source.setInterval as RealmReferences["setInterval"]).bind(globalThis),
+    // Bound to the SOURCE they were read from, not to `globalThis`: a timer called with the wrong receiver throws an
+    // Illegal invocation in the browser, and a capture that only works for the default source cannot be tested with any
+    // other - which is the difference between a test that proves the binding and one that assumes it.
+    setTimeout: (source.setTimeout as RealmReferences["setTimeout"]).bind(source),
+    clearTimeout: (source.clearTimeout as RealmReferences["clearTimeout"]).bind(source),
   });
 }
 

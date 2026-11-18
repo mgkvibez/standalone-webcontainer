@@ -70,4 +70,39 @@ describe("P3-0 realm capture", () => {
     expect(CAPTURED_REFERENCES).not.toContain("queueMicrotask" as never);
     expect(CAPTURED_REFERENCES).toHaveLength(14);
   });
+
+  it("binds the timers to the source they were read from, not to globalThis", () => {
+    // A source whose timers record their receiver. `bind(globalThis)` would pass this call but deliver the wrong `this`,
+    // which is exactly the shape that throws "Illegal invocation" the first time a real browser calls it.
+    const seen: unknown[] = [];
+    // A complete realm with two timer overrides: the capture requires every reference, so a partial source would fail
+    // for a reason that has nothing to do with binding.
+    const realm = globalThis as unknown as Record<string, unknown>;
+    const source: Record<string, unknown> = {};
+    for (const name of CAPTURED_REFERENCES) source[name] = realm[name];
+    source["setTimeout"] = function (this: unknown, handler: () => void): number {
+      seen.push(this);
+      handler();
+      return 1;
+    };
+    source["clearTimeout"] = function (this: unknown): void {
+      seen.push(this);
+    };
+    const captured = captureRealmReferences(source as never);
+    let fired = false;
+    captured.setTimeout(() => { fired = true; }, 0);
+    captured.clearTimeout(1);
+    expect(fired).toBe(true);
+    expect(seen).toHaveLength(2);
+    for (const receiver of seen) expect(receiver).toBe(source);
+  });
+
+  it("captures the timer pair the watch scheduler actually uses, and nothing it does not", () => {
+    // Evidence, not preference: `remote-watch.ts:77-78` arms a real timer and returns a closer that cancels it.
+    expect(CAPTURED_REFERENCES).toContain("setTimeout");
+    expect(CAPTURED_REFERENCES).toContain("clearTimeout");
+    // No production consumer exists for either, so capturing them would be speculation.
+    expect(CAPTURED_REFERENCES).not.toContain("setInterval");
+    expect(CAPTURED_REFERENCES).not.toContain("clearInterval");
+  });
 });
