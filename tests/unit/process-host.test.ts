@@ -557,3 +557,22 @@ it("drops the control channel when the process is killed", async () => {
 
   expect(host.controlChannels()).not.toContain(pid);
 });
+
+describe("partial bootstrap (W-19 P2)", () => {
+  it("fails the process and frees both ends when the start message cannot be delivered", async () => {
+    const host = new ProcessHost({
+      maxProcesses: 2,
+      spawn: () => ({
+        postMessage() { throw new Error("DataCloneError: transfer list rejected"); },
+        terminate() {},
+        onmessage: null,
+        onerror: null,
+      }),
+    });
+    const { pid } = host.start({ argv: ["node", "a.js"] });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(host.table.get(pid).state).toBe("failed");
+    // The control channel is created before the message is sent, so a rejected bootstrap must not leave it behind.
+    expect(host.controlChannels()).not.toContain(pid);
+  });
+});

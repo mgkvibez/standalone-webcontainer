@@ -206,7 +206,8 @@ export class ProcessHost {
     port.onmessage = (event: { readonly data: unknown }) => this.#onControlMessage(pid, event.data);
     this.#control.set(pid, { port, session });
     const transport = options.transport;
-    worker.postMessage(
+    try {
+      worker.postMessage(
       {
         type: "start",
         pid,
@@ -226,7 +227,15 @@ export class ProcessHost {
       transport === undefined
         ? [channel.port2 as unknown as Transferable]
         : [transport as unknown as Transferable, channel.port2 as unknown as Transferable],
-    );
+      );
+    } catch (error) {
+      // Partial bootstrap. The Worker exists and both ends of the control channel exist, so all three go before the slot is freed:
+      // a Worker nobody can supervise is exactly the state this channel exists to make impossible.
+      worker.terminate();
+      this.#releaseControl(pid);
+      this.#fail(pid, `process bootstrap failed: ${(error as Error)?.message ?? String(error)}`);
+      return { pid, allocation };
+    }
 
     return { pid, allocation };
   }

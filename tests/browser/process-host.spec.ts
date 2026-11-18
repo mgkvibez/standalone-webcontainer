@@ -10,12 +10,18 @@
 import { expect, test } from "@playwright/test";
 
 const PROCESS_WORKER = `
+let control = null;
+let session = null;
 self.onmessage = (event) => {
-  const { argv, pid } = event.data;
+  const start = event.data;
+  control = start.control;
+  session = start.session;
+  self.onmessage = null;
+  const { argv, pid } = start;
   const delay = Number(argv[2] ?? "0");
   const startedAt = Date.now();
   while (Date.now() - startedAt < delay) { /* deliberately busy: this is the work being timed */ }
-  self.postMessage({ type: "exit", code: pid, reason: String(delay) });
+  control.postMessage({ type: "exit", code: pid, reason: String(delay), session });
 };
 `;
 

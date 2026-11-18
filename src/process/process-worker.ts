@@ -180,6 +180,13 @@ scope.onmessage = (event) => {
   // code can post on must never carry anything the kernel trusts. Anything except the first `start` is ignored, and the handler is
   // cleared once the port is in hand, so a program that reassigns `globalThis.onmessage` is talking to nobody.
   if (message?.type !== "start") return;
+  // FAIL CLOSED. A Worker booted without the control port cannot report anything the kernel would believe, so it must not pretend
+  // to run. Throwing here is a real error event on this Worker and the host turns that into a `failed` process; reporting the
+  // problem over the ordinary channel instead would be the forgery path this channel exists to close.
+  const bootstrap = message as { readonly control?: { readonly postMessage?: unknown } };
+  if (bootstrap.control === undefined || typeof bootstrap.control.postMessage !== "function") {
+    throw new Error("process bootstrap: the control port is missing, so this process cannot be supervised");
+  }
   scope.onmessage = null;
 
   // Deliberately not awaited into a promise chain nobody observes: a rejection inside an async handler is invisible

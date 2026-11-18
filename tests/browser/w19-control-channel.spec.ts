@@ -208,3 +208,28 @@ test("one process cannot settle another, nor register a port in its name", async
   expect(outcome.ports).toContain(3301);
   expect(outcome.stateAAfter).toBe("running");
 });
+
+test("a Worker booted without the control port fails closed instead of running unsupervised", async ({ page }) => {
+  await page.goto("/");
+  const outcome = await page.evaluate(async () => {
+    const url = new URL("/src/process/process-worker.ts", location.origin).href;
+    const worker = new Worker(url, { type: "module" });
+    const error = await new Promise<string>((resolve) => {
+      worker.onerror = (event: ErrorEvent) => resolve(String(event.message));
+      setTimeout(() => resolve("no error and no report within 8s"), 8_000);
+      // The shape a caller would send if it did not know the contract: a real channel and a real argv, no control port.
+      worker.postMessage({
+        type: "start",
+        pid: 1,
+        argv: ["node", "/main.js"],
+        env: {},
+        buffer: new SharedArrayBuffer(64 + 4096 + 4096),
+        sizes: { requestBytes: 4096, responseBytes: 4096 },
+      });
+    });
+    worker.terminate();
+    return { error };
+  });
+  // Fails closed and says why: no program ran, and nothing was reported on the ordinary channel that the host would believe.
+  expect(outcome.error).toContain("control port");
+});
