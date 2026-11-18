@@ -681,12 +681,18 @@ test("T9: a platform timer callback runs after the body settles, in a process he
         }
         return false;
       };
-      // The port proves the body settled: a listening server is what holds the process open past its result.
-      await waitFor(() => (kernel.ports() as readonly { port: number }[]).some((binding) => binding.port === 3201));
+      // The binding is ASSERTED, not assumed: the premise of this test is that a listening server holds the process open
+      // past its result, so a run where the port never bound would prove nothing while looking identical from outside.
+      const bound = await waitFor(() =>
+        (kernel.ports() as readonly { port: number }[]).some((binding) => binding.port === 3201),
+      );
+      const observedPorts = (kernel.ports() as readonly { port: number }[]).map((binding) => binding.port);
       const fired = await waitFor(() => text.includes("PLATFORM-TIMER-FIRED"));
       const stateWhenFired = (kernel.processes() as readonly { pid: number; state: string }[])
         .find((entry) => entry.pid === pid)?.state;
       return {
+        bound,
+        observedPorts,
         fired,
         stateWhenFired,
         facadeAlsoFired: text.includes("FACADE-TIMER-FIRED"),
@@ -706,8 +712,11 @@ test("T9: a platform timer callback runs after the body settles, in a process he
   expect(outcome.fired, JSON.stringify(outcome)).toBe(true);
   expect(markersInOrder(outcome.text, "body-settled", "PLATFORM-TIMER-FIRED"), JSON.stringify(outcome)).toBe("both-in-order");
   expect(outcome.stateWhenFired, JSON.stringify(outcome)).toBe("running");
-  // Both surfaces do fire; the difference is not whether they run but who is counting.
+  // Both timer surfaces fire. What each callback proves beyond that is not established here: this probe never observes how
+  // either one was accounted for, so it makes no claim about the scheduler's bookkeeping.
   expect(outcome.facadeAlsoFired, JSON.stringify(outcome)).toBe(true);
+  // The premise, asserted rather than implied: a bound port is what keeps this process alive past its body.
+  expect(outcome.bound, JSON.stringify({ observedPorts: outcome.observedPorts, text: outcome.text })).toBe(true);
 });
 
 test("the report validator names the field it rejects, instead of leaving a TypeError to an assertion", () => {
