@@ -42,8 +42,8 @@
  * - `Atomics` / `SharedArrayBuffer` - `src/process/syscall-channel.ts`, `src/process/remote-fs.ts`,
  *   `src/process/remote-watch.ts`: the synchronous syscall channel cannot work without both.
  * - `setTimeout` / `clearTimeout` - `src/process/remote-watch.ts:77-78` polls watches on REAL timers and cancels the
- *   pending tick when the watch closes (a virtual interval never
- *   fires, because virtual time only advances while the queue runs), so the ambient timers are load-bearing.
+ *   pending tick when the watch closes (a virtual timer never fires here, because virtual time only advances while the
+ *   queue runs), so the ambient timers are load-bearing.
  *
  * DELIBERATELY ABSENT: `queueMicrotask`. A source audit finds no production call site in `src/process` or
  * `src/runtime/in-process.ts`; the facade re-exposes the realm's own for programs that legitimately use it, which is not a
@@ -66,9 +66,10 @@ export interface RealmReferences {
   readonly SharedArrayBuffer: SharedArrayBufferConstructor;
   readonly setTimeout: (handler: () => void, timeout?: number) => unknown;
   /**
-   * The cancellation half of the pair. `remote-watch.ts:78` returns a closer that calls it, and `process-transport.ts:419`
-   * clears a socket-open deadline, so a scheduler that could arm a timer but not disarm one would leave ticks running after
-   * a watch or a request was finished with.
+   * The cancellation half of the pair, and captured for the same reason: `remote-watch.ts:78` returns a closer that calls
+   * it, so a scheduler that could arm a timer but not disarm one would leave ticks running after a watch was closed. This
+   * is the only Process Worker consumer; `process-transport.ts` also clears a deadline, but that code runs in the kernel's
+   * `ProcessTransportBroker`, not in this realm, so it is not evidence for this capture.
    */
   readonly clearTimeout: (handle: unknown) => void;
 }
