@@ -28,6 +28,11 @@ import type {
   TransportSocketUpstreamMessage,
 } from "./process-transport.js";
 import { relaySocket } from "./process-transport.js";
+// P3-0: importing this module IS the capture. It runs during module evaluation, before the start message can arrive and
+// before the loader compiles user code, so no user code can observe a realm that was not captured. Nothing is attached to
+// globalThis and nothing is added to the facade: the bindings stay in that module's scope for the phases that restrict
+// ambient capabilities. This is preparation, not isolation - user code shares this realm either way.
+import "./quarantine.js";
 import { createRemoteWatcher, realTimerScheduler } from "./remote-watch.js";
 import { InProcessRuntime } from "../runtime/in-process.js";
 import type { Refusal } from "../runtime/refusal.js";
