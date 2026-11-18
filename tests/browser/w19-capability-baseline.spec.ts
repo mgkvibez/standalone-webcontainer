@@ -364,6 +364,11 @@ function validateReport(value: unknown): ProbeReport {
   for (const key of ["async", "generator"] as const) {
     const entry = record(constructors, "constructors", key);
     strings(entry, `constructors.${key}`, ["returned", "observed"]);
+    // `step` is the generator body's first yielded value; the async arm returns a Promise and has no such field, so it is
+    // optional on both rather than required on either.
+    if (entry["step"] !== undefined && typeof entry["step"] !== "number") {
+      problems.push(`constructors.${key}.step: expected a number when present, got ${describeType(entry["step"])}`);
+    }
   }
 
   const chain = value["prototypeChain"];
@@ -397,10 +402,26 @@ function validateReport(value: unknown): ProbeReport {
 
   const timers = record(value, "report", "timers");
   booleans(timers, "timers", ["facadeDiffersFromPlatform", "facadeAccepts", "platformAccepts"]);
+  // Present only when scheduling threw; absent is the good case and is asserted as `undefined`.
+  for (const key of ["facadeScheduleError", "platformScheduleError"] as const) {
+    const entry = timers[key];
+    if (entry !== undefined && typeof entry !== "string") {
+      problems.push(`timers.${key}: expected a string when present, got ${describeType(entry)}`);
+    }
+  }
 
   const xhr = record(value, "report", "xhrEffect");
-  if (xhr["error"] !== undefined && typeof xhr["error"] !== "string") {
-    problems.push(`xhrEffect.error: expected a string, got ${describeType(xhr["error"])}`);
+  // The probe reports one of two shapes: a completed request, or the error that stopped it. Both are asserted by T4,
+  // so both are checked here rather than left to fail inside an assertion on the far side.
+  if (xhr["error"] !== undefined) {
+    if (typeof xhr["error"] !== "string") {
+      problems.push(`xhrEffect.error: expected a string, got ${describeType(xhr["error"])}`);
+    }
+  } else {
+    numbers(xhr, "xhrEffect", ["status", "length"]);
+    if (typeof xhr["origin"] !== "string") {
+      problems.push(`xhrEffect.origin: expected a string, got ${describeType(xhr["origin"])}`);
+    }
   }
 
   if (!Array.isArray(value["facadeFs"]) || value["facadeFs"].some((entry) => typeof entry !== "string")) {
@@ -421,6 +442,21 @@ function describeType(value: unknown): string {
 }
 
 /** The report a program sent back, located by marker and parsed. Shape is the caller's problem. */
+/**
+ * Where two markers sit relative to each other, refusing to answer when either is absent.
+ *
+ * The version this replaces compared two `indexOf` results directly, and `-1 < -1` is false while `-1 < 7` is true: an
+ * absent "first" marker would satisfy an ordering assertion written the other way round, and an absent pair proved
+ * nothing while passing. Four outcomes, so a test can say which of them happened.
+ */
+function markersInOrder(text: string, first: string, second: string): "both-in-order" | "missing-first" | "missing-second" | "reversed" {
+  const firstAt = text.indexOf(first);
+  const secondAt = text.indexOf(second);
+  if (firstAt === -1) return "missing-first";
+  if (secondAt === -1) return "missing-second";
+  return firstAt < secondAt ? "both-in-order" : "reversed";
+}
+
 function parseMarked(stdout: string): unknown {
   const line = stdout.split("\n").find((candidate) => candidate.startsWith(REPORT));
   if (line === undefined) {
@@ -616,7 +652,7 @@ test("T8 baseline: fs, WebAssembly, CommonJS, ESM and a node_modules package all
   expect(esm.esmValue, JSON.stringify(esm)).toBe("esm-ok");
 });
 
-test("T9: a platform timer fires inside a held-open process, which is work the scheduler never counted", async ({ page }) => {
+test("T9: a platform timer callback runs after the body settles, in a process held open by its server", async ({ page }) => {
   await page.goto("/");
   const outcome = await page.evaluate(async () => {
     const { ProcessKernel } = await import(new URL("/src/process/process-kernel.ts", location.origin).href);
@@ -653,7 +689,6 @@ test("T9: a platform timer fires inside a held-open process, which is work the s
       return {
         fired,
         stateWhenFired,
-        bodySettledFirst: text.indexOf("body-settled") < text.indexOf("PLATFORM-TIMER-FIRED"),
         facadeAlsoFired: text.includes("FACADE-TIMER-FIRED"),
         text,
       };
@@ -663,12 +698,14 @@ test("T9: a platform timer fires inside a held-open process, which is work the s
     }
   });
 
-  // This is the capability measured where it can be observed, rather than inferred from a run that settles first: the
-  // callback arrives while the process is still held open, so it happened outside the scheduler's accounting. It is not
-  // a timing assertion - it polls for the callback with a generous ceiling, so a slow browser costs time, not a failure.
+  // WHAT THIS MEASURES: a callback scheduled on the platform timer ran after the program body settled, and the process
+  // was still `running` at that moment because a listening server holds it open. That is the whole claim. It is NOT
+  // evidence that the scheduler failed to count the work, and nothing here observes `kernel.settled(pid)` - proving
+  // "untracked" would need the settled result compared against the marker's arrival, which this test does not do.
+  // Not a timing assertion either: it polls with a generous ceiling, so a slow browser costs time, not a failure.
   expect(outcome.fired, JSON.stringify(outcome)).toBe(true);
-  expect(outcome.bodySettledFirst, JSON.stringify(outcome)).toBe(true);
-  expect(outcome.stateWhenFired).toBe("running");
+  expect(markersInOrder(outcome.text, "body-settled", "PLATFORM-TIMER-FIRED"), JSON.stringify(outcome)).toBe("both-in-order");
+  expect(outcome.stateWhenFired, JSON.stringify(outcome)).toBe("running");
   // Both surfaces do fire; the difference is not whether they run but who is counting.
   expect(outcome.facadeAlsoFired, JSON.stringify(outcome)).toBe(true);
 });
@@ -687,7 +724,7 @@ test("the report validator names the field it rejects, instead of leaving a Type
     reach: { sabNames: [], portLike: [], plumbingNames: [], nativeChannels: [], fsPortishKeys: [], fsCallableKeys: [] },
     inventory: { own: { fetch: "function" }, inherited: { fetch: "no" }, facade: { fetch: "undefined" } },
     timers: { facadeDiffersFromPlatform: true, facadeAccepts: true, platformAccepts: true },
-    xhrEffect: { status: 200 },
+    xhrEffect: { status: 200, length: 12, origin: "http://example.test" },
     facadeFs: [],
   };
   expect(() => validateReport(nearlyRight)).not.toThrow();
@@ -697,4 +734,62 @@ test("the report validator names the field it rejects, instead of leaving a Type
   );
   // A null report is named as null rather than "object".
   expect(() => validateReport(null)).toThrow(/was not an object, it was null/);
+});
+
+test("the ordering check refuses absent or reversed markers instead of passing on -1", () => {
+  const first = "body-settled";
+  const second = "PLATFORM-TIMER-FIRED";
+
+  expect(markersInOrder(`${first} then ${second}`, first, second)).toBe("both-in-order");
+  // The failure this replaces: `indexOf(first) < indexOf(second)` is `-1 < 7`, which is TRUE.
+  expect(markersInOrder(`only ${second}`, first, second)).toBe("missing-first");
+  expect(markersInOrder(`only ${first}`, first, second)).toBe("missing-second");
+  expect(markersInOrder(`${second} then ${first}`, first, second)).toBe("reversed");
+  expect(markersInOrder("", first, second)).toBe("missing-first");
+});
+
+/** A report that passes validation, so a test can break exactly one field and see it named. */
+const VALID_REPORT = {
+  routes: { self: "undefined", direct: "function", globalThis: "function", constructed: "function", platformSelfViaFunction: "function" },
+  xhrEffect: { status: 200, length: 12, origin: "http://example.test" },
+  clock: { virtualDelta: 0, facadeDelta: 0, platformDelta: 7, sameDate: true, sameSetTimeout: false, samePerformance: false, worked: true },
+  timers: { facadeDiffersFromPlatform: true, facadeAccepts: true, platformAccepts: true },
+  reach: { sabNames: [], portLike: [], plumbingNames: [], nativeChannels: [], fsPortishKeys: [], fsCallableKeys: [] },
+  inventory: { own: { fetch: "function" }, inherited: { fetch: "function" }, facade: { fetch: "undefined" } },
+  facadeFs: ["readFile"],
+  realm: { indirectEval: "platform-global", directEval: "platform-global", selfFunction: "platform-global", selfObjectCtor: "platform-global", literalCtor: "platform-global" },
+  constructors: { async: { returned: "promise", observed: "function" }, generator: { returned: "iterator", observed: "function", step: 1 } },
+  prototypeChain: [{ name: "DedicatedWorkerGlobalScope", fetch: "function", xhr: "undefined", onmessage: "function" }],
+};
+
+/** The validator's message for a report, or "" when it accepts it. */
+const problemsOf = (report: unknown): string => {
+  try {
+    validateReport(report);
+    return "";
+  } catch (error) {
+    return (error as Error).message;
+  }
+};
+
+test("the report validator names every malformed field it consumes", () => {
+  // The fixture is accepted first, or every assertion below could pass for the wrong reason.
+  expect(problemsOf(VALID_REPORT)).toBe("");
+
+  const broken: [string, unknown, string][] = [
+    ["status", { ...VALID_REPORT, xhrEffect: { status: "200", length: 12, origin: "x" } }, "xhrEffect.status"],
+    ["length", { ...VALID_REPORT, xhrEffect: { status: 200, origin: "x" } }, "xhrEffect.length"],
+    ["origin", { ...VALID_REPORT, xhrEffect: { status: 200, length: 12 } }, "xhrEffect.origin"],
+    ["error", { ...VALID_REPORT, xhrEffect: { error: 42 } }, "xhrEffect.error"],
+    ["chain name", { ...VALID_REPORT, prototypeChain: [{ fetch: "f", xhr: "u", onmessage: "f" }] }, "prototypeChain[0].name"],
+    ["chain xhr", { ...VALID_REPORT, prototypeChain: [{ name: "n", fetch: "f", onmessage: "f" }] }, "prototypeChain[0].xhr"],
+    ["facade timer error", { ...VALID_REPORT, timers: { ...VALID_REPORT.timers, facadeScheduleError: 7 } }, "timers.facadeScheduleError"],
+    ["platform timer error", { ...VALID_REPORT, timers: { ...VALID_REPORT.timers, platformScheduleError: {} } }, "timers.platformScheduleError"],
+    ["async step", { ...VALID_REPORT, constructors: { ...VALID_REPORT.constructors, async: { returned: "promise", observed: "function", step: "1" } } }, "constructors.async.step"],
+    ["generator step", { ...VALID_REPORT, constructors: { ...VALID_REPORT.constructors, generator: { returned: "iterator", observed: "function", step: {} } } }, "constructors.generator.step"],
+  ];
+
+  for (const [label, report, field] of broken) {
+    expect(problemsOf(report), label).toContain(field);
+  }
 });
