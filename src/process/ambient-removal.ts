@@ -37,15 +37,18 @@ export interface CapabilityAudit {
  *   - WebSocket, postMessage and onmessage are NOT captured references. WebSocket is a capability programs legitimately
  *     use for preview sockets (ADR-0033), served through the curated facade. postMessage and onmessage are
  *     prototype-owned members of the Worker scope, so deleting an own global property is not even the mechanism that
- *     could remove them; P3-2 owns whether to shadow them.
+ *     could remove them. P3-2 measured the inherited surface and recommends no shadowing (docs/audit/w19-p3-2-closeout.md).
  */
 export const CAPABILITY_AUDIT: ReadonlyArray<CapabilityAudit> = [
   {
     name: "XMLHttpRequest",
     decision: "remove",
     reason:
-      "No occurrence in src/process, src/runtime or src/shims. HTTP from a program goes through the virtual fetch/XHR " +
-      "shim over the syscall channel, never through the browser's own request object.",
+      "No occurrence in src/process, src/runtime or src/shims: nothing in this realm uses the browser's request object, " +
+      "and a program's HTTP goes through the virtual fetch/XHR shims the runtime provides. Removing it does NOT " +
+      "establish network isolation. Native fetch is inherited from WorkerGlobalScope.prototype, so it stays reachable " +
+      "and usable here (measured in Chromium, W-19 P3-2); deleting this own property neither removes it nor routes it " +
+      "through the syscall channel. See docs/audit/w19-p3-2-closeout.md.",
   },
   {
     name: "BroadcastChannel",
