@@ -233,3 +233,71 @@ test("a Worker booted without the control port fails closed instead of running u
   // Fails closed and says why: no program ran, and nothing was reported on the ordinary channel that the host would believe.
   expect(outcome.error).toContain("control port");
 });
+
+/**
+ * The regression the review asked for, and the reason it is worth having even though the code is already right.
+ *
+ * `post()` routes input and resize through the private port. A later change that "helpfully" also posted on the Worker channel
+ * would look harmless in every existing test: the Worker clears `scope.onmessage` at bootstrap, so an ordinary message would be
+ * dropped... unless a PROGRAM puts a handler back. User code shares the realm, so it can, and then a duplicate arrives at user
+ * code as if the kernel had spoken to it directly. This program installs exactly that handler, then proves it is live by
+ * checking it is reachable, and reports anything it receives.
+ */
+const SPY = [
+  'globalThis.onmessage = () => { console.log("ORDINARY-DUPLICATE"); };',
+  'console.log("spy-installed:" + (typeof globalThis.onmessage));',
+  'process.stdin.on("data", (chunk) => { console.log("STDIN:" + String(chunk).trim()); });',
+  'process.on("SIGWINCH", () => { console.log("SIGWINCH:" + process.stdout.columns + "x" + process.stdout.rows); });',
+  // Held open by a port, so input and resize arrive while the program is still running rather than racing its exit.
+  'require("http").createServer((request, response) => response.end("ok")).listen(3400);',
+].join("\n");
+
+test("input and resize arrive over the private port, and a program's own onmessage hears nothing", async ({ page }) => {
+  await page.goto("/");
+
+  const outcome = await page.evaluate(async ({ spy }) => {
+    const { ProcessKernel } = await import(new URL("/src/process/process-kernel.ts", location.origin).href);
+    let text = "";
+    const kernel = new ProcessKernel({
+      files: { "/spy.js": spy },
+      transportTimeoutMs: 3_000,
+      onOutput: (_pid: number, _channel: string, chunk: string) => { text += chunk; },
+    });
+
+    const waitFor = async (predicate: () => boolean, timeoutMs = 20_000): Promise<boolean> => {
+      const started = Date.now();
+      while (Date.now() - started < timeoutMs) {
+        if (predicate()) return true;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      return false;
+    };
+
+    try {
+      const pid = kernel.start({ argv: ["node", "/spy.js"], terminal: { columns: 80, rows: 24 } });
+      const listening = await waitFor(() => (kernel.ports() as readonly { port: number }[]).some((binding) => binding.port === 3400));
+      const resized = kernel.resize(pid, 100, 30);
+      const typed = kernel.input(pid, "hello\n");
+      const sawResize = await waitFor(() => text.includes("SIGWINCH:"));
+      const sawTyped = await waitFor(() => text.includes("STDIN:hello"));
+      // A moment longer than delivery needs, so a late duplicate would still be caught rather than raced past.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return { listening, resized, typed, sawResize, sawTyped, text };
+    } finally {
+      kernel.stopServers([3400]);
+      kernel.dispose();
+    }
+  }, { spy: SPY });
+
+  expect(outcome.listening, outcome.text).toBe(true);
+  // The host believed it delivered on both counts...
+  expect(outcome.resized, outcome.text).toBe(true);
+  expect(outcome.typed, outcome.text).toBe(true);
+  // ...the program received both, which is only possible over the private port...
+  expect(outcome.sawResize, outcome.text).toBe(true);
+  expect(outcome.sawTyped, outcome.text).toBe(true);
+  expect(outcome.text).toContain("SIGWINCH:100x30");
+  // ...the spy it installed was real, and it heard nothing.
+  expect(outcome.text).toContain("spy-installed:function");
+  expect(outcome.text).not.toContain("ORDINARY-DUPLICATE");
+});
