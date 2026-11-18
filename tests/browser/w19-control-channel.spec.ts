@@ -163,7 +163,14 @@ test("one process cannot settle another, nor register a port in its name", async
   await page.goto("/");
   const outcome = await page.evaluate(async ({ a, b }) => {
     const { ProcessKernel } = await import(new URL("/src/process/process-kernel.ts", location.origin).href);
-    const kernel = new ProcessKernel({ files: { "/a.js": a, "/b.js": b }, transportTimeoutMs: 3_000, onOutput: () => {} });
+    let stdout = "";
+    const kernel = new ProcessKernel({
+      files: { "/a.js": a, "/b.js": b },
+      transportTimeoutMs: 3_000,
+      onOutput: (_pid: number, channel: string, text: string) => {
+        stdout += `${channel}:${text}`;
+      },
+    });
     const waitFor = async (predicate: () => boolean, timeoutMs = 20_000): Promise<boolean> => {
       const started = Date.now();
       while (Date.now() - started < timeoutMs) {
@@ -175,22 +182,42 @@ test("one process cannot settle another, nor register a port in its name", async
     try {
       const pidA = kernel.start({ argv: ["node", "/a.js"] });
       const pidB = kernel.start({ argv: ["node", "/b.js"] });
-      await waitFor(() =>
-        (kernel.ports() as readonly { port: number }[]).some((binding) => binding.port === 3302),
-      );
+      const bindings = (): readonly { pid: number; port: number }[] =>
+        kernel.ports() as readonly { pid: number; port: number }[];
+      const observedPorts = (): number[] => bindings().map((binding) => binding.port).sort((left, right) => left - right);
+      const ownersOf = (port: number): number[] =>
+        bindings().filter((binding) => binding.port === port).map((binding) => binding.pid);
+      // WAIT FOR BOTH, and keep both results. A binds independently of B and B settles in about 100 ms, so a wait on
+      // 3302 alone could read the port table before A had bound at all - which is exactly what CI did, reporting
+      // [3302] against an expected 3301. A discarded waitFor is how that went unnoticed: the assertion below failed
+      // with no evidence that the wait it depended on had ever succeeded.
+      const bBound = await waitFor(() => observedPorts().includes(3302));
+      const aBound = await waitFor(() => observedPorts().includes(3301));
       const stateOf = (pid: number): string =>
         (kernel.processes() as readonly { pid: number; state: string }[]).find((entry) => entry.pid === pid)?.state ?? "absent";
       // B was serving while A forged: A's forgeries must not have touched B.
       const bReply = await kernel.transport({ method: "GET", url: "/preview/3302/b", headers: {}, body: new Uint8Array() });
       const stateBBefore = stateOf(pidB);
       const settledB = await kernel.settled(pidB).catch(() => null);
+      // AFTER the settlement, not inferred from it: the claim below is that a held-open process still reads running.
+      const stateBAfter = stateOf(pidB);
       return {
+        aBound,
+        bBound,
+        pidA,
+        pidB,
+        expectedPorts: [3301, 3302],
+        ports: observedPorts(),
+        ownerOf3301: ownersOf(3301),
+        ownerOf3302: ownersOf(3302),
+        stateABefore: stateOf(pidA),
         stateBBefore,
+        stateBAfter,
         bStatus: bReply.statusCode,
         bBody: new TextDecoder().decode(bReply.body ?? new Uint8Array()),
         bExit: (settledB as { exitCode?: number } | null)?.exitCode ?? null,
         stateAAfter: stateOf(pidA),
-        ports: (kernel.ports() as readonly { port: number }[]).map((binding) => binding.port),
+        text: stdout,
       };
     } finally {
       kernel.stopServers([3301, 3302]);
@@ -198,15 +225,35 @@ test("one process cannot settle another, nor register a port in its name", async
     }
   }, { a: NEIGHBOUR_A, b: NEIGHBOUR_B });
 
+  // The premise every assertion below rests on, stated rather than assumed: both servers were listening, and each port
+  // belongs to the process that bound it. B still reads `running` when settled because a process that owns a listening
+  // port is held open past its result (ADR-0028), which is why its exit code travels in the settlement, not the row.
+  const diagnostic = JSON.stringify({
+    expectedPorts: outcome.expectedPorts,
+    observedPorts: outcome.ports,
+    ownerOf3301: outcome.ownerOf3301,
+    ownerOf3302: outcome.ownerOf3302,
+    pidA: outcome.pidA,
+    pidB: outcome.pidB,
+    states: { aBefore: outcome.stateABefore, aAfter: outcome.stateAAfter, bBefore: outcome.stateBBefore, bAfter: outcome.stateBAfter },
+    output: outcome.text,
+  });
+  expect(outcome.bBound, diagnostic).toBe(true);
+  expect(outcome.aBound, diagnostic).toBe(true);
+  expect(outcome.ownerOf3301, diagnostic).toEqual([outcome.pidA]);
+  expect(outcome.ownerOf3302, diagnostic).toEqual([outcome.pidB]);
+
   // B is a held-open server, so it serves and stays live until its own timer exits it with 5.
-  expect(outcome.stateBBefore).toBe("running");
+  expect(outcome.stateBBefore, diagnostic).toBe("running");
+  // ADR-0028 measured, not described: B owns a listening port, so its result arrives while the row still reads running.
+  expect(outcome.stateBAfter, diagnostic).toBe("running");
   expect(outcome.bStatus).toBe(200);
   expect(outcome.bBody).toBe("B");
   expect(outcome.bExit).toBe(5);
   // A forged a phantom 9999 and an early exit; neither landed, and A is still its own live server on 3301.
-  expect(outcome.ports).not.toContain(9999);
-  expect(outcome.ports).toContain(3301);
-  expect(outcome.stateAAfter).toBe("running");
+  expect(outcome.ports, diagnostic).not.toContain(9999);
+  expect(outcome.ports, diagnostic).toContain(3301);
+  expect(outcome.stateAAfter, diagnostic).toBe("running");
 });
 
 test("a Worker booted without the control port fails closed instead of running unsupervised", async ({ page }) => {
