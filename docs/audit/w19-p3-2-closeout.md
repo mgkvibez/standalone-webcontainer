@@ -51,23 +51,26 @@ So P3-1 could have deleted them. It did not, and the reason is per property rath
 - **`onmessageerror`**: it fires for a deserialisation failure on a `message` event from this channel, and no such event
   arrives after bootstrap, so no consumer remains that the kernel trusts. This one is reasoning from the channel's
   post-bootstrap state rather than a measured firing, and it is the weakest of the four.
-- **`close`**: a real operation, and deleting it would have an effect: a program could not terminate its own Worker. It is
-  preserved because self-termination is legitimate and reaches only the program's own process. It is **not** preserved
-  because the consequences are harmless, because they are not.
+- **`close`**: not a harmless no-op. Three parts, kept apart.
 
-  `close()` stops the Worker without sending the kernel a trusted `exit`, and nothing else reports it. The source is
-  clear on each link: `ProcessHost` reacts to `worker.onerror` and to trusted control messages, and
-  `DedicatedWorkerGlobalScope.close()` fires neither; `ProcessKernel.#serve`'s `catch`/`finally` closes the channel but
-  does not transition the process table; and the default process timeout is `0`, so nothing bounds the wait.
+  **Operation.** `close()` terminates the calling program's own Worker. It is not a route into another process, and
+  deleting the property would stop a program terminating itself.
 
-  Measured in Chromium: a program that prints, calls `close()`, then queues a timer prints nothing further (the Worker
-  really is gone) while `isAlive(pid)` still returns `true` 8.8 s later and `settled(pid)` is still pending. The process
-  stays `running` and a caller waiting on it waits indefinitely.
+  **Consequence.** The consequence is not confined to that Worker. The current host/kernel lifecycle does not observe or
+  settle the termination, and nothing else reports it. `close()` sends no trusted `exit`; `ProcessHost` reacts to
+  `worker.onerror` and to trusted control messages, and `DedicatedWorkerGlobalScope.close()` fires neither;
+  `ProcessKernel.#serve`'s `catch`/`finally` closes the channel but does not transition the process table; and the default
+  process timeout is `0`, so nothing bounds the wait. Measured in Chromium: a program that prints, calls `close()`, then
+  queues a timer prints nothing further (the Worker really is gone) while `isAlive(pid)` still returns `true` 8.8 s later
+  and `settled(pid)` is still pending. So the process stays counted as live, its caller stays pending indefinitely, and
+  it keeps occupying a slot in a process table whose limit counts live processes (`process-table.ts`, `maxProcesses`,
+  default 8), capacity no later run can reclaim.
 
-  **The lifecycle consequence is unresolved**, and it is recorded as an open limitation rather than presented as a
-  settled reason. What it is: a self-denial of service that also strands kernel bookkeeping. What it is not: a reach into
-  anything the kernel trusts. Closing the gap means observing Worker termination and settling the process on it, which is
-  a lifecycle decision outside P3-2's scope and is not implemented here.
+  **Decision.** P3-2 does not implement a lifecycle fix, and does not make a product-policy decision about whether
+  programs should keep this operation. What it records is the unresolved consequence. Closing it means observing Worker
+  termination and settling the process on it, which is a lifecycle decision outside this phase and is not implemented
+  here. Preservation is not justified here by any claim that the effects stay inside the program, because the measurement
+  shows they do not.
 
 `importScripts` is the genuinely inherited one.
 
@@ -147,7 +150,8 @@ removals. None of them is affected by this note, and none of them should be revi
 
 **No production implementation. P3-2 is closed with documented limitations.** Nothing prototype-owned is both safely
 removable and materially harmful, and the one significant capability (native `fetch`) is measurably recoverable after any
-shadow this project could apply. One finding is left open on purpose: `close()` terminates a process without a trusted
-`exit`, and the kernel is measured to keep that process `running` with its caller waiting. That is a lifecycle gap to
-decide separately, not a reason to delete the property. The Process Worker remains hardened by P3-1 against own-property ambient capabilities,
+shadow this project could apply. One finding is left open on purpose: `close()` terminates the calling program's Worker
+without a trusted `exit`, and the kernel is measured to keep that process counted as live, its caller pending, and its
+process-table slot occupied. That is a lifecycle gap to decide separately, and this note does not use it to justify
+preservation. The Process Worker remains hardened by P3-1 against own-property ambient capabilities,
 and it remains **not a sandbox**: ADR-0019 says so in those words and this phase does not change that.
