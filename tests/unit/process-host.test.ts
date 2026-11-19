@@ -576,3 +576,59 @@ describe("partial bootstrap (W-19 P2)", () => {
     expect(host.controlChannels()).not.toContain(pid);
   });
 });
+
+/**
+ * W-42: the close report arrives on the same private channel as `exit` and `failed`, so the ordering between them decides the
+ * outcome. These pin both orders at the host boundary, where the transition and the settlement actually happen.
+ */
+describe("process host: a close report after an exit", () => {
+  const boot = (holdOpen: (pid: number) => boolean) => {
+    const spawned: FakeWorker[] = [];
+    const settled: Array<{ pid: number; code: number }> = [];
+    const host = new ProcessHost({
+      maxProcesses: 2,
+      spawn: () => {
+        const worker = new FakeWorker();
+        spawned.push(worker);
+        return worker;
+      },
+      holdOpen,
+      onSettled: (pid, code) => {
+        settled.push({ pid, code });
+      },
+    });
+    return { host, spawned, settled };
+  };
+
+  it("keeps an ordinary process exited when the close report arrives late, and settles exactly once", async () => {
+    const { host, spawned, settled } = boot(() => false);
+    const { pid } = host.start({ argv: ["node", "a.js"] });
+
+    await spawned[0]?.emitTrusted({ type: "exit", code: 0 });
+    // The Worker is retired at exit, so this is the worst case: a report from a process that has already finished.
+    await spawned[0]?.emitTrusted({ type: "failed", reason: "worker closed itself" });
+
+    expect(host.table.get(pid)).toMatchObject({ state: "exited", exitCode: 0 });
+    expect(settled).toEqual([{ pid, code: 0 }]);
+    expect(host.table.live()).toHaveLength(0);
+  });
+
+  it("settles a held-open process once at its exit, then records the later close as a failed transition", async () => {
+    const { host, spawned, settled } = boot(() => true);
+    const { pid } = host.start({ argv: ["node", "server.js"] });
+
+    await spawned[0]?.emitTrusted({ type: "exit", code: 0 });
+    // Held open on purpose: settled, but still running, because it owns a listening port.
+    expect(host.table.get(pid)).toMatchObject({ state: "running" });
+    expect(settled).toEqual([{ pid, code: 0 }]);
+
+    // The Worker then closes itself. The answer to the caller must not be rewritten, but the table must stop pretending a
+    // dead server is still serving.
+    await spawned[0]?.emitTrusted({ type: "failed", reason: "worker closed itself" });
+
+    expect(host.table.get(pid)).toMatchObject({ state: "failed" });
+    expect(settled).toEqual([{ pid, code: 0 }]);
+    expect(spawned[0]?.terminated).toBe(true);
+    expect(host.table.live()).toHaveLength(0);
+  });
+});

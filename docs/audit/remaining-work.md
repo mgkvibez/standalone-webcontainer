@@ -113,3 +113,30 @@ and two defects in the *measurement*, not in the runtime. Every claimed pass was
   (hoisting), W-13's lifecycle-script policy, W-6/W-20 (the domain), and W-8 (freezing).
 | W-24 | A websocket could not cross into a process Worker | **Done 2026-11-12 (ADR-0032).** `ProcessTransportBroker.upgrade(port, path, headers)` sends `socket-open` to the process that owns the port, the process Worker hands the connection to the program's own listener through `gateway.upgrade`, and `relaySocket` — ONE function, run on both sides — posts `socket-data`/`socket-end`/`socket-close` under its own id space. The kernel links the pair BEFORE sending the open, so a handler's synchronously written `101` (or whatever protocol it switches to) has a socket to land in. The `WebSocketConnector` may now answer asynchronously, because across a thread boundary the acceptance IS a message. Proven by six unit tests over real `MessageChannel`s and `tests/browser/process-websocket.spec.ts` (a program in a process Worker computing its own accept key, client on the kernel side), with two mutations caught. | Closed. |
 | W-25 | A preview page cannot open a websocket, so a dev server can be previewed but not watched live | **Done 2026-11-12 (ADR-0033).** `public/preview-ws-client.js` is injected into every HTML document the preview serves, as the bytes stream (only a tag-length tail is held, so a `</head>` split across chunks still matches). The page's `WebSocket` is a facade over three page messages and four replies and frames nothing: `src/browser/socket-relay.ts` decides which URLs a page may open (its own host, the port from the URL when it names one because Vite asks for `ws://host:5173/`), and the runtime Worker hands the open to the container's own tested client via `kernel.upgrade`, so one framing implementation serves both. Three defects found on the way: the container client sent a subprotocol and never recorded the server's choice (and now fails the connection when the server names one that was not offered), a Blob-delivered frame silently became zero bytes (`binaryType` is now `arraybuffer` and the page client refuses a body it cannot turn into bytes), and the facade's `EventTarget.call(this)` was an illegal constructor. Proven by 25 unit tests and `tests/browser/preview-websocket.spec.ts`, where a real iframe runs the served client against a real program in a process Worker. | Closed. |
+
+## W-42 — a Worker that closes itself is reported (closed 2026-11-19)
+
+**Evidence:** ADR-0036, PR #111. The own `close` property is replaced before user code runs by a wrapper that reports
+`{type:"failed", reason:"worker closed itself"}` on the private control port, then always calls the original. The host's
+existing `failed` path performs the transition: no new table state, no new message type, no second settlement path.
+
+**Guarantee, exactly:** an instrumentable native `close()` call is reported, and the host settles that process as `failed`
+with a reason, releasing its slot. Measured before the fix (Chromium, W-19 P3-2): the process stayed `running`, `settled()`
+stayed pending, and its slot stayed occupied.
+
+**Not claimed:** general detection of silent Worker termination. OOM kills, devtools termination, crashes that never reach
+`worker.onerror`, a program that deletes or overwrites `close`, and engines where installation fails all remain
+unobserved. A liveness watchdog was designed and rejected for this phase: a synchronous Worker answers a ping late, not
+never, so a missed heartbeat proves unresponsiveness rather than death.
+
+**Tests:** 14 unit tests on the helper (one report across repeated closes, a throwing reporter still terminating, a
+throwing native close still propagating, three installation-failure paths, descriptor and metadata fidelity, termination
+with `Function.prototype.call`, `Function.prototype.apply` and `Reflect.apply` each replaced), 2 unit lifecycle tests on
+the host (late report after an ordinary exit stays `exited`; a held-open exit settles once and then transitions to
+`failed`), and 3 browser tests against a real `ProcessKernel` (settlement and slot recovery, held-open retirement, normal
+exit unchanged).
+
+**Mutation evidence:** three of four gates proven. try/catch to finally: 3 red. Reported guard removed: 2 red. Invocation
+via `nativeClose.call(scope)`: 1 red. **The fourth gate (`installed: false` unconditionally) is NOT proven**: the local
+browser lane reuses a running Vite server, so a source mutation is served from a cached transform and the spec passes
+against unmutated code. Recorded as unproven rather than claimed.
