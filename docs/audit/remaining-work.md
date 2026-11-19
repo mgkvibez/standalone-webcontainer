@@ -136,7 +136,4 @@ the host (late report after an ordinary exit stays `exited`; a held-open exit se
 `failed`), and 3 browser tests against a real `ProcessKernel` (settlement and slot recovery, held-open retirement, normal
 exit unchanged).
 
-**Mutation evidence:** three of four gates proven. try/catch to finally: 3 red. Reported guard removed: 2 red. Invocation
-via `nativeClose.call(scope)`: 1 red. **The fourth gate (`installed: false` unconditionally) is NOT proven**: the local
-browser lane reuses a running Vite server, so a source mutation is served from a cached transform and the spec passes
-against unmutated code. Recorded as unproven rather than claimed.
+**Mutation evidence:** four of four gates proven, each mutation applied to `src/process/close-report.ts` with the source restored between runs. Reporter `catch` removed: 3 red. Reported guard removed: 2 red. Installation skipped before the descriptor read: 1 red (browser spec fails with "the process never settled after close()"). Captured invocation replaced with `nativeClose.call(scope)`: 1 red. The first installation-gate attempt was an ineffective mutation, not a blind test: forcing `return { installed: false }` changed only the reported value, because `Object.defineProperty` still ran before the return, so the wrapper was installed.
