@@ -157,3 +157,5 @@ without a trusted `exit`, and the kernel is measured to keep that process counte
 process-table slot occupied. That is a lifecycle gap to decide separately, and this note does not use it to justify
 preservation. The Process Worker remains hardened by P3-1 against own-property ambient capabilities,
 and it remains **not a sandbox**: ADR-0019 says so in those words and this phase does not change that.
+
+**Update (W-42, 2026-11-19):** the `close` capability is now instrumented, so a program that closes its own Worker is reported and its process settles as `failed` (ADR-0036). Every measurement above stands unchanged, and so does its conclusion: every other form of silent Worker termination is still unobserved.
