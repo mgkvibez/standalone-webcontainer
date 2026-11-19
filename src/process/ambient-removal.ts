@@ -7,8 +7,9 @@
  * does not confine a program that is trying. Isolation is the separate origin, and only that.
  *
  * WHAT THIS PHASE MAY DO. Delete an OWN, CONFIGURABLE property from the process Worker's global object. That is the whole
- * mechanism, and it is deliberately the only one: shadowing a prototype-owned property is P3-2, and pretending a
- * `delete` blocked something it did not would make the phase's own tests lie.
+ * mechanism, and it is deliberately the only one. Shadowing an INHERITED property was P3-2's question, and P3-2 closed
+ * with no implementation (docs/audit/w19-p3-2-closeout.md): a shadow is recovered through prototype traversal, so
+ * pretending it blocked something would make the phase's own tests lie.
  *
  * WHY A REPORT RATHER THAN A LIST. `delete scope[name]` fails silently in two ways that look identical from the outside -
  * the property was never own, or it was own and non-configurable - and a removal module that assumed success would let a
@@ -35,17 +36,20 @@ export interface CapabilityAudit {
  *     (`src/process/quarantine.ts`). Removing them would break the runtime, and the capture is what stops a later phase
  *     from doing it by accident.
  *   - WebSocket, postMessage and onmessage are NOT captured references. WebSocket is a capability programs legitimately
- *     use for preview sockets (ADR-0033), served through the curated facade. postMessage and onmessage are
- *     prototype-owned members of the Worker scope, so deleting an own global property is not even the mechanism that
- *     could remove them; P3-2 owns whether to shadow them.
+ *     use for preview sockets (ADR-0033), served through the curated facade. postMessage and onmessage are own and
+ *     configurable, so this phase COULD delete them; they are preserved because the trust decision about the channel they
+ *     expose has already been made by P2, not because deletion is unavailable (see each entry's reason).
  */
 export const CAPABILITY_AUDIT: ReadonlyArray<CapabilityAudit> = [
   {
     name: "XMLHttpRequest",
     decision: "remove",
     reason:
-      "No occurrence in src/process, src/runtime or src/shims. HTTP from a program goes through the virtual fetch/XHR " +
-      "shim over the syscall channel, never through the browser's own request object.",
+      "No occurrence in src/process, src/runtime or src/shims: nothing in this realm uses the browser's request object, " +
+      "and a program's HTTP goes through the virtual fetch/XHR shims the runtime provides. Removing it does NOT " +
+      "establish network isolation. Native fetch is inherited from WorkerGlobalScope.prototype, so it stays reachable " +
+      "and usable here (measured in Chromium, W-19 P3-2); deleting this own property neither removes it nor routes it " +
+      "through the syscall channel. See docs/audit/w19-p3-2-closeout.md.",
   },
   {
     name: "BroadcastChannel",
@@ -82,17 +86,22 @@ export const CAPABILITY_AUDIT: ReadonlyArray<CapabilityAudit> = [
     name: "postMessage",
     decision: "preserve",
     reason:
-      "Prototype-owned on DedicatedWorkerGlobalScope, so deletion is not the mechanism and this phase must not fake one. " +
-      "The ordinary channel is already untrusted by construction: P2 ignores everything except the first `start` and " +
-      "blinds the handler once the control port is in hand.",
+      "Own, configurable DATA property on the global (measured in Chromium, W-19 P3-2), so this phase could delete it. It " +
+      "is preserved because the channel it writes to is already untrusted by construction: the host ignores everything " +
+      "except the first `start`, so a program posting here reaches a listener that discards it. Deleting it would remove a " +
+      "channel that already carries nothing the kernel believes. P3-1 removes capabilities with no consumer; this one has a " +
+      "consumer whose trust was decided by P2.",
   },
   {
     name: "onmessage",
     decision: "preserve",
     reason:
-      "Prototype-owned accessor. The bootstrap needs it to receive `start`, and P2 already disables it by assigning an own " +
-      "`null` once the port is in hand - the correct disable, in the correct place. Blocking the prototype accessor " +
-      "belongs to P3-2.",
+      "Own, configurable ACCESSOR with a setter on the global (measured in Chromium, W-19 P3-2). The bootstrap needs it to " +
+      "receive `start`; inside that handler P2 assigns an own `null` through the setter, which happens BEFORE the control " +
+      "port is installed and before user code runs. By the time this phase could delete it, the setter has already been " +
+      "invoked and the handler is inert, so deletion would change nothing a program can do: it can reassign `onmessage` " +
+      "and the host sends nothing further on that channel. Preserved because the bootstrap requires it and removing it " +
+      "afterwards is a no-op, not because deletion is unavailable.",
   },
 ];
 
