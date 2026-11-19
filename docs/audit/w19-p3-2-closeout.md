@@ -64,7 +64,9 @@ So P3-1 could have deleted them. It did not, and the reason is per property rath
   queues a timer prints nothing further (the Worker really is gone) while `isAlive(pid)` still returns `true` 8.8 s later
   and `settled(pid)` is still pending. So the process stays counted as live, its caller stays pending indefinitely, and
   it keeps occupying a slot in a process table whose limit counts live processes (`process-table.ts`, `maxProcesses`,
-  default 8), capacity no later run can reclaim.
+  default 8), capacity unavailable to later runs until the stranded process is explicitly killed or the owning kernel is
+  restarted. `kill()` can release the slot because the process is still `running`; what no later run can do is reclaim it
+  automatically.
 
   **Decision.** P3-2 does not implement a lifecycle fix, and does not make a product-policy decision about whether
   programs should keep this operation. What it records is the unresolved consequence. Closing it means observing Worker
