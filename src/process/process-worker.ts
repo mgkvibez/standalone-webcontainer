@@ -33,6 +33,8 @@ import { relaySocket } from "./process-transport.js";
 // globalThis and nothing is added to the facade: the bindings stay in that module's scope for the phases that restrict
 // ambient capabilities. This is preparation, not isolation - user code shares this realm either way.
 import "./quarantine.js";
+import { realmReferences } from "./quarantine.js";
+import { installCloseReport, type CloseInvoke, type CloseScope } from "./close-report.js";
 import { removeAmbientCapabilities } from "./ambient-removal.js";
 import { createRemoteWatcher, realTimerScheduler } from "./remote-watch.js";
 import { InProcessRuntime } from "../runtime/in-process.js";
@@ -220,6 +222,20 @@ async function run(start: StartMessage): Promise<void> {
     // user code has run yet. Capabilities go now - after the port, before the program - because removing them earlier would
     // break the bootstrap and removing them later would leave a window a program could use.
     removeAmbientCapabilities();
+
+    // W-42: a program that closes its own Worker sends no exit and fires no error, so the host would never learn. The
+    // reporter travels on the private control port, which is already in hand, and goes in before any user code can run.
+    // `Reflect.apply` is the P3-0 capture: read now, held here, so replacing Function.prototype.call later changes nothing.
+    const closeReport = installCloseReport(
+      globalThis as unknown as CloseScope,
+      sendControl,
+      realmReferences.Reflect.apply as unknown as CloseInvoke,
+    );
+    if (!closeReport.installed) {
+      console.warn(
+        `process bootstrap: close() is not instrumented (${closeReport.reason ?? "unknown"}), so a process that closes itself is not reported`,
+      );
+    }
 
     const client = new SyscallClient({ buffer: start.buffer, sizes: start.sizes });
     const fs = createRemoteFileSystem(client, { timeoutMs: SYSCALL_TIMEOUT_MS });
