@@ -15,6 +15,12 @@ The shell registers `/preview-sw.js` on the preview origin only. Its nested proj
 page, and the shell relays it through the transferred port to the Worker supervisor. The editor application's origin
 does not receive preview fetch events or expose its storage to preview code.
 
+The nonce is a **bearer capability, not a proof of client identity**. The worker accepts a preview request when the
+nonce matches a live shell client on the preview origin, so any same-origin client that presents a valid shell nonce
+exercises that shell's preview authority; the worker has no way to tell it apart from the shell itself. The capability
+is scoped to the shell's project kernel rather than to a port, because the port is taken from the request path. A
+request with no nonce, or one whose nonce matches no live shell, is refused with 503 and nothing is forwarded.
+
 Request and response bodies are limited to 16 MiB; headers are limited to 128 entries and 32 KiB total. The supervisor
 still has one serialized execution lane and buffered HTTP responses.
 

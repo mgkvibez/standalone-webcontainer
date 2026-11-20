@@ -2,6 +2,17 @@
  * W-15: the preview nonce is a bearer capability that travels in a URL, so the shipped service worker must accept it only
  * for the shell it was minted for.
  *
+ * The contract, in the order the worker applies it:
+ *
+ *   1. A request with no nonce is refused (503).
+ *   2. A request whose nonce matches no live shell on this origin is refused (503).
+ *   3. A request whose nonce matches a live shell is forwarded through that shell, with the nonce stripped first.
+ *
+ * Rule 3 is about the capability, never about the caller. The nonce is a BEARER capability: any same-origin client that
+ * presents a live shell's nonce exercises that shell's preview authority, and the worker has no way to tell it apart from
+ * the shell itself. What the capability is scoped to is the shell's project kernel, not an individual port: the port
+ * travels in the request path and is chosen by whoever asks.
+ *
  * These tests load `public/preview-sw.js` itself, not a copy and not a reimplementation, under a fake `self`. A rewrite of
  * the routing rules in TypeScript would pass while the shipped worker did something else, which is the failure mode this
  * file exists to prevent.
@@ -203,5 +214,33 @@ describe("W-15: preview nonce boundary", () => {
     const harness = loadWorker([makeClient("shell", shellUrl("nonce-shell-aaaaaaaaaaaa"))]);
     const response = await dispatch(harness, "https://elsewhere.example/preview/3000/");
     expect(response).toBeNull();
+  });
+
+  it("lets an unrelated same-origin client exercise the shell's authority by presenting its nonce", async () => {
+    const shell = makeClient("shell", shellUrl("nonce-shell-aaaaaaaaaaaa", 3000));
+    // A window on the same preview origin that is not a shell: no `__preview_shell`, no nonce of its own, its own URL.
+    const unrelated = makeClient("page", `${ORIGIN}/index.html`);
+    const harness = loadWorker([shell, unrelated]);
+
+    // No capability: refused, and nothing is forwarded.
+    const missing = await dispatch(harness, `${ORIGIN}/preview/3000/api`, "page");
+    expect(missing?.status).toBe(503);
+    expect(shell.posted).toHaveLength(0);
+
+    // A capability that belongs to no live shell: refused the same way.
+    const invalid = await dispatch(harness, `${ORIGIN}/preview/3000/api?__preview_nonce=nonce-nobody-has`, "page");
+    expect(invalid?.status).toBe(503);
+    expect(shell.posted).toHaveLength(0);
+
+    // The shell's real nonce, presented by the unrelated client: accepted, because the capability is what is checked.
+    const pending = dispatch(harness, `${ORIGIN}/preview/3000/api?__preview_nonce=nonce-shell-aaaaaaaaaaaa`, "page");
+    await waitForForward(shell);
+    // Authority came from the shell: it received the forward, the caller did not.
+    expect(unrelated.posted).toHaveLength(0);
+    const request = shell.posted[0]?.message["request"] as { readonly url: string };
+    expect(request.url).toBe("/preview/3000/api");
+    expect(request.url).not.toContain("__preview_nonce");
+    answer(shell);
+    expect((await pending)?.status).toBe(200);
   });
 });
