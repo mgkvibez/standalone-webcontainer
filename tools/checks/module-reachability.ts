@@ -72,6 +72,13 @@ export const ENTRIES: readonly Declaration[] = [
     reason: "Vite build input for the page bundle (`npm run build:browser`); nothing imports the HTML entry.",
   },
   {
+    module: "src/npm/lifecycle.ts",
+    kind: "known-stranded",
+    reason:
+      "W-43 Phase 2a: the lifecycle policy engine and its execution accounting. No production consumer yet because this runtime cannot spawn from inside a process (src/container/commands.ts refuses sh/bash/zsh and states there is no PATH and no process spawn), so running a script needs a kernel-level coordinator that does not exist. Registered rather than deleted so the default-deny policy is reviewable before it is wired.",
+    register: "W-43",
+  },
+  {
     module: "src/harness/index.ts",
     kind: "known-stranded",
     reason:
