@@ -167,3 +167,25 @@ current process summary remain authoritative for present-tense state.
 (state `failed`, ports 0, the next request refused, a control process unaffected); it does **not** assert the value a
 later `settled()` returns. First-wins across exit-then-failure is covered at the host boundary by the W-42 tests in
 `tests/unit/process-host.test.ts`.
+
+## W-43 — dependency lifecycle scripts (Phase 2a landed 2026-11-20, Phase 2b open)
+
+**Policy, approved:** default-deny with explicit per-project opt-in. A script's authority equals the program's, but the
+trust decision does not: `npm install` would otherwise execute transitive code the user never read, in the same realm,
+on the editor's origin.
+
+**Landed (Phase 2a):** `src/npm/lifecycle.ts` — the policy, npm's per-package order (`preinstall`/`install`/`postinstall`),
+deterministic dependency ordering, supported-form parsing (a single `node`/`npx` invocation; anything needing a shell is
+refused by name as `skipped-unsupported`), per-script timeout with a backstop that does not depend on the executor
+honouring its signal, a 1 MiB output cap with truncation recorded, and typed `InstallError` codes
+(`LIFECYCLE_FAILED`, `LIFECYCLE_TIMEOUT`, `LIFECYCLE_NO_EXECUTOR`). A non-zero exit throws, so a failed script cannot
+produce a successful install verdict. 12 unit tests, 5 mutation gates each red.
+
+**Not wired, and why:** the installer runs *inside* a process (`src/runtime/in-process.ts:492`, `src/container/container.ts:651`)
+and this runtime has no `child_process` and no shell (`src/container/commands.ts:54-56, 62, 67`). A lifecycle script must
+therefore run as a sibling process, which only the kernel can spawn. Phase 2b is that coordinator: `InProcessRuntime`
+reports pending scripts → `process-worker` posts them on the control channel → `ProcessHost` → `ProcessKernel` spawns each
+and folds the outcome into the install verdict. Precedent: the W-41 after-run path crosses the same boundary in four files.
+
+**Deliberately unchanged:** the `esbuild` → `esbuild-wasm` substitution (`src/npm/substitutions.ts:7-9`), which exists
+because esbuild spawns a native binary at module scope; a native binary cannot run in a browser under any policy.
